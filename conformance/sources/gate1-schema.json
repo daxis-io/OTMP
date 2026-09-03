@@ -1,0 +1,1 @@
+{"schema_id":1,"fields":[{"field_id":1,"name":"id","required":true,"type":{"type":"int64"}}],"identifier_field_ids":[1],"doc":"Gate 1 static fixture schema"}

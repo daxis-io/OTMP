@@ -1,0 +1,8 @@
+{
+  "cases": [
+    {"name":"null","value":{"type":"null"},"cbor_hex":"8200f6"},
+    {"name":"int64-42","value":{"type":"int64","value":"42"},"cbor_hex":"8203182a"},
+    {"name":"string-hello","value":{"type":"string","value":"hello"},"cbor_hex":"820b6568656c6c6f"},
+    {"name":"float32-negative-zero","value":{"type":"float32","value":"0x80000000"},"cbor_hex":"82044480000000"}
+  ]
+}

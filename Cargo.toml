@@ -1,0 +1,38 @@
+[workspace]
+members = ["otmp-protocol", "otmp", "otmp-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.2-alpha.0"
+edition = "2024"
+rust-version = "1.95.0"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+async-trait = "0.1.89"
+clap = { version = "4.5.47", features = ["derive"] }
+fs2 = "0.4.3"
+hex = "0.4.3"
+otmp-protocol = { path = "otmp-protocol", version = "=0.0.2-alpha.0" }
+otmp = { path = "otmp", version = "=0.0.2-alpha.0" }
+rusqlite = { version = "0.37.0", features = ["backup", "bundled"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+sha2 = "0.10.9"
+tempfile = "3.21.0"
+thiserror = "2.0.16"
+tokio = { version = "1.47.1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+uuid = { version = "1.18.1", features = ["serde", "v7"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

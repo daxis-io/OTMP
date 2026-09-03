@@ -1,0 +1,28 @@
+{
+  "partition_empty_spec_0": {
+    "tuple_cbor_hex": "a0",
+    "sha256": "sha256:ccfb742b5b154aa021458c91aa51ea9f21a48f690f7c20c1c036fc12b99e573b"
+  },
+  "intent": {
+    "canonical_body": "{\"files\":[],\"operation\":\"append\",\"target_ref\":\"main\"}",
+    "sha256": "sha256:f86a7a75e81a214e8a6cc358387251a951dd037f9e82c16e723ae2a0492e581f"
+  },
+  "genesis_state": {
+    "canonical_body": "{\"kind\":\"fixture\"}",
+    "sha256": "sha256:7b32d13f41181f5c93aeef7ee6fd8359d8c7c81392f297a36378cb6ab7f5e0a9"
+  },
+  "next_state": {
+    "previous": "sha256:7b32d13f41181f5c93aeef7ee6fd8359d8c7c81392f297a36378cb6ab7f5e0a9",
+    "canonical_body": "{\"kind\":\"next\"}",
+    "sha256": "sha256:d4a52c9b1c9e05bb5bdef452fc1f9231863b8bf237898c055bbcf105dd600599"
+  },
+  "image_root": {
+    "table_id_raw_hex": "07070707070707070707070707070707",
+    "table_version": 3,
+    "page_size": 4096,
+    "page_count": 12,
+    "checkpoint_sha256": "sha256:47320987f9a49d5b00119b960f247a956773f57543982b8bfcb6da5bb3afd9ef",
+    "page_map_sha256": null,
+    "sha256": "sha256:0f8059dcc089bdf236f7c1028455a46a9efed8e1b7bf1b5d5a24f372a1c20a3b"
+  }
+}

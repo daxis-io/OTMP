@@ -114,6 +114,15 @@ impl SemanticCommit {
                 "nonconsecutive table version".into(),
             ));
         }
+        if self
+            .parent_commit
+            .as_ref()
+            .is_some_and(|parent| parent.media_type.as_deref() != Some(COMMIT_MEDIA_TYPE))
+        {
+            return Err(ProtocolError::InvalidObject(
+                "incorrect parent commit media type".into(),
+            ));
+        }
         if self.intents.is_empty() || self.operations.is_empty() {
             return Err(ProtocolError::InvalidObject("empty semantic commit".into()));
         }

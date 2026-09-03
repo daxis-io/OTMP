@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use otmp_protocol::{
-    CanonicalValue, Field, Id, LogicalType, Schema, SemanticCommit, Sha256, TypedScalar,
-    canonical_json, decode_partition_tuple, decode_typed_scalar, partition_hash,
+    COMMIT_MEDIA_TYPE, CanonicalValue, Field, Id, LogicalType, Schema, SemanticCommit, Sha256,
+    TypedScalar, canonical_json, decode_partition_tuple, decode_typed_scalar, partition_hash,
 };
 use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
@@ -904,6 +904,23 @@ pub(crate) fn validate_commit_projection(
             ));
         }
     }
+    if let (Some(parent_version), Some(parent_reference)) =
+        (commit.parent_table_version, &commit.parent_commit)
+    {
+        let (uri, hash): (String, Vec<u8>) = connection.query_row(
+            "SELECT commit_object_uri, commit_object_sha256 FROM otmp_commits WHERE table_version=?1",
+            [sqlite_i64(parent_version.0, "parent table version")?],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if uri != parent_reference.uri.as_str()
+            || hash_from_blob(hash)? != parent_reference.sha256
+            || parent_reference.media_type.as_deref() != Some(COMMIT_MEDIA_TYPE)
+        {
+            return Err(RuntimeError::Corrupt(
+                "semantic parent commit differs from relational history".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1103,6 +1120,8 @@ fn hash_from_blob(blob: Vec<u8>) -> Result<Sha256, RuntimeError> {
 mod tests {
     use std::str::FromStr;
 
+    use otmp_protocol::{Generation, Head};
+
     use super::*;
 
     fn schema() -> Schema {
@@ -1216,5 +1235,38 @@ mod tests {
             error.to_string().contains("normalized field rows"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn commit_projection_rejects_a_parent_reference_that_disagrees_with_history() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../conformance/tables/append");
+        let head: Head =
+            canonical_json::from_slice_canonical(&fs::read(root.join("_otmp/HEAD")).unwrap())
+                .unwrap();
+        let commit: SemanticCommit = canonical_json::from_slice_canonical(
+            &fs::read(root.join(head.semantic_commit.uri.as_str())).unwrap(),
+        )
+        .unwrap();
+        let generation: Generation = canonical_json::from_slice_canonical(
+            &fs::read(root.join(head.metadata_generation.uri.as_str())).unwrap(),
+        )
+        .unwrap();
+        let image = materialize(
+            &fs::read(root.join(generation.metadata_image.checkpoint.uri.as_str())).unwrap(),
+        )
+        .unwrap();
+        validate_commit_projection(&image.path, &commit).unwrap();
+
+        let connection = Connection::open(&image.path).unwrap();
+        connection
+            .execute(
+                "UPDATE otmp_commits SET commit_object_sha256=zeroblob(32) WHERE table_version=0",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = validate_commit_projection(&image.path, &commit).unwrap_err();
+        assert!(error.to_string().contains("parent commit"), "{error}");
     }
 }

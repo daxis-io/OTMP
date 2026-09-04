@@ -1,9 +1,7 @@
-# OTMP 0.0.2-alpha Gate 1
+# OTMP 0.0.2-alpha
 
-This repository is a Rust proof of concept for a deliberately narrow,
-catalog-free, full-image subset of the Open Table Metadata Protocol.
+This repository is a Rust proof of concept for a baisc catalog free and full image subset of the Open Table Metadata Protocol (OTMP).
 
-The qualification target is documented in [docs/GATE-1.md](docs/GATE-1.md).
 
 ## Workspace
 
@@ -13,7 +11,7 @@ The workspace contains exactly three production crates:
   domain-separated hashes;
 - `otmp`: the catalog-free table runtime, SQLite image implementation, storage
   seam, staging, and publication state machine;
-- `otmp-cli`: a thin local-directory command adapter.
+- `otmp-cli`: a local-directory command adapter.
 
 `conformance/` contains language-neutral codec/hash fixtures and self-contained
 table packages. `tests/` contains the subprocess crash-evidence harness and is

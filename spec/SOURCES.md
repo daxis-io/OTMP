@@ -10,3 +10,18 @@ from the following local source artifacts before the Gate 1 clarification edits:
 
 The Markdown draft is intentionally amended in this repository without changing
 the protocol version. The schema is embedded and used verbatim by the Rust runtime.
+
+## Relational metadata prior art
+
+OTMP's single core relational model incorporates applicable lessons from open
+relational lakehouse metadata systems without adopting a compatibility schema or
+delegating OTMP transaction and storage semantics to them. The DuckLake 1.0
+metadata specification was consulted for snapshot-versioned schemas, files,
+delete files, statistics, partitioning, sorting, and catalog transaction prior
+art:
+
+- <https://ducklake.select/docs/stable/specification/introduction>
+- <https://ducklake.select/docs/stable/specification/tables/overview>
+
+These references are informative. The tracked OTMP specification and companion
+SQL schema remain authoritative for OTMP.

@@ -26,8 +26,22 @@ claim of complete Core Reader or Direct Writer conformance.
 - One non-empty atomic Parquet-descriptor append batch to `main` is supported.
   The runtime validates metadata assertions but treats Parquet contents as
   opaque bytes.
+- Gate 1 accepts only its exact `initialize_table` and `commit_snapshot`
+  operation shapes. It fails closed on every other core or extension operation
+  instead of silently treating an unimplemented semantic mutation as valid.
+- Pinning verifies the complete supported semantic projection: snapshot fields,
+  target ref, add-only change set, immutable file descriptors, partition
+  tuples and hashes, and file metrics must agree with the relational image.
+- The relational history has no snapshot at genesis and exactly one contiguous
+  append snapshot per positive table version. Gate 1 exposes exactly one
+  `main` branch, whose ancestry, current snapshot, and sequence allocator are
+  checked against that history before reads or writes proceed.
 - An idempotency key binds to the canonical logical intent. A committed retry
   returns the originally stored result, including the winning file identities.
+- Append commit metadata and snapshot metadata are independent stable intent
+  inputs. Commit metadata is projected only into semantic and relational commit
+  history; snapshot metadata is projected only into the snapshot operation and
+  relational snapshot row. Neither is propagated into the other.
 - Definite conditional-write conflicts repin and semantically rebase. A rebase
   preserves staged file identities and rebuilds the candidate from the winning
   relational state; it never merges SQLite pages.

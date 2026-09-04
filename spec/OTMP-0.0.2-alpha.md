@@ -112,7 +112,7 @@ OTMP 0.0.2-alpha is designed to provide:
 
 - A self-describing open table format.
 - Catalog-free reads and writes.
-- DuckLake-like relational metadata semantics at the individual-table boundary.
+- A normalized, versioned relational metadata model at the individual-table boundary.
 - Standard SQL access to table metadata.
 - Stable IDs independent of names.
 - Immutable snapshots and time travel.
@@ -544,7 +544,26 @@ Normal readers do not apply semantic commits before querying the current metadat
   ],
   "requirements": [],
   "operations": [
-    {"operation_id":"op-1","type":"commit_snapshot"}
+    {
+      "operation_id":"op-1",
+      "type":"commit_snapshot",
+      "target_ref":"main",
+      "snapshot":{
+        "snapshot_id":"018f31f4-2bbd-7e47-a8bd-e5c9b36d8b0c",
+        "parent_snapshot_id":null,
+        "sequence_number":"1",
+        "schema_id":"1",
+        "partition_spec_id":"0",
+        "sort_order_id":"0",
+        "operation":"append",
+        "summary":{},
+        "metadata":{}
+      },
+      "added_files":[],
+      "removed_file_ids":[],
+      "scan_projection":null,
+      "rebase_mode":"append-safe"
+    }
   ],
   "required_reader_features_after_commit": ["otmp.core.v2"],
   "required_writer_features_after_commit": ["otmp.core.v2"],
@@ -566,7 +585,7 @@ It:
 - creates schema ID `1` or another positive initial schema ID;
 - creates unpartitioned spec ID `0`;
 - creates unsorted order ID `0`;
-- creates branch `main`, whose snapshot MAY be null; and
+- creates branch `main` with a null snapshot; and
 - establishes the first semantic state hash.
 
 ### 9.4 Commit invariants
@@ -637,6 +656,38 @@ Each intent’s `result` object records stable outcomes useful for idempotent re
 ```
 
 A retry using the same idempotency key and intent hash MUST return the result stored for that intent, even when the intent was group-committed with other requests.
+
+### 9.8 Commit metadata and snapshot metadata
+
+Commit metadata is opaque caller-controlled metadata that describes the semantic
+transaction and its external execution or coordination context. It is stored in
+the semantic commit's top-level `metadata` object and in the corresponding
+`otmp_commits.metadata_json` row.
+
+Snapshot metadata is opaque caller-controlled metadata that describes one
+immutable table snapshot created by a `commit_snapshot` operation. It is stored
+in that operation's `snapshot.metadata` object and in the corresponding
+`otmp_snapshots.metadata_json` row.
+
+The top-level commit `metadata` value and every `snapshot.metadata` value MUST
+be JSON objects. A committed `commit_snapshot` operation MUST use the complete
+nested `snapshot` shape defined in Section 25.13. A reader MUST reject a flat
+snapshot encoding or an operation with missing or unknown core fields.
+
+An implementation MUST NOT implicitly copy, merge, or inherit commit metadata
+into snapshot metadata, or snapshot metadata into commit metadata. A caller MAY
+explicitly place related values in both when those values genuinely describe
+both semantic objects.
+
+Both metadata objects are stable semantic inputs and MUST participate
+independently in the caller's logical intent identity. An omitted metadata
+object and an empty metadata object MUST have the same logical intent identity.
+The two objects MUST remain unchanged across publication retries and semantic
+rebases.
+
+Attempt-local telemetry and runtime-assigned values, including retry counters,
+worker identities, trace IDs, candidate IDs, candidate timestamps, and current
+execution phase, MUST NOT be inserted into either object by the committer.
 
 ---
 
@@ -1873,7 +1924,12 @@ It defines:
 - initial required features;
 - unpartitioned spec `0`;
 - unsorted order `0`; and
-- `main` branch with a null snapshot or an optional initial snapshot.
+- `main` branch with a null snapshot.
+
+Version `0` MUST NOT create a snapshot. Initial data, when present, is committed
+by the first non-genesis `commit_snapshot` operation. This keeps snapshot
+creation aligned with the relational invariant that snapshots have a positive
+`committed_table_version`.
 
 It MUST NOT appear after version 0.
 
@@ -2038,7 +2094,8 @@ Example:
     "summary": {
       "added-data-files":"2",
       "added-records":"194244"
-    }
+    },
+    "metadata": {}
   },
   "added_files": [],
   "removed_file_ids": [],
@@ -2061,6 +2118,10 @@ Application effects:
 10. record optional scan projection references.
 
 `sequence_number` MAY be omitted by a client and assigned by the committer. The committed semantic object MUST contain the final assigned value.
+
+The caller-supplied `snapshot.metadata` object describes the created immutable
+data state. It is distinct from the semantic commit's top-level `metadata`
+object and from derived snapshot summary values.
 
 ### 25.14 `add_file_metrics`
 
@@ -2334,6 +2395,11 @@ The writer assigns:
 - operations;
 - final operation-assigned IDs and sequence numbers; and
 - post-commit feature sets.
+
+Caller-supplied commit metadata and the metadata of each proposed snapshot are
+part of logical intent identity. They remain stable when candidate-assigned
+versions, IDs, timestamps, parents, sequence numbers, hashes, and artifact URIs
+are regenerated during rebase.
 
 It computes the semantic state hash.
 
@@ -2674,6 +2740,16 @@ staging, one non-empty atomic Parquet-descriptor append batch to `main`, stable
 idempotent retry results, conditional-publication reconciliation, and append-safe
 semantic rebase using complete SQLite checkpoints and a null page map.
 
+The Gate 1 implementation accepts exactly one `initialize_table` operation at
+genesis and exactly one append-only `commit_snapshot` operation thereafter. It
+rejects every other core or extension operation. On pin, it verifies that the
+supported semantic operation agrees with the relational snapshot row, target
+ref, normalized summary, file-change set, immutable file descriptors,
+partition encodings and hashes, live-file projection, and file metrics.
+It also verifies the Gate 1 history shape: no genesis snapshot, one contiguous
+append snapshot per positive table version, one `main` branch, unbroken parent
+ancestry, and a sequence allocator equal to the current snapshot sequence.
+
 Gate 1 does not claim cloud correctness, Parquet semantic validation, page maps,
 remote VFS support, delete files, scan projections, garbage collection, managed
 coordination, complete Core Reader or Direct Writer conformance, or production
@@ -2945,6 +3021,65 @@ A catalog MAY expose OTMP tables through:
 - other adapters.
 
 Adapters MUST preserve OTMP semantics and MUST fail rather than silently discard required features.
+
+### 36.7 Application-defined catalog correlation
+
+A catalog MAY place stable correlation data in a semantic commit's top-level
+`metadata` object under a reverse-domain namespace it controls. OTMP assigns no
+standard meaning to those values in `0.0.2-alpha`, and defines no coordination
+object, core coordination field, or coordination feature flag.
+
+Correlation metadata:
+
+- is optional and opaque to ordinary OTMP readers;
+- MUST NOT alter OTMP operation, conflict, snapshot, ref, or file semantics;
+- MUST NOT make catalog access necessary to interpret the table;
+- is preserved in immutable semantic history;
+- is stable across retries and rebases; and
+- participates in logical intent identity when supplied by the caller.
+
+A successful OTMP participant commit is durable table state, but it is not
+proof that an enclosing catalog transaction committed. A catalog transaction
+identifier records correlation only. The catalog's own durable transaction
+record and atomic catalog-root publication determine the multi-table outcome.
+
+### 36.8 Catalog snapshot coordinates
+
+A catalog snapshot that resolves an OTMP table SHOULD pin at least:
+
+```text
+table ID
+table root
+table version
+semantic state SHA-256
+selected snapshot ID, or null for an empty table
+```
+
+It MAY additionally retain the semantic commit object SHA-256 for audit
+verification.
+
+A catalog snapshot SHOULD NOT treat `root_revision`, generation ID, checkpoint
+URI or hash, page-map root, or other physical metadata-generation details as
+semantic table identity. OTMP may replace the physical generation at the same
+table version and semantic state.
+
+### 36.9 Catalog visibility boundary
+
+Several successful OTMP `HEAD` replacements do not form one atomic cross-table
+primitive. A catalog providing multi-table atomic visibility first publishes
+and verifies its table-local participant commits, then atomically publishes one
+catalog transaction or root that resolves all participant semantic coordinates.
+
+Direct readers opening individual table roots may observe participant commits
+before the catalog root is published when those commits move public refs. A
+catalog requiring stronger isolation may prepare snapshots on catalog-owned
+private refs and resolve them only through its catalog snapshot. Prepared-ref
+lifecycle and catalog recovery remain outside the normative OTMP table schema.
+
+An OTMP commit cannot be physically uncommitted after a successful `HEAD`
+replacement. Catalog recovery therefore rolls forward, publishes the catalog
+snapshot, compensates with later semantic commits, or abandons privately
+prepared states. It does not destructively roll back immutable OTMP history.
 
 ---
 
@@ -3473,6 +3608,18 @@ OTMP does not promise simultaneous final publication of contradictory changes to
 
 Many writers perform data production and candidate construction concurrently; the final table root is ordered, as it is in other transactional table formats and databases.
 
+### 43.13 Incorporate relational metadata lessons into one core model
+
+**Rejected design:** maintain a separate compatibility schema or branded
+metadata profile alongside the OTMP relational model.
+
+**Decision:** OTMP has one core relational metadata model. It incorporates
+applicable lessons from relational lakehouse prior art—such as stable identity,
+versioned schema and file state, explicit statistics, delete metadata, and
+ready-to-query current state—while retaining OTMP's own names, invariants,
+single-table atomicity domain, and storage protocol. Compatibility with another
+format is not implied.
+
 ---
 
 ## 44. Alpha limitations and open questions
@@ -3691,6 +3838,15 @@ A conforming implementation SHOULD pass fixtures covering:
 23. Catalog-free read using only a table URI.
 24. Catalog-coordinated write producing identical open artifacts.
 25. Upstream SQLite and Turso round-trip compatibility for the normative schema.
+26. Commit and snapshot metadata remain distinct in semantic and relational state.
+27. Changing either metadata object changes logical intent identity.
+28. Semantic snapshot metadata divergence from the relational snapshot row is rejected.
+29. A malformed or flat `commit_snapshot` semantic operation is rejected before relational projection.
+30. Every `commit_snapshot` operation maps to exactly one relational snapshot row created at the same table version.
+31. Genesis rejects an initial snapshot and the first data snapshot is committed at a positive table version.
+32. A Gate 1 reader rejects unknown, extension, and otherwise unsupported semantic operations rather than silently projecting them.
+33. Mutating any supported snapshot, ref, file-change, immutable file-descriptor, partition, or metric projection causes pin validation to fail.
+34. A Gate 1 image rejects genesis/future snapshots, extra or malformed refs, truncated ancestry, and stale or advanced sequence allocator state.
 
 ---
 

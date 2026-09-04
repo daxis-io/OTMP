@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use otmp::{
-    AppendFile, AppendRequest, FileFormat, FileMetric, InitializeRequest, LocalObjectStore,
-    RuntimeError, SourceFingerprint, Table,
+    AppendFile, AppendRequest, CommitMetadata, FileFormat, FileMetric, InitializeRequest,
+    LocalObjectStore, RuntimeError, SnapshotMetadata, SourceFingerprint, Table,
 };
 use otmp_protocol::{CanonicalValue, Schema, Sha256, TypedScalar, canonical_json};
 use serde::Deserialize;
@@ -62,7 +62,9 @@ struct AppendManifest {
     #[serde(default)]
     summary: BTreeMap<String, CanonicalValue>,
     #[serde(default)]
-    application_metadata: BTreeMap<String, CanonicalValue>,
+    commit_metadata: CommitMetadata,
+    #[serde(default)]
+    snapshot_metadata: SnapshotMetadata,
 }
 
 #[derive(Deserialize)]
@@ -147,7 +149,16 @@ async fn run(cli: Cli) -> Result<serde_json::Value, RuntimeError> {
         }
         Command::Append { table, manifest } => {
             let bytes = tokio::fs::read(manifest).await?;
-            canonical_json::parse(&bytes)?;
+            let value = canonical_json::parse(&bytes)?;
+            if matches!(
+                &value,
+                CanonicalValue::Object(fields) if fields.contains_key("application_metadata")
+            ) {
+                return Err(RuntimeError::InvalidAppend(
+                    "application_metadata was replaced by commit_metadata, which describes the semantic transaction; snapshot_metadata describes the immutable snapshot; the old value is not copied automatically"
+                        .into(),
+                ));
+            }
             let manifest: AppendManifest = serde_json::from_slice(&bytes)
                 .map_err(|error| RuntimeError::InvalidAppend(error.to_string()))?;
             let request = AppendRequest {
@@ -173,7 +184,8 @@ async fn run(cli: Cli) -> Result<serde_json::Value, RuntimeError> {
                     })
                     .collect(),
                 summary: manifest.summary,
-                application_metadata: manifest.application_metadata,
+                commit_metadata: manifest.commit_metadata,
+                snapshot_metadata: manifest.snapshot_metadata,
             };
             let table = Table::new(LocalObjectStore::new(table)?);
             Ok(serde_json::to_value(table.append_files(&request).await?)

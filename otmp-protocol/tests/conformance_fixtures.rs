@@ -22,6 +22,20 @@ fn language_neutral_hash_fixtures_match() {
         intent_hash(intent["canonical_body"].as_str().unwrap().as_bytes()),
         Sha256::from_str(intent["sha256"].as_str().unwrap()).unwrap()
     );
+    for name in [
+        "metadata_split_intent",
+        "metadata_split_commit_changed",
+        "metadata_split_snapshot_changed",
+    ] {
+        let split_intent = &fixture[name];
+        let split_body = split_intent["canonical_body"].as_str().unwrap();
+        canonical_json::parse_canonical(split_body.as_bytes()).unwrap();
+        assert_eq!(
+            intent_hash(split_body.as_bytes()),
+            Sha256::from_str(split_intent["sha256"].as_str().unwrap()).unwrap(),
+            "{name}"
+        );
+    }
     let genesis = &fixture["genesis_state"];
     let genesis_hash = genesis_state_hash(genesis["canonical_body"].as_str().unwrap().as_bytes());
     assert_eq!(

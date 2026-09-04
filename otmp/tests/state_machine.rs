@@ -4,11 +4,15 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use otmp::{
-    AppendFile, AppendRequest, AppendRetryPolicy, ConditionalWriteOutcome, FileFormat,
-    InMemoryObjectStore, InitializeRequest, InjectedConditional, ObjectStore, ObjectVersion,
-    SourceFingerprint, StorageError, Table,
+    AppendFile, AppendRequest, AppendResult, AppendRetryPolicy, CommitMetadata,
+    ConditionalWriteOutcome, FileFormat, InMemoryObjectStore, InitializeRequest,
+    InjectedConditional, ObjectStore, ObjectVersion, SnapshotMetadata, SourceFingerprint,
+    StorageError, Table,
 };
-use otmp_protocol::{Field, LogicalType, RelativeUri, Schema, Sha256};
+use otmp_protocol::{
+    CanonicalValue, Field, Generation, Head, LogicalType, RelativeUri, Schema, SemanticCommit,
+    Sha256, canonical_json,
+};
 use tokio::io::AsyncRead;
 
 fn schema() -> Schema {
@@ -48,6 +52,10 @@ fn request(path: std::path::PathBuf, bytes: &[u8], key: &str) -> AppendRequest {
             metadata: BTreeMap::new(),
         }],
     )
+}
+
+fn metadata(namespace: &str, value: &str) -> BTreeMap<String, CanonicalValue> {
+    BTreeMap::from([(namespace.into(), CanonicalValue::String(value.into()))])
 }
 
 async fn setup() -> (
@@ -106,6 +114,52 @@ async fn definite_conflict_rebases_without_changing_staged_identity() {
     assert_eq!(result.files[0].file_id, file_id);
     assert_eq!(result.files[0].uri, uri);
     assert_eq!(result.table_version, 1);
+}
+
+#[tokio::test]
+async fn append_safe_rebase_preserves_commit_and_snapshot_metadata() {
+    let (directory, store, table) = setup().await;
+    let bytes = b"metadata";
+    let path = directory.path().join("metadata.parquet");
+    tokio::fs::write(&path, bytes).await.unwrap();
+    let mut request = request(path, bytes, "metadata-rebase");
+    let commit_metadata = BTreeMap::from([(
+        "com.example.catalog".into(),
+        CanonicalValue::String("transaction-1".into()),
+    )]);
+    let snapshot_metadata = BTreeMap::from([(
+        "com.example.pipeline".into(),
+        CanonicalValue::String("watermark-1".into()),
+    )]);
+    request.commit_metadata = CommitMetadata::from(commit_metadata.clone());
+    request.snapshot_metadata = SnapshotMetadata::from(snapshot_metadata.clone());
+    store.inject_conditional(InjectedConditional::Conflict);
+
+    table.append_files(&request).await.unwrap();
+
+    let head: Head = canonical_json::from_slice_canonical(
+        &store
+            .read(&"_otmp/HEAD".parse().unwrap())
+            .await
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    let commit: SemanticCommit = canonical_json::from_slice_canonical(
+        &store.read(&head.semantic_commit.uri).await.unwrap().bytes,
+    )
+    .unwrap();
+    assert_eq!(commit.metadata, CanonicalValue::Object(commit_metadata));
+    let CanonicalValue::Object(operation) = &commit.operations[0] else {
+        panic!("commit_snapshot operation must be an object");
+    };
+    let Some(CanonicalValue::Object(snapshot)) = operation.get("snapshot") else {
+        panic!("commit_snapshot snapshot must be an object");
+    };
+    assert_eq!(
+        snapshot.get("metadata"),
+        Some(&CanonicalValue::Object(snapshot_metadata))
+    );
 }
 
 #[tokio::test]
@@ -347,6 +401,76 @@ impl ObjectStore for TwoWriterStore {
     }
 }
 
+async fn assert_rebased_metadata(
+    store: &TwoWriterStore,
+    checkpoint_path: &std::path::Path,
+    winner: &AppendResult,
+    rebased: &AppendResult,
+    expected_commit_metadata: BTreeMap<String, CanonicalValue>,
+    expected_snapshot_metadata: BTreeMap<String, CanonicalValue>,
+) {
+    assert_eq!(rebased.table_version, 2);
+    let head: Head = canonical_json::from_slice_canonical(
+        &store
+            .read(&"_otmp/HEAD".parse().unwrap())
+            .await
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    let commit: SemanticCommit = canonical_json::from_slice_canonical(
+        &store.read(&head.semantic_commit.uri).await.unwrap().bytes,
+    )
+    .unwrap();
+    assert_eq!(
+        commit.metadata,
+        CanonicalValue::Object(expected_commit_metadata)
+    );
+    let CanonicalValue::Object(operation) = &commit.operations[0] else {
+        panic!("commit_snapshot operation must be an object");
+    };
+    let Some(CanonicalValue::Object(snapshot)) = operation.get("snapshot") else {
+        panic!("commit_snapshot snapshot must be an object");
+    };
+    assert_eq!(
+        snapshot.get("parent_snapshot_id"),
+        Some(&CanonicalValue::String(winner.snapshot_id.to_string()))
+    );
+    assert_eq!(
+        snapshot.get("metadata"),
+        Some(&CanonicalValue::Object(expected_snapshot_metadata))
+    );
+    let generation: Generation = canonical_json::from_slice_canonical(
+        &store
+            .read(&head.metadata_generation.uri)
+            .await
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    let checkpoint = store
+        .read(&generation.metadata_image.checkpoint.uri)
+        .await
+        .unwrap();
+    tokio::fs::write(checkpoint_path, checkpoint.bytes)
+        .await
+        .unwrap();
+    let connection = rusqlite::Connection::open(checkpoint_path).unwrap();
+    let (stored_version, stored_snapshot_metadata): (i64, String) = connection
+        .query_row(
+            "SELECT committed_table_version, metadata_json FROM otmp_snapshots WHERE snapshot_id=?1",
+            [rebased.snapshot_id.as_bytes().as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored_version, 2);
+    assert_eq!(
+        stored_snapshot_metadata,
+        String::from_utf8(canonical_json::to_vec(snapshot.get("metadata").unwrap()).unwrap())
+            .unwrap()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_appends_from_one_parent_rebase_and_both_become_live() {
     let directory = tempfile::tempdir().unwrap();
@@ -360,20 +484,68 @@ async fn two_appends_from_one_parent_rebase_and_both_become_live() {
     let b = directory.path().join("b.parquet");
     tokio::fs::write(&a, b"a").await.unwrap();
     tokio::fs::write(&b, b"b").await.unwrap();
+    let commit_metadata_a = metadata("com.example.catalog", "transaction-a");
+    let snapshot_metadata_a = metadata("com.example.pipeline", "watermark-a");
+    let commit_metadata_b = metadata("com.example.catalog", "transaction-b");
+    let snapshot_metadata_b = metadata("com.example.pipeline", "watermark-b");
+    let mut request_a = request(a, b"a", "a");
+    request_a.commit_metadata = CommitMetadata::from(commit_metadata_a.clone());
+    request_a.snapshot_metadata = SnapshotMetadata::from(snapshot_metadata_a.clone());
+    let mut request_b = request(b, b"b", "b");
+    request_b.commit_metadata = CommitMetadata::from(commit_metadata_b.clone());
+    request_b.snapshot_metadata = SnapshotMetadata::from(snapshot_metadata_b.clone());
+    let table_id = table.pin().await.unwrap().status().table_id;
+    let staged_a = table
+        .stage_file(table_id, 0, &request_a.files[0])
+        .await
+        .unwrap();
+    let staged_b = table
+        .stage_file(table_id, 0, &request_b.files[0])
+        .await
+        .unwrap();
+    let staged_identities = [
+        (staged_a.file_id(), staged_a.uri().clone()),
+        (staged_b.file_id(), staged_b.uri().clone()),
+    ];
+    let staged_a = [staged_a];
+    let staged_b = [staged_b];
     store.enabled.store(true, Ordering::SeqCst);
-    let request_a = request(a, b"a", "a");
-    let request_b = request(b, b"b", "b");
 
     let (left, right) = tokio::join!(
-        table.append_files(&request_a),
-        table.append_files(&request_b),
+        table.commit_staged_files(&request_a, &staged_a),
+        table.commit_staged_files(&request_b, &staged_b),
     );
     let left = left.unwrap();
     let right = right.unwrap();
 
     assert_ne!(left.snapshot_id, right.snapshot_id);
+    assert_eq!(
+        (left.files[0].file_id, left.files[0].uri.clone()),
+        staged_identities[0]
+    );
+    assert_eq!(
+        (right.files[0].file_id, right.files[0].uri.clone()),
+        staged_identities[1]
+    );
     assert_eq!(table.pin().await.unwrap().status().table_version, 2);
     assert_eq!(table.pin().await.unwrap().files("main").unwrap().len(), 2);
+
+    let (winner, rebased, expected_commit_metadata, expected_snapshot_metadata) =
+        if left.table_version == 1 {
+            (&left, &right, commit_metadata_b, snapshot_metadata_b)
+        } else {
+            (&right, &left, commit_metadata_a, snapshot_metadata_a)
+        };
+    let checkpoint_path = directory.path().join("rebased.sqlite3");
+    assert_rebased_metadata(
+        &store,
+        &checkpoint_path,
+        winner,
+        rebased,
+        expected_commit_metadata,
+        expected_snapshot_metadata,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

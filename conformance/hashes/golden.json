@@ -7,6 +7,18 @@
     "canonical_body": "{\"files\":[],\"operation\":\"append\",\"target_ref\":\"main\"}",
     "sha256": "sha256:f86a7a75e81a214e8a6cc358387251a951dd037f9e82c16e723ae2a0492e581f"
   },
+  "metadata_split_intent": {
+    "canonical_body": "{\"commit_metadata\":{\"com.example.catalog\":{\"transaction_id\":\"txn-1\"}},\"files\":[],\"operation\":\"append\",\"snapshot_metadata\":{\"com.example.pipeline\":{\"watermark\":\"one\"}},\"target_ref\":\"main\"}",
+    "sha256": "sha256:1d9c93ecf1d38f49051c4d6ed171b0f9efaaeda07c7e8f97b3ba65039561c347"
+  },
+  "metadata_split_commit_changed": {
+    "canonical_body": "{\"commit_metadata\":{\"com.example.catalog\":{\"transaction_id\":\"txn-2\"}},\"files\":[],\"operation\":\"append\",\"snapshot_metadata\":{\"com.example.pipeline\":{\"watermark\":\"one\"}},\"target_ref\":\"main\"}",
+    "sha256": "sha256:834d3d4fee1ef47cc8425023c69c37ac42405c129d6b9a9224d76d30dabe884d"
+  },
+  "metadata_split_snapshot_changed": {
+    "canonical_body": "{\"commit_metadata\":{\"com.example.catalog\":{\"transaction_id\":\"txn-1\"}},\"files\":[],\"operation\":\"append\",\"snapshot_metadata\":{\"com.example.pipeline\":{\"watermark\":\"two\"}},\"target_ref\":\"main\"}",
+    "sha256": "sha256:70b85988c17c7e929fb7d142e5514bee4c6d86fa3aeda9cf95cba754a8e1de42"
+  },
   "genesis_state": {
     "canonical_body": "{\"kind\":\"fixture\"}",
     "sha256": "sha256:7b32d13f41181f5c93aeef7ee6fd8359d8c7c81392f297a36378cb6ab7f5e0a9"

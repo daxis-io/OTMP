@@ -2,11 +2,112 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use otmp_protocol::{
-    COMMIT_MEDIA_TYPE, CanonicalValue, FeatureSet, Field, GENERATION_MEDIA_TYPE, Head, Id, JsonU64,
-    LogicalType, ObjectReference, ProtocolError, RelativeUri, Schema, Sha256, TypedScalar,
-    UuidValue, canonical_json, decode_partition_tuple, decode_typed_scalar, encode_partition_tuple,
-    encode_typed_scalar, image_root_hash,
+    COMMIT_MEDIA_TYPE, CanonicalValue, FeatureSet, Field, GENERATION_MEDIA_TYPE, Head, Id,
+    IntentRecord, JsonI64, JsonU64, LogicalType, ObjectReference, ProtocolError, RelativeUri,
+    Schema, SemanticCommit, Sha256, TypedScalar, UuidValue, canonical_json, decode_partition_tuple,
+    decode_typed_scalar, encode_partition_tuple, encode_typed_scalar, image_root_hash,
 };
+
+fn object<const N: usize>(entries: [(&str, CanonicalValue); N]) -> CanonicalValue {
+    CanonicalValue::Object(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+}
+
+fn string(value: &str) -> CanonicalValue {
+    CanonicalValue::String(value.to_owned())
+}
+
+fn valid_snapshot_commit() -> SemanticCommit {
+    let operation = object([
+        ("operation_id", string("append-main")),
+        ("type", string("commit_snapshot")),
+        ("target_ref", string("main")),
+        (
+            "snapshot",
+            object([
+                (
+                    "snapshot_id",
+                    string("018f31f4-2bbd-7e47-a8bd-e5c9b36d8b0c"),
+                ),
+                ("parent_snapshot_id", CanonicalValue::Null),
+                ("sequence_number", string("1")),
+                ("schema_id", string("1")),
+                ("partition_spec_id", string("0")),
+                ("sort_order_id", string("0")),
+                ("operation", string("append")),
+                ("summary", object([])),
+                ("metadata", object([])),
+            ]),
+        ),
+        ("added_files", CanonicalValue::Array(Vec::new())),
+        ("removed_file_ids", CanonicalValue::Array(Vec::new())),
+        ("scan_projection", CanonicalValue::Null),
+        ("rebase_mode", string("append-safe")),
+    ]);
+    SemanticCommit {
+        kind: "otmp.semantic-commit".into(),
+        format_version: 1,
+        table_id: "018f31f4-2bbd-7e47-a8bd-e5c9b36d8b0a".parse().unwrap(),
+        table_version: JsonU64(1),
+        parent_table_version: Some(JsonU64(0)),
+        commit_id: "018f31f4-2bbd-7e47-a8bd-e5c9b36d8b0b".parse().unwrap(),
+        parent_commit: Some(ObjectReference {
+            uri: "_otmp/commits/0/parent.json".parse().unwrap(),
+            sha256: Sha256::digest(b"parent"),
+            length: None,
+            media_type: Some(COMMIT_MEDIA_TYPE.into()),
+        }),
+        created_at_ms: JsonI64(1),
+        intents: vec![IntentRecord {
+            key: "append".into(),
+            intent_sha256: Sha256::digest(b"intent"),
+            operation_ids: vec!["append-main".into()],
+            result: object([]),
+        }],
+        requirements: Vec::new(),
+        operations: vec![operation],
+        required_reader_features_after_commit: FeatureSet::new(vec!["otmp.core.v2".into()])
+            .unwrap(),
+        required_writer_features_after_commit: FeatureSet::new(vec!["otmp.core.v2".into()])
+            .unwrap(),
+        previous_semantic_state_sha256: Some(Sha256::digest(b"previous")),
+        semantic_state_sha256: Sha256::digest(b"current"),
+        metadata: object([]),
+    }
+}
+
+fn valid_gate1_snapshot_commit() -> SemanticCommit {
+    let mut commit = valid_snapshot_commit();
+    let CanonicalValue::Object(operation) = &mut commit.operations[0] else {
+        unreachable!();
+    };
+    operation.insert(
+        "added_files".into(),
+        CanonicalValue::Array(vec![object([
+            ("file_id", string("018f31f4-2bbd-7e47-a8bd-e5c9b36d8b0d")),
+            ("uri", string("data/file.parquet")),
+            ("object_identity", CanonicalValue::Null),
+            ("file_format", string("parquet")),
+            ("file_size_bytes", string("10")),
+            ("record_count", string("1")),
+            ("schema_id", string("1")),
+            ("partition_spec_id", string("0")),
+            ("sort_order_id", string("0")),
+            (
+                "content_sha256",
+                string(&Sha256::digest(b"file").to_string()),
+            ),
+            ("partition_values", object([])),
+            ("metrics", CanonicalValue::Array(Vec::new())),
+            ("metadata", object([])),
+        ])]),
+    );
+    commit
+}
 
 #[test]
 fn canonical_json_sorts_keys_and_uses_minimal_encoding() {
@@ -427,4 +528,139 @@ fn canonical_value_rejects_integer_overflow() {
     assert!(matches!(parsed, Err(ProtocolError::IntegerOutOfRange)));
     let value = CanonicalValue::Object(BTreeMap::new());
     assert_eq!(canonical_json::encode(&value).unwrap(), b"{}");
+}
+
+#[test]
+fn semantic_commit_rejects_malformed_commit_snapshot_shapes() {
+    let valid = valid_snapshot_commit();
+    valid.validate().unwrap();
+
+    let mut non_object_metadata = valid.clone();
+    non_object_metadata.metadata = CanonicalValue::Null;
+    assert!(non_object_metadata.validate().is_err());
+
+    let mut missing_snapshot = valid.clone();
+    let CanonicalValue::Object(operation) = &mut missing_snapshot.operations[0] else {
+        unreachable!();
+    };
+    operation.remove("snapshot");
+    assert!(missing_snapshot.validate().is_err());
+
+    let mut flat_snapshot = valid.clone();
+    let CanonicalValue::Object(operation) = &mut flat_snapshot.operations[0] else {
+        unreachable!();
+    };
+    operation.remove("snapshot");
+    operation.insert(
+        "snapshot_id".into(),
+        string("018f31f4-2bbd-7e47-a8bd-e5c9b36d8b0c"),
+    );
+    assert!(flat_snapshot.validate().is_err());
+
+    let mut missing_snapshot_metadata = valid.clone();
+    let CanonicalValue::Object(operation) = &mut missing_snapshot_metadata.operations[0] else {
+        unreachable!();
+    };
+    let Some(CanonicalValue::Object(snapshot)) = operation.get_mut("snapshot") else {
+        unreachable!();
+    };
+    snapshot.remove("metadata");
+    assert!(missing_snapshot_metadata.validate().is_err());
+
+    let mut wrong_snapshot_version = valid;
+    let CanonicalValue::Object(operation) = &mut wrong_snapshot_version.operations[0] else {
+        unreachable!();
+    };
+    let Some(CanonicalValue::Object(snapshot)) = operation.get_mut("snapshot") else {
+        unreachable!();
+    };
+    snapshot.insert("sequence_number".into(), string("01"));
+    assert!(wrong_snapshot_version.validate().is_err());
+
+    let mut malformed_file = valid_snapshot_commit();
+    let CanonicalValue::Object(operation) = &mut malformed_file.operations[0] else {
+        unreachable!();
+    };
+    operation.insert(
+        "added_files".into(),
+        CanonicalValue::Array(vec![object([])]),
+    );
+    assert!(malformed_file.validate().is_err());
+}
+
+#[test]
+fn semantic_commit_rejects_a_malformed_initialize_operation() {
+    let mut commit = valid_snapshot_commit();
+    commit.table_version = JsonU64(0);
+    commit.parent_table_version = None;
+    commit.parent_commit = None;
+    commit.previous_semantic_state_sha256 = None;
+    commit.operations = vec![object([
+        ("operation_id", string("append-main")),
+        ("type", string("initialize_table")),
+    ])];
+
+    assert!(commit.validate().is_err());
+}
+
+#[test]
+fn semantic_commit_rejects_initial_snapshots_and_unqualified_unknown_operations() {
+    let mut genesis: SemanticCommit = canonical_json::from_slice_canonical(include_bytes!(
+        "../../conformance/tables/genesis/_otmp/commits/0/01a067c2-4891-7c40-9557-0edcdf176cee.json"
+    ))
+    .unwrap();
+    let valid_snapshot = valid_snapshot_commit();
+    let CanonicalValue::Object(snapshot_operation) = &valid_snapshot.operations[0] else {
+        unreachable!();
+    };
+    let snapshot = snapshot_operation.get("snapshot").unwrap().clone();
+    let CanonicalValue::Object(initialize) = &mut genesis.operations[0] else {
+        unreachable!();
+    };
+    initialize.insert("snapshot".into(), snapshot);
+    assert!(genesis.validate().is_err());
+
+    for operation_type in ["", "commit_snapsh0t", "set_properties"] {
+        let mut commit = valid_snapshot_commit();
+        let CanonicalValue::Object(operation) = &mut commit.operations[0] else {
+            unreachable!();
+        };
+        operation.insert("type".into(), string(operation_type));
+        assert!(commit.validate().is_err(), "accepted {operation_type:?}");
+    }
+
+    let mut extension = valid_snapshot_commit();
+    let CanonicalValue::Object(operation) = &mut extension.operations[0] else {
+        unreachable!();
+    };
+    operation.insert("type".into(), string("com.example.extension"));
+    extension.validate().unwrap();
+    assert!(extension.validate_gate1().is_err());
+}
+
+#[test]
+fn gate1_semantic_validation_rejects_malformed_file_descriptors() {
+    let valid = valid_gate1_snapshot_commit();
+    valid.validate_gate1().unwrap();
+
+    for (field, value) in [
+        ("uri", string("../escape.parquet")),
+        ("file_format", string("orc")),
+        ("file_size_bytes", string("9223372036854775808")),
+        ("schema_id", string("2")),
+        ("content_sha256", string("not-a-hash")),
+    ] {
+        let mut malformed = valid.clone();
+        let CanonicalValue::Object(operation) = &mut malformed.operations[0] else {
+            unreachable!();
+        };
+        let Some(CanonicalValue::Array(files)) = operation.get_mut("added_files") else {
+            unreachable!();
+        };
+        let CanonicalValue::Object(file) = &mut files[0] else {
+            unreachable!();
+        };
+        file.insert(field.into(), value);
+        assert!(malformed.validate_gate1().is_err(), "accepted {field}");
+    }
 }

@@ -10,7 +10,7 @@ use otmp_protocol::{
     encode_partition_tuple, encode_typed_scalar, genesis_state_hash, image_root_hash, intent_hash,
     next_state_hash, object_hash, partition_hash,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use uuid::Uuid;
 
 use crate::RuntimeError;
@@ -86,7 +86,8 @@ pub struct AppendRequest {
     pub target_ref: String,
     pub files: Vec<AppendFile>,
     pub summary: BTreeMap<String, CanonicalValue>,
-    pub application_metadata: BTreeMap<String, CanonicalValue>,
+    pub commit_metadata: CommitMetadata,
+    pub snapshot_metadata: SnapshotMetadata,
 }
 
 impl AppendRequest {
@@ -97,8 +98,75 @@ impl AppendRequest {
             target_ref: "main".into(),
             files,
             summary: BTreeMap::new(),
-            application_metadata: BTreeMap::new(),
+            commit_metadata: CommitMetadata::default(),
+            snapshot_metadata: SnapshotMetadata::default(),
         }
+    }
+}
+
+/// Stable, caller-controlled metadata describing a semantic transaction.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct CommitMetadata(BTreeMap<String, CanonicalValue>);
+
+impl CommitMetadata {
+    #[must_use]
+    pub fn as_object(&self) -> &BTreeMap<String, CanonicalValue> {
+        &self.0
+    }
+}
+
+impl From<BTreeMap<String, CanonicalValue>> for CommitMetadata {
+    fn from(value: BTreeMap<String, CanonicalValue>) -> Self {
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for CommitMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_metadata(deserializer).map(Self)
+    }
+}
+
+/// Stable, caller-controlled metadata describing an immutable data snapshot.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct SnapshotMetadata(BTreeMap<String, CanonicalValue>);
+
+impl SnapshotMetadata {
+    #[must_use]
+    pub fn as_object(&self) -> &BTreeMap<String, CanonicalValue> {
+        &self.0
+    }
+}
+
+impl From<BTreeMap<String, CanonicalValue>> for SnapshotMetadata {
+    fn from(value: BTreeMap<String, CanonicalValue>) -> Self {
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for SnapshotMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_metadata(deserializer).map(Self)
+    }
+}
+
+fn deserialize_metadata<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, CanonicalValue>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match CanonicalValue::deserialize(deserializer)? {
+        CanonicalValue::Object(metadata) => Ok(metadata),
+        _ => Err(de::Error::custom("OTMP metadata must be a JSON object")),
     }
 }
 
@@ -512,7 +580,7 @@ impl<S: ObjectStore> Table<S> {
 
         let commit_object = verified_read(&self.store, &head.semantic_commit).await?;
         let commit: SemanticCommit = canonical_json::from_slice_canonical(&commit_object.bytes)?;
-        commit.validate()?;
+        commit.validate_gate1()?;
         if commit.table_id != head.table_id
             || commit.table_version != head.table_version
             || commit.semantic_state_sha256 != head.semantic_state_sha256
@@ -894,18 +962,34 @@ fn build_candidate(
             ]))
         })
         .collect::<Result<Vec<_>, RuntimeError>>()?;
-    let operation = object([
-        ("operation_id", string("append-main")),
-        ("type", string("commit_snapshot")),
-        ("target_ref", string("main")),
+    let snapshot = object([
         ("snapshot_id", string(&snapshot_id.to_string())),
         (
             "parent_snapshot_id",
             parent_snapshot.map_or(CanonicalValue::Null, |id| string(&id.to_string())),
         ),
         ("sequence_number", string(&sequence_number.to_string())),
+        ("schema_id", string(&request.files[0].schema_id.to_string())),
+        (
+            "partition_spec_id",
+            string(&request.files[0].partition_spec_id.to_string()),
+        ),
+        (
+            "sort_order_id",
+            string(&request.files[0].sort_order_id.to_string()),
+        ),
         ("operation", string("append")),
         ("summary", CanonicalValue::Object(derived_summary.clone())),
+        (
+            "metadata",
+            CanonicalValue::Object(request.snapshot_metadata.0.clone()),
+        ),
+    ]);
+    let operation = object([
+        ("operation_id", string("append-main")),
+        ("type", string("commit_snapshot")),
+        ("target_ref", string("main")),
+        ("snapshot", snapshot),
         ("added_files", CanonicalValue::Array(operation_files)),
         ("removed_file_ids", CanonicalValue::Array(Vec::new())),
         ("scan_projection", CanonicalValue::Null),
@@ -946,7 +1030,7 @@ fn build_candidate(
         required_writer_features_after_commit: parent.head.required_writer_features.clone(),
         previous_semantic_state_sha256: Some(parent.head.semantic_state_sha256),
         semantic_state_sha256: Sha256::from_bytes([0; 32]),
-        metadata: CanonicalValue::Object(request.application_metadata.clone()),
+        metadata: CanonicalValue::Object(request.commit_metadata.0.clone()),
     };
     commit.semantic_state_sha256 =
         next_state_hash(parent.head.semantic_state_sha256, &commit_body(&commit)?);
@@ -957,7 +1041,7 @@ fn build_candidate(
     let result_json = canonical_text(&result_value)?;
     let operation_json = canonical_text(&commit.operations)?;
     let commit_metadata_json = canonical_text(&commit.metadata)?;
-    let snapshot_metadata_json = canonical_text(&request.application_metadata)?;
+    let snapshot_metadata_json = canonical_text(&request.snapshot_metadata)?;
     let image_files = request
         .files
         .iter()
@@ -1122,7 +1206,8 @@ struct LogicalIntent<'a> {
     target_ref: &'a str,
     files: Vec<LogicalFile<'a>>,
     caller_summary: &'a BTreeMap<String, CanonicalValue>,
-    application_metadata: &'a BTreeMap<String, CanonicalValue>,
+    commit_metadata: &'a CommitMetadata,
+    snapshot_metadata: &'a SnapshotMetadata,
 }
 
 #[derive(Serialize)]
@@ -1190,7 +1275,8 @@ fn logical_intent(request: &AppendRequest) -> Result<Vec<u8>, RuntimeError> {
             })
             .collect(),
         caller_summary: &request.summary,
-        application_metadata: &request.application_metadata,
+        commit_metadata: &request.commit_metadata,
+        snapshot_metadata: &request.snapshot_metadata,
     };
     Ok(canonical_json::to_vec(&logical)?)
 }

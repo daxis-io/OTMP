@@ -1,0 +1,10 @@
+name: Implementation task
+description: Scope, acceptance criteria, dependencies and verification commands
+body:
+  - type: textarea
+    id: details
+    attributes:
+      label: Implementation task
+      description: Scope, acceptance criteria, dependencies and verification commands
+    validations:
+      required: true

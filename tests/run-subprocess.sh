@@ -56,7 +56,7 @@ do
     echo "failpoint $failpoint has no published checkpoint for version $expected_version" >&2
     exit 1
   fi
-  integrity="$(sqlite3 "$checkpoint_path" 'PRAGMA integrity_check;')"
+  integrity="$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("PRAGMA integrity_check").fetchone()[0])' "$checkpoint_path")"
   if [[ "$integrity" != "ok" ]]; then
     echo "failpoint $failpoint checkpoint failed upstream sqlite3 integrity_check: $integrity" >&2
     exit 1

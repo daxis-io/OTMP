@@ -17,5 +17,7 @@ pub use storage::{
 };
 
 pub use runtime::{
-    OperationRequest, OperationResult, Requirement, TransactionRequest, TransactionResult,
+    HeadAnchor, MetadataCoordinates, MetadataSelection, OperationRequest, OperationResult,
+    PinnedMetadata, RefType, Requirement, ResolvedSnapshot, SnapshotDescriptor, SnapshotSelection,
+    TransactionRequest, TransactionResult, VerificationReport, VerificationScope,
 };

@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use otmp::{
     AppendFile, AppendRequest, CommitMetadata, FileFormat, FileMetric, InitializeRequest,
-    LocalObjectStore, RuntimeError, SnapshotMetadata, SourceFingerprint, Table, TransactionRequest,
+    LocalObjectStore, MetadataSelection, RuntimeError, SnapshotMetadata, SnapshotSelection,
+    SourceFingerprint, Table, TransactionRequest, VerificationScope,
 };
-use otmp_protocol::{CanonicalValue, Schema, Sha256, TypedScalar, canonical_json};
+use otmp_protocol::{CanonicalValue, Id, Schema, Sha256, TypedScalar, canonical_json};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -43,17 +44,27 @@ enum Command {
     },
     Status {
         table: PathBuf,
+        #[arg(long)]
+        table_version: Option<u64>,
     },
     Files {
         table: PathBuf,
-        #[arg(long, default_value = "main")]
-        reference: String,
+        #[arg(long)]
+        table_version: Option<u64>,
+        #[arg(long="ref", conflicts_with_all=["snapshot_id","sequence_number"])]
+        reference: Option<String>,
+        #[arg(long, conflicts_with = "sequence_number")]
+        snapshot_id: Option<Id>,
+        #[arg(long)]
+        sequence_number: Option<u64>,
     },
     History {
         table: PathBuf,
     },
     Verify {
         table: PathBuf,
+        #[arg(long)]
+        history: bool,
     },
 }
 
@@ -109,7 +120,26 @@ async fn main() {
         .with_writer(std::io::stderr)
         .try_init()
         .ok();
-    match run(Cli::parse()).await {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error)
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) =>
+        {
+            print!("{error}");
+            return;
+        }
+        Err(error) => {
+            eprintln!(
+                "{}",
+                json!({"code":"OTMP_INVALID_ARGUMENT","message":error.to_string(),"retryable":false,"details":{}})
+            );
+            std::process::exit(2);
+        }
+    };
+    match run(cli).await {
         Ok(value) => match serde_json::to_string(&value) {
             Ok(json) => println!("{json}"),
             Err(error) => {
@@ -202,32 +232,66 @@ async fn run(cli: Cli) -> Result<serde_json::Value, RuntimeError> {
             canonical_json::parse(&bytes)?;
             let request: TransactionRequest = serde_json::from_slice(&bytes)
                 .map_err(|e| RuntimeError::InvalidTransaction(e.to_string()))?;
-            Ok(serde_json::to_value(
-                Table::new(LocalObjectStore::new(table)?)
-                    .transact(&request)
-                    .await?,
+            let table = Table::new(LocalObjectStore::new(table)?);
+            Ok(serde_json::to_value(table.transact(&request).await?)
+                .map_err(|e| RuntimeError::InvalidTransaction(e.to_string()))?)
+        }
+        Command::Status {
+            table,
+            table_version,
+        } => {
+            let table = Table::new(LocalObjectStore::new(table)?);
+            let pinned = table
+                .pin_metadata(
+                    table_version
+                        .map_or(MetadataSelection::Current, MetadataSelection::TableVersion),
+                )
+                .await?;
+            Ok(json!({"anchor":pinned.anchor(),"selected":pinned.coordinates()}))
+        }
+        Command::Files {
+            table,
+            table_version,
+            reference,
+            snapshot_id,
+            sequence_number,
+        } => {
+            let table = Table::new(LocalObjectStore::new(table)?);
+            let pinned = table
+                .pin_metadata(
+                    table_version
+                        .map_or(MetadataSelection::Current, MetadataSelection::TableVersion),
+                )
+                .await?;
+            let selection = if let Some(id) = snapshot_id {
+                SnapshotSelection::SnapshotId(id)
+            } else if let Some(sequence) = sequence_number {
+                SnapshotSelection::SequenceNumber(sequence)
+            } else {
+                SnapshotSelection::Ref(reference.unwrap_or_else(|| "main".into()))
+            };
+            Ok(
+                serde_json::to_value(pinned.resolve_snapshot(selection)?.files()?)
+                    .map_err(|e| RuntimeError::InvalidTransaction(e.to_string()))?,
             )
-            .map_err(|e| RuntimeError::InvalidTransaction(e.to_string()))?)
-        }
-        Command::Status { table } => {
-            let table = Table::new(LocalObjectStore::new(table)?);
-            Ok(serde_json::to_value(table.pin().await?.status())
-                .map_err(|error| RuntimeError::InvalidAppend(error.to_string()))?)
-        }
-        Command::Files { table, reference } => {
-            let table = Table::new(LocalObjectStore::new(table)?);
-            Ok(serde_json::to_value(table.pin().await?.files(&reference)?)
-                .map_err(|error| RuntimeError::InvalidAppend(error.to_string()))?)
         }
         Command::History { table } => {
             let table = Table::new(LocalObjectStore::new(table)?);
             Ok(serde_json::to_value(table.pin().await?.history()?)
                 .map_err(|error| RuntimeError::InvalidAppend(error.to_string()))?)
         }
-        Command::Verify { table } => {
+        Command::Verify { table, history } => {
             let table = Table::new(LocalObjectStore::new(table)?);
-            table.verify().await?;
-            Ok(json!({"verified": true}))
+            Ok(serde_json::to_value(
+                table
+                    .verify_with_report(if history {
+                        VerificationScope::RetainedHistory
+                    } else {
+                        VerificationScope::Current
+                    })
+                    .await?,
+            )
+            .map_err(|e| RuntimeError::InvalidTransaction(e.to_string()))?)
         }
     }
 }

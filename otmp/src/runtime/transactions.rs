@@ -13,7 +13,24 @@ pub enum Requirement {
         key: String,
         value: CanonicalValue,
     },
-
+    RefAbsent {
+        #[serde(rename = "ref")]
+        name: String,
+    },
+    RefExists {
+        #[serde(rename = "ref")]
+        name: String,
+        ref_type: RefType,
+    },
+    RefSnapshotIs {
+        #[serde(rename = "ref")]
+        name: String,
+        #[serde(deserialize_with = "required_snapshot")]
+        snapshot_id: Option<Id>,
+    },
+    SnapshotExists {
+        snapshot_id: Id,
+    },
     CurrentSchemaIs {
         #[serde(with = "id_number")]
         schema_id: u32,
@@ -35,6 +52,7 @@ pub enum RefType {
     Branch,
     Tag,
 }
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperationRequest {
@@ -132,7 +150,18 @@ pub(crate) fn evaluate(
                     Some(actual) => canonical_json::parse_canonical(actual.as_bytes())? == *value,
                 }
             }
-
+            Requirement::RefAbsent { name } => ref_row(connection, name)?.is_none(),
+            Requirement::RefExists { name, ref_type } => {
+                ref_row(connection, name)?.is_some_and(|r| r.0 == *ref_type)
+            }
+            Requirement::RefSnapshotIs { name, snapshot_id } => {
+                ref_row(connection, name)?.is_some_and(|r| r.1 == *snapshot_id)
+            }
+            Requirement::SnapshotExists { snapshot_id } => connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM otmp_snapshots WHERE snapshot_id=?1)",
+                [snapshot_id.as_bytes().as_slice()],
+                |r| r.get(0),
+            )?,
             Requirement::CurrentSchemaIs { schema_id } => connection.query_row(
                 "SELECT current_schema_id=?1 FROM otmp_meta",
                 [schema_id],
@@ -369,4 +398,8 @@ pub(crate) fn prepare_operations(
         results.push(result);
     }
     Ok(results)
+}
+
+fn required_snapshot<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Id>, D::Error> {
+    Option::<Id>::deserialize(d)
 }

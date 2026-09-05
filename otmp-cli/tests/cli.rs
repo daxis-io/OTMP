@@ -62,7 +62,7 @@ fn cli_initializes_inspects_appends_and_reads() {
     );
     let status = success(&["status", table.to_str().unwrap()]);
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&status).unwrap()["table_version"],
+        serde_json::from_slice::<serde_json::Value>(&status).unwrap()["selected"]["table_version"],
         1
     );
     let files = success(&["files", table.to_str().unwrap()]);
@@ -228,4 +228,75 @@ fn success(arguments: &[&str]) -> Vec<u8> {
         String::from_utf8_lossy(&output.stderr)
     );
     output.stdout
+}
+
+#[test]
+fn metadata_manifest_historical_status_selectors_and_reports() {
+    let directory = tempfile::tempdir().unwrap();
+    let table = directory.path().join("table");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    success(&[
+        "init",
+        table.to_str().unwrap(),
+        "--schema",
+        root.join("conformance/sources/schema.json")
+            .to_str()
+            .unwrap(),
+    ]);
+    let manifest = directory.path().join("transaction.json");
+    std::fs::write(&manifest,r#"{"idempotency_key":"metadata","requirements":[{"type":"property_is","key":"owner","value":null}],"operations":[{"type":"set_properties","operation_id":"properties","updates":{"owner":"team"},"removals":[]}]}"#).unwrap();
+    let result = success(&[
+        "transact",
+        table.to_str().unwrap(),
+        "--manifest",
+        manifest.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        success(&[
+            "transact",
+            table.to_str().unwrap(),
+            "--manifest",
+            manifest.to_str().unwrap()
+        ]),
+        result
+    );
+    let status: serde_json::Value = serde_json::from_slice(&success(&[
+        "status",
+        table.to_str().unwrap(),
+        "--table-version",
+        "0",
+    ]))
+    .unwrap();
+    assert_eq!(status["anchor"]["table_version"], 1);
+    assert_eq!(status["selected"]["table_version"], 0);
+    assert!(status["selected"].get("root_revision").is_none());
+    let report: serde_json::Value =
+        serde_json::from_slice(&success(&["verify", table.to_str().unwrap(), "--history"]))
+            .unwrap();
+    assert_eq!(report["completed"], true);
+    assert_eq!(report["generations_checked"], 2);
+    let output = Command::new(env!("CARGO_BIN_EXE_otmp"))
+        .args([
+            "files",
+            table.to_str().unwrap(),
+            "--ref",
+            "main",
+            "--sequence-number",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stderr).unwrap()["code"],
+        "OTMP_INVALID_ARGUMENT"
+    );
+    let files: serde_json::Value = serde_json::from_slice(&success(&[
+        "files",
+        table.to_str().unwrap(),
+        "--table-version",
+        "0",
+    ]))
+    .unwrap();
+    assert_eq!(files, serde_json::json!([]));
 }

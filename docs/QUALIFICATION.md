@@ -5,7 +5,7 @@
 > **Qualification demonstrated for the Rust local/full-image OTMP subset: self-contained
 > genesis, pinned catalog-free reads, byte-verified table-relative staging,
 > idempotent Parquet-descriptor append, conditional-publication reconciliation,
-> append-safe rebase, and atomic property transactions.**
+> append-safe rebase, atomic property transactions, historical metadata selection, and retained-history verification.**
 
 This is a local proof of concept, not a production-readiness statement and not a
 claim of complete Core Reader or Direct Writer conformance.
@@ -50,6 +50,8 @@ claim of complete Core Reader or Direct Writer conformance.
 - The local adapter uses create-only immutable writes, file and directory
   `fsync`, a locked `HEAD` comparison, a same-directory temporary file, atomic
   rename, and final directory `fsync`.
+
+Metadata selection pins current HEAD once, then follows retained content-hashed physical ancestry. Snapshot selectors resolve against that selected image. Current verification checks current tips; retained-history verification replays semantic transitions and verifies historical bytes. Neither scope lists objects or repairs state. CLI status separates the selected metadata coordinates from the current anchor.
 
 ## Publication and visibility
 

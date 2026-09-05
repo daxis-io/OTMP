@@ -1636,14 +1636,7 @@ fn insert_fields(
                     transaction,
                     schema_id,
                     Some(field.field_id),
-                    std::slice::from_ref(key.as_ref()),
-                    version,
-                )?;
-                insert_fields(
-                    transaction,
-                    schema_id,
-                    Some(field.field_id),
-                    std::slice::from_ref(value.as_ref()),
+                    &[key.as_ref().clone(), value.as_ref().clone()],
                     version,
                 )?;
             }
@@ -2154,6 +2147,32 @@ mod tests {
     }
 }
 
+pub(crate) fn read_schema(connection: &Connection, schema_id: u32) -> Result<Schema, RuntimeError> {
+    let (parent_schema_id, doc) = connection.query_row(
+        "SELECT parent_schema_id,doc FROM otmp_schemas WHERE schema_id=?1",
+        [schema_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let rows = normalized_fields(connection, schema_id)?;
+    let mut roots = rows
+        .into_values()
+        .filter(|r| r.parent.is_none())
+        .collect::<Vec<_>>();
+    roots.sort_by_key(|r| r.ordinal);
+    let mut identifiers = connection.prepare(
+        "SELECT field_id FROM otmp_identifier_fields WHERE schema_id=?1 ORDER BY ordinal",
+    )?;
+    Ok(Schema {
+        schema_id,
+        parent_schema_id,
+        doc,
+        fields: roots.into_iter().map(|r| r.field).collect(),
+        identifier_field_ids: identifiers
+            .query_map([schema_id], |r| r.get(0))?
+            .collect::<Result<_, _>>()?,
+    })
+}
+
 pub(crate) fn apply_metadata(
     parent: &[u8],
     commit: &SemanticCommit,
@@ -2433,6 +2452,14 @@ fn validate_metadata_projection(
             OperationRequest::DropRef { name, .. } => {
                 crate::runtime::transactions::ref_row(connection, &name)?.is_none()
             }
+            OperationRequest::AddSchema { schema, .. } => {
+                read_schema(connection, schema.schema_id)? == schema
+            }
+            OperationRequest::SetCurrentSchema { schema_id, .. } => connection.query_row(
+                "SELECT current_schema_id=?1 FROM otmp_meta",
+                [schema_id],
+                |r| r.get(0),
+            )?,
         };
         if !valid {
             return Err(RuntimeError::Corrupt(

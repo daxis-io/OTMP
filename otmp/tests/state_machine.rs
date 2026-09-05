@@ -871,3 +871,50 @@ async fn append_rebases_across_another_branch_without_mixing_ancestry() {
     }
     table.verify_history().await.unwrap();
 }
+
+#[tokio::test]
+async fn append_prepared_before_schema_change_conflicts_after_staging() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data");
+    tokio::fs::write(&path, b"a").await.unwrap();
+    let store = PauseAfterDataCreateStore::new();
+    let table = Table::new(store.clone());
+    table
+        .initialize(InitializeRequest::new(schema()))
+        .await
+        .unwrap();
+    store.pause.store(true, Ordering::SeqCst);
+    let append = request(path, b"a", "prepared");
+    let writer = table.clone();
+    let task = tokio::spawn(async move { writer.append_files(&append).await });
+    store.entered.notified().await;
+    let mut next = schema();
+    next.schema_id = 2;
+    next.parent_schema_id = Some(1);
+    table
+        .transact(&otmp::TransactionRequest {
+            idempotency_key: "schema".into(),
+            requirements: vec![
+                otmp::Requirement::CurrentSchemaIs { schema_id: 1 },
+                otmp::Requirement::SchemaIdAbsent { schema_id: 2 },
+                otmp::Requirement::FieldIdsAbsent { field_ids: vec![] },
+            ],
+            operations: vec![
+                otmp::OperationRequest::AddSchema {
+                    operation_id: "schema".into(),
+                    schema: next,
+                },
+                otmp::OperationRequest::SetCurrentSchema {
+                    operation_id: "current".into(),
+                    schema_id: 2,
+                },
+            ],
+            commit_metadata: CommitMetadata::default(),
+        })
+        .await
+        .unwrap();
+    store.release.notify_one();
+    let error = task.await.unwrap().unwrap_err();
+    assert_eq!(error.code(), "OTMP_SEMANTIC_CONFLICT");
+    assert!(table.pin().await.unwrap().files("main").unwrap().is_empty());
+}

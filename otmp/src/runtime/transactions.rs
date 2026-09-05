@@ -1,8 +1,8 @@
 use super::{
     BTreeMap, BTreeSet, Candidate, CanonicalValue, CommitMetadata, Deserialize, Id, IntentRecord,
-    JsonI64, JsonU64, ObjectStore, PinnedTable, RelativeUri, RuntimeError, SemanticCommit,
-    Serialize, Sha256, Table, canonical_json, canonical_text, commit_body, finish_candidate,
-    id_from_blob, image, intent_hash, new_id, next_state_hash, now_ms,
+    JsonI64, JsonU64, LogicalType, ObjectStore, PinnedTable, RelativeUri, RuntimeError, Schema,
+    SemanticCommit, Serialize, Sha256, Table, canonical_json, canonical_text, commit_body,
+    finish_candidate, id_from_blob, image, intent_hash, new_id, next_state_hash, now_ms,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -35,7 +35,14 @@ pub enum Requirement {
         #[serde(with = "id_number")]
         schema_id: u32,
     },
-
+    SchemaIdAbsent {
+        #[serde(with = "id_number")]
+        schema_id: u32,
+    },
+    FieldIdsAbsent {
+        #[serde(with = "id_numbers")]
+        field_ids: Vec<u32>,
+    },
     DefaultPartitionSpecIs {
         #[serde(with = "id_number")]
         partition_spec_id: u32,
@@ -88,6 +95,15 @@ pub enum OperationRequest {
         #[serde(rename = "ref")]
         name: String,
     },
+    AddSchema {
+        operation_id: String,
+        schema: Schema,
+    },
+    SetCurrentSchema {
+        operation_id: String,
+        #[serde(with = "id_number")]
+        schema_id: u32,
+    },
 }
 impl OperationRequest {
     fn id(&self) -> &str {
@@ -95,7 +111,9 @@ impl OperationRequest {
             Self::SetProperties { operation_id, .. }
             | Self::CreateRef { operation_id, .. }
             | Self::ReplaceRef { operation_id, .. }
-            | Self::DropRef { operation_id, .. } => operation_id,
+            | Self::DropRef { operation_id, .. }
+            | Self::AddSchema { operation_id, .. }
+            | Self::SetCurrentSchema { operation_id, .. } => operation_id,
         }
     }
 }
@@ -123,6 +141,11 @@ pub enum OperationResult {
         ref_type: RefType,
         #[serde(deserialize_with = "required_snapshot")]
         snapshot_id: Option<Id>,
+    },
+    Schema {
+        operation_id: String,
+        #[serde(with = "id_number")]
+        schema_id: u32,
     },
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -219,7 +242,29 @@ pub(crate) fn evaluate(
                 [schema_id],
                 |r| r.get(0),
             )?,
-
+            Requirement::SchemaIdAbsent { schema_id } => !connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM otmp_schemas WHERE schema_id=?1)",
+                [schema_id],
+                |r| r.get::<_, bool>(0),
+            )?,
+            Requirement::FieldIdsAbsent { field_ids } => {
+                let mut absent = BTreeSet::new();
+                for id in field_ids {
+                    if *id == 0
+                        || !absent.insert(id)
+                        || connection.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM otmp_field_ids WHERE field_id=?1)",
+                            [id],
+                            |r| r.get::<_, bool>(0),
+                        )?
+                    {
+                        return Err(RuntimeError::SemanticConflict(
+                            "field ID already exists or is invalid".into(),
+                        ));
+                    }
+                }
+                true
+            }
             Requirement::DefaultPartitionSpecIs { partition_spec_id } => connection.query_row(
                 "SELECT default_partition_spec_id=?1 FROM otmp_meta",
                 [partition_spec_id],
@@ -385,6 +430,17 @@ pub(crate) fn apply_operations(
                 tx.execute("DELETE FROM otmp_ref_live_files WHERE ref_name=?1", [name])?;
                 tx.execute("DELETE FROM otmp_refs WHERE ref_name=?1", [name])?;
             }
+            OperationRequest::AddSchema { schema, .. } => image::insert_schema(
+                tx,
+                schema,
+                u64::try_from(version).map_err(|_| invalid("negative version"))?,
+            )?,
+            OperationRequest::SetCurrentSchema { schema_id, .. } => {
+                image::read_schema(tx, *schema_id).map_err(|_| {
+                    invalid("selected schema must already exist in operation order")
+                })?;
+                tx.execute("UPDATE otmp_meta SET current_schema_id=?1", [schema_id])?;
+            }
         }
     }
     Ok(())
@@ -397,6 +453,61 @@ fn materialize_branch(
     tx.execute("DELETE FROM otmp_ref_live_files WHERE ref_name=?1", [name])?;
     for id in super::history::ancestry(tx, snapshot)? {
         tx.execute("INSERT INTO otmp_ref_live_files SELECT ?1,c.file_id,c.snapshot_id,s.sequence_number,s.sequence_number FROM otmp_snapshot_file_changes c JOIN otmp_snapshots s USING(snapshot_id) WHERE c.snapshot_id=?2 AND c.change_kind='add'", params![name, id.as_bytes().as_slice()])?;
+    }
+    Ok(())
+}
+
+fn additive_schema(old: &Schema, new: &Schema) -> Result<Vec<u32>, RuntimeError> {
+    new.validate()?;
+    if new.parent_schema_id != Some(old.schema_id)
+        || new.identifier_field_ids != old.identifier_field_ids
+    {
+        return Err(invalid("schema parent or identifiers changed"));
+    }
+    let mut ids = BTreeSet::new();
+    additive_fields(&old.fields, &new.fields, &mut ids)?;
+    Ok(ids.into_iter().collect())
+}
+fn additive_fields(
+    old: &[otmp_protocol::Field],
+    new: &[otmp_protocol::Field],
+    ids: &mut BTreeSet<u32>,
+) -> Result<(), RuntimeError> {
+    if new.len() < old.len() {
+        return Err(invalid("field removal"));
+    }
+    for (a, b) in old.iter().zip(new) {
+        let mut comparable = b.clone();
+        comparable.field_type = a.field_type.clone();
+        if *a != comparable {
+            return Err(invalid("existing field changed or reordered"));
+        }
+        match (&a.field_type, &b.field_type) {
+            (LogicalType::Struct { fields: a }, LogicalType::Struct { fields: b }) => {
+                additive_fields(a, b, ids)?;
+            }
+            (LogicalType::List { element: a }, LogicalType::List { element: b }) => {
+                additive_fields(
+                    std::slice::from_ref(a.as_ref()),
+                    std::slice::from_ref(b.as_ref()),
+                    ids,
+                )?;
+            }
+            (LogicalType::Map { key: ak, value: av }, LogicalType::Map { key: bk, value: bv })
+                if ak == bk =>
+            {
+                additive_fields(
+                    std::slice::from_ref(av.as_ref()),
+                    std::slice::from_ref(bv.as_ref()),
+                    ids,
+                )?;
+            }
+            (a, b) if a == b => {}
+            _ => return Err(invalid("type change is not additive")),
+        }
+    }
+    for field in &new[old.len()..] {
+        collect_new_field(field, ids)?;
     }
     Ok(())
 }
@@ -431,6 +542,21 @@ mod id_number {
         u32::try_from(JsonU64::deserialize(d)?.0).map_err(serde::de::Error::custom)
     }
 }
+mod id_numbers {
+    use super::{Deserialize, JsonU64, Serialize};
+    pub fn serialize<S: serde::Serializer>(v: &[u32], s: S) -> Result<S::Ok, S::Error> {
+        v.iter()
+            .map(|v| JsonU64(u64::from(*v)))
+            .collect::<Vec<_>>()
+            .serialize(s)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u32>, D::Error> {
+        Vec::<JsonU64>::deserialize(d)?
+            .into_iter()
+            .map(|v| u32::try_from(v.0).map_err(serde::de::Error::custom))
+            .collect()
+    }
+}
 
 #[allow(clippy::too_many_lines)] // One exhaustive operation/precondition matrix.
 pub(crate) fn prepare_operations(
@@ -447,7 +573,8 @@ pub(crate) fn prepare_operations(
     let mut ids = BTreeSet::new();
     let mut keys = BTreeSet::new();
     let mut refs = BTreeSet::new();
-
+    let mut add_schema = false;
+    let mut set_schema = false;
     let mut results = Vec::new();
     for operation in &request.operations {
         if operation.id().is_empty() || !ids.insert(operation.id()) {
@@ -572,6 +699,63 @@ pub(crate) fn prepare_operations(
                     snapshot_id: old,
                 }
             }
+            OperationRequest::AddSchema {
+                operation_id,
+                schema,
+            } => {
+                if std::mem::replace(&mut add_schema, true) {
+                    return Err(invalid("only one add_schema is supported"));
+                }
+                let current: u32 =
+                    connection
+                        .query_row("SELECT current_schema_id FROM otmp_meta", [], |r| r.get(0))?;
+                required(
+                    request,
+                    &Requirement::CurrentSchemaIs { schema_id: current },
+                )?;
+                required(
+                    request,
+                    &Requirement::SchemaIdAbsent {
+                        schema_id: schema.schema_id,
+                    },
+                )?;
+                let old = image::read_schema(connection, current)?;
+                let new_ids = additive_schema(&old, schema)?;
+                let mut candidates = request.requirements.iter().filter_map(|r| match r {
+                    Requirement::FieldIdsAbsent { field_ids } => Some(field_ids.clone()),
+                    _ => None,
+                });
+                let mut actual = candidates
+                    .next()
+                    .ok_or_else(|| invalid("field_ids_absent required"))?;
+                actual.sort_unstable();
+                if candidates.next().is_some() || actual != new_ids {
+                    return Err(invalid("field_ids_absent must cover exactly all new IDs"));
+                }
+                OperationResult::Schema {
+                    operation_id: operation_id.clone(),
+                    schema_id: schema.schema_id,
+                }
+            }
+            OperationRequest::SetCurrentSchema {
+                operation_id,
+                schema_id,
+            } => {
+                if std::mem::replace(&mut set_schema, true) {
+                    return Err(invalid("only one set_current_schema is supported"));
+                }
+                let current =
+                    connection
+                        .query_row("SELECT current_schema_id FROM otmp_meta", [], |r| r.get(0))?;
+                required(
+                    request,
+                    &Requirement::CurrentSchemaIs { schema_id: current },
+                )?;
+                OperationResult::Schema {
+                    operation_id: operation_id.clone(),
+                    schema_id: *schema_id,
+                }
+            }
         };
         results.push(result);
     }
@@ -580,4 +764,28 @@ pub(crate) fn prepare_operations(
 
 fn required_snapshot<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Id>, D::Error> {
     Option::<Id>::deserialize(d)
+}
+
+fn collect_new_field(
+    field: &otmp_protocol::Field,
+    ids: &mut BTreeSet<u32>,
+) -> Result<(), RuntimeError> {
+    if field.required {
+        return Err(invalid("new fields must be optional"));
+    }
+    ids.insert(field.field_id);
+    match &field.field_type {
+        LogicalType::Struct { fields } => {
+            for f in fields {
+                collect_new_field(f, ids)?;
+            }
+        }
+        LogicalType::List { element } => collect_new_field(element, ids)?,
+        LogicalType::Map { key, value } => {
+            collect_new_field(key, ids)?;
+            collect_new_field(value, ids)?;
+        }
+        _ => {}
+    }
+    Ok(())
 }

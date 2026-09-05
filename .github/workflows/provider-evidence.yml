@@ -1,0 +1,64 @@
+name: provider evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: Provider to exercise
+        required: true
+        type: choice
+        options: [aws-s3, cloudflare-r2]
+  schedule:
+    - cron: '23 4 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  aws-s3:
+    if: github.event_name == 'schedule' || github.event.inputs.provider == 'aws-s3'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Run provider evidence harness
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.OTMP_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.OTMP_AWS_SECRET_ACCESS_KEY }}
+          OTMP_S3_BUCKET: ${{ vars.OTMP_AWS_S3_EVIDENCE_BUCKET }}
+          AWS_REGION: ${{ vars.OTMP_AWS_S3_REGION || 'us-east-1' }}
+          OTMP_S3_PROVIDER: aws-s3
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          cargo run -p otmp-s3 --example provider_evidence > provider-evidence.json
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        if: always()
+        with:
+          name: provider-evidence-aws-s3
+          path: provider-evidence.json
+
+  cloudflare-r2:
+    if: github.event_name == 'schedule' || github.event.inputs.provider == 'cloudflare-r2'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Run provider evidence harness
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.OTMP_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.OTMP_R2_SECRET_ACCESS_KEY }}
+          OTMP_S3_BUCKET: ${{ vars.OTMP_R2_EVIDENCE_BUCKET }}
+          OTMP_S3_ENDPOINT: ${{ vars.OTMP_R2_S3_ENDPOINT }}
+          OTMP_S3_PROVIDER: cloudflare-r2
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          cargo run -p otmp-s3 --example provider_evidence > provider-evidence.json
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        if: always()
+        with:
+          name: provider-evidence-cloudflare-r2
+          path: provider-evidence.json

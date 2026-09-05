@@ -1,7 +1,7 @@
 # Local/full-image qualification
 
 OTMP is an experimental catalog-optional runtime. The evidence below applies to
-the local/full-image implementation. It is
+the local/full-image implementation and deterministic S3 adapter contract. It is
 not full protocol conformance, live AWS/R2 qualification, or production readiness.
 The draft keeps its `0.0.2-alpha` identifiers and can regenerate fixtures before
 the official release without compatibility or migration promises.
@@ -25,6 +25,10 @@ the official release without compatibility or migration promises.
 - Current verification of all branch/tag tips and retained-history verification
   of explicit generations, semantic transitions, and historical user bytes.
   URI-based read deduplication; no listing or orphan discovery.
+- A bounded S3-compatible single-put adapter and scripted HTTP tests for
+  conditional headers, stale CAS, concurrent writers, response loss, token
+  round-trip, missing-token readback, and body limits. Live provider evidence is
+  separate and missing credentials produce `not_run`.
 
 [Transactions](TRANSACTIONS.md) defines the request matrix and failure behavior.
 The canonical `conformance/tables/transactions` package retains versions 0–7,
@@ -38,13 +42,14 @@ Install rustup, Python 3, bash, and a native C/C++ build toolchain with CMake
 selects Rust 1.95.0, rustfmt, Clippy, and the Wasm target. Install the pinned
 verification tools as documented in [CONTRIBUTING.md](../CONTRIBUTING.md).
 No maintainer-local files, credentials, cloud accounts, or environment variables
-are needed.
+are needed. The S3 endpoint tests bind loopback sockets.
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo nextest run --workspace --all-features
 cargo test --workspace --doc
+cargo test -p otmp-s3 --example provider_evidence
 python3 conformance/regenerate.py --check
 cargo test -p otmp --test static_tables
 cargo check -p otmp-protocol --target wasm32-unknown-unknown

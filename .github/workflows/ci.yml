@@ -28,6 +28,7 @@ jobs:
       - run: cargo install cargo-nextest --version 0.9.114 --locked
       - run: cargo nextest run --workspace --all-features
       - run: cargo test --workspace --doc
+      - run: cargo test -p otmp-s3 --example provider_evidence
   conformance:
     runs-on: ubuntu-latest
     timeout-minutes: 30

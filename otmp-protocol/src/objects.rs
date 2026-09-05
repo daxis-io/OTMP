@@ -224,6 +224,8 @@ impl SemanticCommit {
                     | "ref_snapshot_is"
                     | "snapshot_exists"
                     | "current_schema_is"
+                    | "schema_id_absent"
+                    | "field_ids_absent"
                     | "default_partition_spec_is"
                     | "default_sort_order_is"
             ) {
@@ -819,7 +821,7 @@ impl Generation {
             || self.metadata_image.checkpoint.table_version != self.table_version
         {
             return Err(ProtocolError::InvalidObject(
-                "generation is outside the local/full-image profile full-image profile".into(),
+                "generation is outside the local/full-image profile".into(),
             ));
         }
         Ok(())

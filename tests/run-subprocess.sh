@@ -68,3 +68,5 @@ do
 done
 
 echo "process-crash reopen and upstream sqlite3 evidence passed for 4 failpoints"
+
+python3 "$repo_root/tests/run-metadata-crash.py"

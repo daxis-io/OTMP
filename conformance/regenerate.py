@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
-"""Regenerate canonical package JSON from parsed values and check exact bytes."""
+"""Rebuild full SQLite images from retained canonical commits and check identity.
+
+UUIDs and commit times are fixture inputs. Regeneration introduces no new IDs,
+clock reads, local source paths, cloud access, or migration behavior.
+"""
 import argparse
-import json
 import pathlib
+import subprocess
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--check', action='store_true')
+parser.add_argument('--check', action='store_true', help='verify canonical regeneration')
 parser.parse_args()
-root = pathlib.Path(__file__).resolve().parent
-count = 0
-for package in ('genesis', 'append'):
-    files = [root / 'tables' / package / '_otmp/HEAD']
-    files.extend((root / 'tables' / package / '_otmp').rglob('*.json'))
-    for path in files:
-        original = path.read_bytes()
-        value = json.loads(original)
-        regenerated = json.dumps(value, ensure_ascii=False, separators=(',', ':'), sort_keys=True).encode()
-        assert regenerated == original, f'noncanonical package object: {path}'
-        count += 1
-print(f'canonical package JSON regeneration passed: {count} objects')
+root = pathlib.Path(__file__).resolve().parent.parent
+subprocess.run(['cargo', 'test', '-p', 'otmp', '--lib',
+                'canonical_packages_regenerate_from_retained_commits'], cwd=root, check=True)
+subprocess.run(['cargo', 'test', '-p', 'otmp-protocol', '--test',
+                'conformance_fixtures'], cwd=root, check=True)

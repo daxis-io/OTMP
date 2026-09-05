@@ -137,6 +137,9 @@ impl SemanticCommit {
                 "duplicate idempotency key".into(),
             ));
         }
+        for requirement in &self.requirements {
+            validate_requirement(requirement)?;
+        }
         let operation_ids = validate_operations(&self.operations, genesis, self.table_id)?;
         let mut referenced = BTreeSet::new();
         for intent in &self.intents {
@@ -176,36 +179,55 @@ impl SemanticCommit {
         Ok(())
     }
 
-    /// Validates the deliberately narrow operation profile implemented by the
-    /// Gate 1 runtime. Generic semantic validation permits namespaced extension
-    /// operations; a Gate 1 reader must fail closed instead of silently
-    /// projecting an operation it does not understand.
-    pub fn validate_gate1(&self) -> Result<(), ProtocolError> {
+    /// Validates the implemented local full-image capabilities, separately from wire semantics.
+    pub fn validate_runtime_profile(&self) -> Result<(), ProtocolError> {
         self.validate()?;
-        let genesis = self.table_version.0 == 0;
-        if self.operations.len() != 1 {
+        let mut snapshots = 0;
+        for value in &self.operations {
+            let CanonicalValue::Object(fields) = value else {
+                unreachable!()
+            };
+            let Some(CanonicalValue::String(kind)) = fields.get("type") else {
+                unreachable!()
+            };
+            match kind.as_str() {
+                "commit_snapshot" => {
+                    snapshots += 1;
+                    validate_append_profile(fields)?;
+                }
+                "initialize_table" | "set_properties" => {}
+                _ => {
+                    return Err(ProtocolError::InvalidObject(
+                        "unsupported runtime operation".into(),
+                    ));
+                }
+            }
+        }
+        if snapshots > 1 || snapshots == 1 && self.operations.len() != 1 {
             return Err(ProtocolError::InvalidObject(
-                "Gate 1 commits must contain exactly one operation".into(),
+                "runtime supports metadata transactions or one append".into(),
             ));
         }
-        let CanonicalValue::Object(operation) = &self.operations[0] else {
-            unreachable!("validate rejects non-object operations");
-        };
-        match operation.get("type") {
-            Some(CanonicalValue::String(operation_type))
-                if genesis && operation_type == "initialize_table" =>
-            {
-                Ok(())
+        for value in &self.requirements {
+            let CanonicalValue::Object(fields) = value else {
+                unreachable!()
+            };
+            let Some(CanonicalValue::String(kind)) = fields.get("type") else {
+                unreachable!()
+            };
+            if !matches!(
+                kind.as_str(),
+                "property_is"
+                    | "current_schema_is"
+                    | "default_partition_spec_is"
+                    | "default_sort_order_is"
+            ) {
+                return Err(ProtocolError::InvalidObject(
+                    "unsupported runtime requirement".into(),
+                ));
             }
-            Some(CanonicalValue::String(operation_type))
-                if !genesis && operation_type == "commit_snapshot" =>
-            {
-                validate_gate1_commit_snapshot(operation)
-            }
-            _ => Err(ProtocolError::InvalidObject(
-                "semantic operation is outside the Gate 1 profile".into(),
-            )),
         }
+        Ok(())
     }
 }
 
@@ -252,6 +274,13 @@ fn validate_operations(
                     ));
                 }
             }
+            "set_properties" | "create_ref" | "replace_ref" | "drop_ref" | "add_schema"
+            | "set_current_schema" => validate_metadata_operation(fields, operation_type)?,
+            "upgrade_features"
+            | "add_partition_spec"
+            | "set_default_partition_spec"
+            | "add_sort_order"
+            | "set_default_sort_order" => {}
             extension_type if extension_type.contains('.') => {}
             _ => {
                 return Err(ProtocolError::InvalidObject(format!(
@@ -301,15 +330,15 @@ fn validate_initialize_table(
     Ok(())
 }
 
-fn validate_gate1_commit_snapshot(
+fn validate_append_profile(
     operation: &BTreeMap<String, CanonicalValue>,
 ) -> Result<(), ProtocolError> {
-    if require_nonempty_string(operation, "target_ref", "commit_snapshot")? != "main"
-        || require_nonempty_string(operation, "rebase_mode", "commit_snapshot")? != "append-safe"
+    require_nonempty_string(operation, "target_ref", "commit_snapshot")?;
+    if require_nonempty_string(operation, "rebase_mode", "commit_snapshot")? != "append-safe"
         || !matches!(operation.get("scan_projection"), Some(CanonicalValue::Null))
     {
         return Err(ProtocolError::InvalidObject(
-            "Gate 1 commit_snapshot must append safely to main without a scan projection".into(),
+            "local/full-image profile commit_snapshot must append safely to main without a scan projection".into(),
         ));
     }
     let Some(CanonicalValue::Object(snapshot)) = operation.get("snapshot") else {
@@ -320,38 +349,33 @@ fn validate_gate1_commit_snapshot(
         || require_u32(snapshot, "sort_order_id", "commit_snapshot snapshot")? != 0
     {
         return Err(ProtocolError::InvalidObject(
-            "Gate 1 snapshot must be an unpartitioned, unsorted append".into(),
+            "local/full-image profile snapshot must be an unpartitioned, unsorted append".into(),
         ));
     }
     let snapshot_schema_id =
         require_positive_u32(snapshot, "schema_id", "commit_snapshot snapshot")?;
-    require_gate1_i64(snapshot, "sequence_number", "commit_snapshot snapshot")?;
+    require_sqlite_i64(snapshot, "sequence_number", "commit_snapshot snapshot")?;
     let Some(CanonicalValue::Array(added_files)) = operation.get("added_files") else {
         unreachable!("validate_commit_snapshot rejects invalid added_files");
     };
-    if added_files.is_empty() {
-        return Err(ProtocolError::InvalidObject(
-            "Gate 1 append must add at least one file".into(),
-        ));
-    }
     for file in added_files {
         let CanonicalValue::Object(file) = file else {
             unreachable!("validate_commit_snapshot rejects non-object added files");
         };
-        validate_gate1_added_file(file, snapshot_schema_id)?;
+        validate_runtime_profile_added_file(file, snapshot_schema_id)?;
     }
     if !matches!(
         operation.get("removed_file_ids"),
         Some(CanonicalValue::Array(removed)) if removed.is_empty()
     ) {
         return Err(ProtocolError::InvalidObject(
-            "Gate 1 append cannot remove files".into(),
+            "local/full-image profile append cannot remove files".into(),
         ));
     }
     Ok(())
 }
 
-fn validate_gate1_added_file(
+fn validate_runtime_profile_added_file(
     file: &BTreeMap<String, CanonicalValue>,
     snapshot_schema_id: u32,
 ) -> Result<(), ProtocolError> {
@@ -372,38 +396,56 @@ fn validate_gate1_added_file(
             "metrics",
             "metadata",
         ],
-        "Gate 1 added file",
+        "local/full-image profile added file",
     )?;
-    require_nonempty_string(file, "uri", "Gate 1 added file")?.parse::<RelativeUri>()?;
+    require_nonempty_string(file, "uri", "local/full-image profile added file")?
+        .parse::<RelativeUri>()?;
     if !matches!(file.get("object_identity"), Some(CanonicalValue::Null))
-        || require_nonempty_string(file, "file_format", "Gate 1 added file")? != "parquet"
-        || require_positive_u32(file, "schema_id", "Gate 1 added file")? != snapshot_schema_id
-        || require_u32(file, "partition_spec_id", "Gate 1 added file")? != 0
-        || require_u32(file, "sort_order_id", "Gate 1 added file")? != 0
+        || require_nonempty_string(file, "file_format", "local/full-image profile added file")?
+            != "parquet"
+        || require_positive_u32(file, "schema_id", "local/full-image profile added file")?
+            != snapshot_schema_id
+        || require_u32(
+            file,
+            "partition_spec_id",
+            "local/full-image profile added file",
+        )? != 0
+        || require_u32(file, "sort_order_id", "local/full-image profile added file")? != 0
         || !matches!(file.get("partition_values"), Some(CanonicalValue::Object(values)) if values.is_empty())
         || !matches!(file.get("metadata"), Some(CanonicalValue::Object(_)))
     {
         return Err(ProtocolError::InvalidObject(
-            "Gate 1 file descriptor is outside the Parquet append profile".into(),
+            "local/full-image profile file descriptor is outside the Parquet append profile".into(),
         ));
     }
-    require_gate1_i64(file, "file_size_bytes", "Gate 1 added file")?;
-    require_gate1_i64(file, "record_count", "Gate 1 added file")?;
-    require_nonempty_string(file, "content_sha256", "Gate 1 added file")?.parse::<Sha256>()?;
-    validate_gate1_metrics(file)
+    require_sqlite_i64(
+        file,
+        "file_size_bytes",
+        "local/full-image profile added file",
+    )?;
+    require_sqlite_i64(file, "record_count", "local/full-image profile added file")?;
+    require_nonempty_string(
+        file,
+        "content_sha256",
+        "local/full-image profile added file",
+    )?
+    .parse::<Sha256>()?;
+    validate_runtime_profile_metrics(file)
 }
 
-fn validate_gate1_metrics(file: &BTreeMap<String, CanonicalValue>) -> Result<(), ProtocolError> {
+fn validate_runtime_profile_metrics(
+    file: &BTreeMap<String, CanonicalValue>,
+) -> Result<(), ProtocolError> {
     let Some(CanonicalValue::Array(metrics)) = file.get("metrics") else {
         return Err(ProtocolError::InvalidObject(
-            "Gate 1 file metrics must be an array".into(),
+            "local/full-image profile file metrics must be an array".into(),
         ));
     };
     let mut field_ids = BTreeSet::new();
     for metric in metrics {
         let CanonicalValue::Object(metric) = metric else {
             return Err(ProtocolError::InvalidObject(
-                "Gate 1 metrics entries must be objects".into(),
+                "local/full-image profile metrics entries must be objects".into(),
             ));
         };
         require_exact_fields(
@@ -419,12 +461,12 @@ fn validate_gate1_metrics(file: &BTreeMap<String, CanonicalValue>) -> Result<(),
                 "upper_bound",
                 "metadata",
             ],
-            "Gate 1 metric",
+            "local/full-image profile metric",
         )?;
-        let field_id = require_positive_u32(metric, "field_id", "Gate 1 metric")?;
+        let field_id = require_positive_u32(metric, "field_id", "local/full-image profile metric")?;
         if !field_ids.insert(field_id) {
             return Err(ProtocolError::InvalidObject(
-                "Gate 1 metric field IDs must be unique".into(),
+                "local/full-image profile metric field IDs must be unique".into(),
             ));
         }
         for field in [
@@ -435,7 +477,7 @@ fn validate_gate1_metrics(file: &BTreeMap<String, CanonicalValue>) -> Result<(),
             "distinct_count",
         ] {
             if !matches!(metric.get(field), Some(CanonicalValue::Null)) {
-                require_gate1_i64(metric, field, "Gate 1 metric")?;
+                require_sqlite_i64(metric, field, "local/full-image profile metric")?;
             }
         }
         for field in ["lower_bound", "upper_bound"] {
@@ -448,14 +490,14 @@ fn validate_gate1_metrics(file: &BTreeMap<String, CanonicalValue>) -> Result<(),
                 }
                 _ => {
                     return Err(ProtocolError::InvalidObject(format!(
-                        "Gate 1 metric {field} must be null or a typed scalar"
+                        "local/full-image profile metric {field} must be null or a typed scalar"
                     )));
                 }
             }
         }
         if !matches!(metric.get("metadata"), Some(CanonicalValue::Object(_))) {
             return Err(ProtocolError::InvalidObject(
-                "Gate 1 metric metadata must be an object".into(),
+                "local/full-image profile metric metadata must be an object".into(),
             ));
         }
     }
@@ -676,7 +718,7 @@ fn require_decimal_u64(
     Ok(parsed)
 }
 
-fn require_gate1_i64(
+fn require_sqlite_i64(
     object: &BTreeMap<String, CanonicalValue>,
     field: &str,
     context: &str,
@@ -684,7 +726,7 @@ fn require_gate1_i64(
     let value = require_decimal_u64(object, field, context)?;
     if value > i64::MAX as u64 {
         return Err(ProtocolError::InvalidObject(format!(
-            "{context} {field} exceeds the Gate 1 SQLite INTEGER range"
+            "{context} {field} exceeds the local/full-image profile SQLite INTEGER range"
         )));
     }
     Ok(value)
@@ -762,7 +804,7 @@ pub struct Generation {
 }
 
 impl Generation {
-    pub fn validate_gate1(&self) -> Result<(), ProtocolError> {
+    pub fn validate_runtime_profile(&self) -> Result<(), ProtocolError> {
         if self.kind != "otmp.metadata-generation"
             || self.format_version != 1
             || self.metadata_image.codec != "otmp.metadata.sqlite3-cow.v1"
@@ -772,9 +814,137 @@ impl Generation {
             || self.metadata_image.checkpoint.table_version != self.table_version
         {
             return Err(ProtocolError::InvalidObject(
-                "generation is outside the Gate 1 full-image profile".into(),
+                "generation is outside the local/full-image profile full-image profile".into(),
             ));
         }
         Ok(())
     }
+}
+
+fn validate_metadata_operation(
+    fields: &BTreeMap<String, CanonicalValue>,
+    kind: &str,
+) -> Result<(), ProtocolError> {
+    let keys: &[&str] = match kind {
+        "set_properties" => &["type", "operation_id", "updates", "removals"],
+        "create_ref" => &["type", "operation_id", "ref", "ref_type", "snapshot_id"],
+        "replace_ref" => &["type", "operation_id", "ref", "snapshot_id"],
+        "drop_ref" => &["type", "operation_id", "ref"],
+        "add_schema" => &["type", "operation_id", "schema"],
+        "set_current_schema" => &["type", "operation_id", "schema_id"],
+        _ => unreachable!(),
+    };
+    require_exact_fields(fields, keys, kind)?;
+    match kind {
+        "set_properties" => {
+            if !matches!(fields.get("updates"), Some(CanonicalValue::Object(_)))
+                || !matches!(fields.get("removals"),Some(CanonicalValue::Array(values)) if values.iter().all(|v|matches!(v,CanonicalValue::String(_))))
+            {
+                return Err(ProtocolError::InvalidObject(
+                    "invalid properties shape".into(),
+                ));
+            }
+        }
+        "create_ref" | "replace_ref" | "drop_ref" => {
+            require_nonempty_string(fields, "ref", kind)?;
+            if kind == "create_ref"
+                && !matches!(
+                    require_nonempty_string(fields, "ref_type", kind)?,
+                    "branch" | "tag"
+                )
+            {
+                return Err(ProtocolError::InvalidObject("invalid ref type".into()));
+            }
+            if kind != "drop_ref"
+                && !matches!(fields.get("snapshot_id"), Some(CanonicalValue::Null))
+            {
+                parse_id(fields, "snapshot_id", kind)?;
+            }
+            if kind == "replace_ref"
+                && matches!(fields.get("snapshot_id"), Some(CanonicalValue::Null))
+            {
+                return Err(ProtocolError::InvalidObject(
+                    "replacement requires snapshot".into(),
+                ));
+            }
+        }
+        "add_schema" => {
+            let schema: Schema =
+                canonical_json::from_slice_canonical(&canonical_json::to_vec(&fields["schema"])?)?;
+            schema.validate()?;
+        }
+        "set_current_schema" => {
+            require_u32(fields, "schema_id", kind)?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+fn validate_requirement(value: &CanonicalValue) -> Result<(), ProtocolError> {
+    let CanonicalValue::Object(fields) = value else {
+        return Err(ProtocolError::InvalidObject(
+            "requirement must be an object".into(),
+        ));
+    };
+    let kind = require_nonempty_string(fields, "type", "requirement")?;
+    let keys: &[&str] = match kind {
+        "property_is" => &["type", "key", "value"],
+        "ref_absent" => &["type", "ref"],
+        "ref_exists" => &["type", "ref", "ref_type"],
+        "ref_snapshot_is" => &["type", "ref", "snapshot_id"],
+        "snapshot_exists" => &["type", "snapshot_id"],
+        "current_schema_is" | "schema_id_absent" => &["type", "schema_id"],
+        "field_ids_absent" => &["type", "field_ids"],
+        "default_partition_spec_is" => &["type", "partition_spec_id"],
+        "default_sort_order_is" => &["type", "sort_order_id"],
+        "table_version_is" => &["type", "table_version"],
+        "semantic_state_is" => &["type", "sha256"],
+        extension if extension.contains('.') => return Ok(()),
+        _ => return Err(ProtocolError::InvalidObject("unknown requirement".into())),
+    };
+    require_exact_fields(fields, keys, "requirement")?;
+    for key in keys {
+        match *key {
+            "ref" | "key" => {
+                require_nonempty_string(fields, key, "requirement")?;
+            }
+            "ref_type"
+                if !matches!(
+                    require_nonempty_string(fields, key, "requirement")?,
+                    "branch" | "tag"
+                ) =>
+            {
+                return Err(ProtocolError::InvalidObject("invalid ref type".into()));
+            }
+            "snapshot_id"
+                if (kind == "snapshot_exists"
+                    || !matches!(fields.get(*key), Some(CanonicalValue::Null))) =>
+            {
+                parse_id(fields, key, "requirement")?;
+            }
+            "schema_id" | "partition_spec_id" | "sort_order_id" => {
+                require_u32(fields, key, "requirement")?;
+            }
+            "table_version" => {
+                require_decimal_u64(fields, key, "requirement")?;
+            }
+            "field_ids" => {
+                let CanonicalValue::Array(ids) = &fields[*key] else {
+                    return Err(ProtocolError::InvalidObject(
+                        "field IDs must be array".into(),
+                    ));
+                };
+                let mut seen = BTreeSet::new();
+                for id in ids {
+                    let n: JsonU64 =
+                        canonical_json::from_slice_canonical(&canonical_json::to_vec(id)?)?;
+                    if n.0 == 0 || n.0 > u64::from(u32::MAX) || !seen.insert(n.0) {
+                        return Err(ProtocolError::InvalidObject("invalid field IDs".into()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }

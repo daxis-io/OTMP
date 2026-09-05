@@ -5,7 +5,7 @@
 > **Qualification demonstrated for the Rust local/full-image OTMP subset: self-contained
 > genesis, pinned catalog-free reads, byte-verified table-relative staging,
 > idempotent Parquet-descriptor append, conditional-publication reconciliation,
-> and append-safe rebase.**
+> append-safe rebase, and atomic property transactions.**
 
 This is a local proof of concept, not a production-readiness statement and not a
 claim of complete Core Reader or Direct Writer conformance.
@@ -26,16 +26,16 @@ claim of complete Core Reader or Direct Writer conformance.
 - One non-empty atomic Parquet-descriptor append batch to `main` is supported.
   The runtime validates metadata assertions but treats Parquet contents as
   opaque bytes.
-- The local/full-image profile accepts only its exact `initialize_table` and `commit_snapshot`
+- The local/full-image profile accepts its exact `initialize_table`, `set_properties`, and `commit_snapshot`
   operation shapes. It fails closed on every other core or extension operation
   instead of silently treating an unimplemented semantic mutation as valid.
 - Pinning verifies the complete supported semantic projection: snapshot fields,
   target ref, add-only change set, immutable file descriptors, partition
   tuples and hashes, and file metrics must agree with the relational image.
-- The relational history has no snapshot at genesis and exactly one contiguous
-  append snapshot per positive table version. The local/full-image profile exposes exactly one
+- The relational history has no snapshot at genesis and a contiguous global snapshot sequence independent of metadata-only table versions. The local/full-image profile exposes exactly one
   `main` branch, whose ancestry, current snapshot, and sequence allocator are
   checked against that history before reads or writes proceed.
+- Property updates and removals share one private SQLite transaction and conditional publication. Every touched key requires an exact `property_is` precondition. Metadata-only commits advance table version without allocating a snapshot or sequence.
 - An idempotency key binds to the canonical logical intent. A committed retry
   returns the originally stored result, including the winning file identities.
 - Append commit metadata and snapshot metadata are independent stable intent

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use otmp::{
     AppendFile, AppendRequest, CommitMetadata, FileFormat, FileMetric, InitializeRequest,
-    LocalObjectStore, RuntimeError, SnapshotMetadata, SourceFingerprint, Table,
+    LocalObjectStore, RuntimeError, SnapshotMetadata, SourceFingerprint, Table, TransactionRequest,
 };
 use otmp_protocol::{CanonicalValue, Schema, Sha256, TypedScalar, canonical_json};
 use serde::Deserialize;
@@ -14,7 +14,7 @@ use serde_json::json;
 #[command(
     name = "otmp",
     version,
-    about = "OTMP 0.0.2-alpha Gate 1 local/full-image POC"
+    about = "OTMP 0.0.2-alpha experimental local/full-image runtime"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -32,6 +32,11 @@ enum Command {
         path: PathBuf,
     },
     Append {
+        table: PathBuf,
+        #[arg(long)]
+        manifest: PathBuf,
+    },
+    Transact {
         table: PathBuf,
         #[arg(long)]
         manifest: PathBuf,
@@ -127,6 +132,7 @@ async fn main() {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run(cli: Cli) -> Result<serde_json::Value, RuntimeError> {
     match cli.command {
         Command::Init { table, schema } => {
@@ -190,6 +196,18 @@ async fn run(cli: Cli) -> Result<serde_json::Value, RuntimeError> {
             let table = Table::new(LocalObjectStore::new(table)?);
             Ok(serde_json::to_value(table.append_files(&request).await?)
                 .map_err(|error| RuntimeError::InvalidAppend(error.to_string()))?)
+        }
+        Command::Transact { table, manifest } => {
+            let bytes = tokio::fs::read(manifest).await?;
+            canonical_json::parse(&bytes)?;
+            let request: TransactionRequest = serde_json::from_slice(&bytes)
+                .map_err(|e| RuntimeError::InvalidTransaction(e.to_string()))?;
+            Ok(serde_json::to_value(
+                Table::new(LocalObjectStore::new(table)?)
+                    .transact(&request)
+                    .await?,
+            )
+            .map_err(|e| RuntimeError::InvalidTransaction(e.to_string()))?)
         }
         Command::Status { table } => {
             let table = Table::new(LocalObjectStore::new(table)?);

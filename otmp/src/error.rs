@@ -7,6 +7,16 @@ use crate::storage::StorageError;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    #[error("transaction is invalid: {0}")]
+    InvalidTransaction(String),
+    #[error("semantic conflict: {0}")]
+    SemanticConflict(String),
+    #[error("snapshot not found")]
+    SnapshotNotFound,
+    #[error("metadata version not found: {0}")]
+    MetadataVersionNotFound(u64),
+    #[error("history not retained for version: {0}")]
+    HistoryNotRetained(u64),
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
     #[error(transparent)]
@@ -41,6 +51,11 @@ impl RuntimeError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::InvalidTransaction(_) => "OTMP_INVALID_TRANSACTION",
+            Self::SemanticConflict(_) => "OTMP_SEMANTIC_CONFLICT",
+            Self::SnapshotNotFound => "OTMP_SNAPSHOT_NOT_FOUND",
+            Self::MetadataVersionNotFound(_) => "OTMP_METADATA_VERSION_NOT_FOUND",
+            Self::HistoryNotRetained(_) => "OTMP_HISTORY_NOT_RETAINED",
             Self::Protocol(error) => error.code(),
             Self::Storage(error) => error.code(),
             Self::Sqlite(_) => "OTMP_SQLITE_ERROR",

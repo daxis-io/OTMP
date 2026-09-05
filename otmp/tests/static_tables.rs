@@ -41,3 +41,15 @@ async fn static_genesis_and_append_packages_remain_readable() {
         Some(&canonical_json::parse(br#"{"io.daxis.otmp.fixture":{"scope":"snapshot"}}"#).unwrap())
     );
 }
+
+#[tokio::test]
+async fn static_transactions_package_separates_versions_and_snapshots() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../conformance/tables/transactions");
+    let table = Table::new(LocalObjectStore::new(root).unwrap());
+    table.verify().await.unwrap();
+    let pinned = table.pin().await.unwrap();
+    assert_eq!(pinned.status().table_version, 2);
+
+    assert_eq!(pinned.files("main").unwrap().len(), 1);
+}

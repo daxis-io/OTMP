@@ -3863,3 +3863,54 @@ Many readers use immutable generations without locks. Many writers prepare indep
 The semantic commit tells the world what the operation meant. The relational generation gives readers an already-materialized indexed state. The scan projection gives distributed engines a columnar planning path. The standard SQLite checkpoint makes the table inspectable, portable, and recoverable.
 
 When nobody is using the table, no table-specific compute remains running.
+
+
+## Pre-release local/full-image transaction profile
+
+The `0.0.2-alpha` draft evolves in place before the first official release. No
+backward compatibility, fixture migration, or feature-upgrade operation is
+promised. [Transactions, history, and refs](../docs/TRANSACTIONS.md) defines the
+implemented requirement/operation matrix, validation layers, retry behavior,
+selectors, verification scopes, additive-schema rules, and current exclusions.
+
+The profile advances table version once per semantic transaction, root revision
+once per successful HEAD replacement, and sequence only when creating a
+snapshot. Metadata and ref transactions MUST NOT create snapshots. Requirements
+MUST be evaluated against the pinned base before ordered operations execute in
+one private SQLite transaction. Durable operations and requirements remain open
+canonical protocol values. Known but unimplemented behavior MUST fail closed.
+
+Two additional core requirements allocate immutable schema/field identities:
+
+```json
+{"type":"schema_id_absent","schema_id":"2"}
+{"type":"field_ids_absent","field_ids":["2","3"]}
+```
+
+`schema_id_absent` asserts no schema with that ID exists in the base.
+`field_ids_absent` asserts that every listed positive, distinct field ID is
+absent from the table-global field registry, including prior schemas.
+
+In this profile, `create_ref` carries `operation_id`, `ref`, `ref_type`, and an
+explicit nullable `snapshot_id`; retention policy mutation is unimplemented.
+`replace_ref` carries `operation_id`, `ref`, and its new `snapshot_id`; the
+expected old target MUST appear in an exact `ref_snapshot_is` requirement.
+`add_schema` carries `operation_id` and a full `schema` object. All operation
+shapes include `type`. Counter IDs outside schema objects use decimal strings.
+New tables advertise `otmp.refs.v1` at genesis; `upgrade_features` is unsupported.
+
+Top-level null properties are rejected by this runtime; nested nulls are valid.
+`property_is.value: null` means absence and a missing `value` is malformed.
+Every touched property requires exactly one precondition, and keys may not be
+touched by multiple operations. Undefined `otmp.*` keys are rejected.
+
+Normal pinning validates the selected HEAD, generation, commit, image, features,
+and commit projection. Explicit historical verification validates retained
+transitions by replay into private images and comparison of logical tables.
+Metadata is selected before ref/snapshot/sequence resolution. Historical images
+have no fabricated historical root revision. Missing explicitly referenced
+objects and transport failures are not retention boundaries.
+
+For the general protocol `physical_parent` remains optional and informational.
+The full-image writer guarantees retention of each publication attempt's parent
+and every published full-image generation; garbage collection is out of scope.

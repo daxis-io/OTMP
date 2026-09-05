@@ -12,6 +12,7 @@ The workspace contains four crates:
 - `otmp`: the catalog-free table runtime, SQLite image implementation, storage
   seam, staging, and publication state machine;
 - `otmp-cli`: a local-directory command adapter;
+- `otmp-s3`: a bounded conditional-put adapter and separate provider-evidence harness.
 
 `conformance/` contains language-neutral codec/hash fixtures and self-contained
 table packages. `tests/` contains the subprocess crash-evidence harness and is

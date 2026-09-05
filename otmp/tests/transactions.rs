@@ -2,6 +2,7 @@ use otmp::{
     CommitMetadata, InitializeRequest, LocalObjectStore, OperationRequest, Requirement, Table,
     TransactionRequest,
 };
+use otmp::{MetadataSelection, SnapshotSelection};
 use otmp_protocol::{CanonicalValue, Schema, canonical_json};
 fn schema() -> Schema {
     serde_json::from_slice(include_bytes!("../../conformance/sources/schema.json")).unwrap()
@@ -107,4 +108,38 @@ async fn metadata_only_version_has_no_snapshot_and_replays_hash() {
     );
     assert!(pin.files("main").unwrap().is_empty());
     table.verify().await.unwrap();
+}
+
+#[tokio::test]
+async fn metadata_transactions_are_snapshot_free_and_replay_stable() {
+    let dir = tempfile::tempdir().unwrap();
+    let table = Table::new(LocalObjectStore::new(dir.path()).unwrap());
+    table
+        .initialize(InitializeRequest::new(schema()))
+        .await
+        .unwrap();
+    let request = property("owner", CanonicalValue::String("team".into()));
+    let result = table.transact(&request).await.unwrap();
+    assert_eq!(result.table_version, 1);
+    assert_eq!(table.transact(&request).await.unwrap(), result);
+    let current = table.pin().await.unwrap();
+    assert_eq!(current.status().current_snapshot_id, None);
+    assert_eq!(
+        current.status().semantic_state_sha256,
+        result.semantic_state_sha256
+    );
+    assert!(current.files("main").unwrap().is_empty());
+    let old = table
+        .pin_metadata(MetadataSelection::TableVersion(0))
+        .await
+        .unwrap();
+    assert_eq!(old.coordinates().table_version, 0);
+    assert_eq!(old.anchor().table_version, 1);
+    assert!(
+        old.resolve_snapshot(SnapshotSelection::Ref("main".into()))
+            .unwrap()
+            .descriptor()
+            .is_none()
+    );
+    table.verify_history().await.unwrap();
 }

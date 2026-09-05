@@ -1,8 +1,38 @@
 use super::{
-    BTreeSet, CanonicalValue, Id, PinnedTable, RefType, RuntimeError, Serialize, canonical_json,
-    id_from_blob, image, nonnegative, string, transactions,
+    BTreeMap, BTreeSet, CanonicalValue, ConditionalWriteOutcome, GENERATION_MEDIA_TYPE, Generation,
+    Head, Id, JsonU64, LiveFile, ObjectReference, ObjectStore, ObjectVersion, PinnedTable, RefType,
+    RelativeUri, RuntimeError, SemanticCommit, Serialize, Sha256, StorageError, StoredObject,
+    Table, canonical_json, hash_from_blob, id_from_blob, image, nonnegative, string, transactions,
+    verified_read,
 };
 use rusqlite::{Connection, OptionalExtension};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MetadataSelection {
+    Current,
+    TableVersion(u64),
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SnapshotSelection {
+    Ref(String),
+    SnapshotId(Id),
+    SequenceNumber(u64),
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct HeadAnchor {
+    pub table_id: Id,
+    pub table_version: u64,
+    pub root_revision: u64,
+    pub semantic_state_sha256: Sha256,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MetadataCoordinates {
+    pub table_id: Id,
+    pub table_version: u64,
+    pub commit_id: Id,
+    pub semantic_state_sha256: Sha256,
+    pub main_snapshot_id: Option<Id>,
+}
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SnapshotDescriptor {
     pub snapshot_id: Id,
@@ -16,6 +46,120 @@ pub struct SnapshotDescriptor {
     pub committed_at_ms: i64,
     pub summary: CanonicalValue,
     pub metadata: CanonicalValue,
+}
+pub struct PinnedMetadata {
+    state: PinnedTable,
+    coordinates: MetadataCoordinates,
+    anchor: HeadAnchor,
+}
+impl PinnedMetadata {
+    #[must_use]
+    pub const fn coordinates(&self) -> &MetadataCoordinates {
+        &self.coordinates
+    }
+    #[must_use]
+    pub const fn anchor(&self) -> &HeadAnchor {
+        &self.anchor
+    }
+    pub fn resolve_snapshot(
+        &self,
+        selection: SnapshotSelection,
+    ) -> Result<ResolvedSnapshot<'_>, RuntimeError> {
+        self.state.resolve_snapshot(selection)
+    }
+}
+pub struct ResolvedSnapshot<'pin> {
+    state: &'pin PinnedTable,
+    descriptor: Option<SnapshotDescriptor>,
+}
+impl ResolvedSnapshot<'_> {
+    #[must_use]
+    pub const fn descriptor(&self) -> Option<&SnapshotDescriptor> {
+        self.descriptor.as_ref()
+    }
+    pub fn files(&self) -> Result<Vec<LiveFile>, RuntimeError> {
+        let connection = image::open_readonly(&self.state.image.path)?;
+        let mut files = Vec::new();
+        for id in ancestry(&connection, self.descriptor.as_ref().map(|d| d.snapshot_id))? {
+            let mut statement = connection.prepare("SELECT f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,s.sequence_number FROM otmp_files f JOIN otmp_snapshot_file_changes c USING(file_id) JOIN otmp_snapshots s USING(snapshot_id) WHERE c.snapshot_id=?1 AND c.change_kind='add'")?;
+            for row in statement.query_map([id.as_bytes().as_slice()], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, Option<Vec<u8>>>(5)?,
+                    r.get::<_, i64>(6)?,
+                ))
+            })? {
+                let row = row?;
+                files.push(LiveFile {
+                    file_id: id_from_blob(row.0)?,
+                    uri: row.1.parse()?,
+                    file_format: row.2,
+                    file_size_bytes: nonnegative(row.3, "length")?,
+                    record_count: nonnegative(row.4, "record count")?,
+                    content_sha256: row.5.map(hash_from_blob).transpose()?,
+                    sequence_number: nonnegative(row.6, "sequence")?,
+                });
+            }
+        }
+        files.sort_by_key(|f| (f.sequence_number, f.file_id));
+        Ok(files)
+    }
+}
+impl PinnedTable {
+    pub fn resolve_snapshot(
+        &self,
+        selection: SnapshotSelection,
+    ) -> Result<ResolvedSnapshot<'_>, RuntimeError> {
+        let connection = image::open_readonly(&self.image.path)?;
+        let id = match selection {
+            SnapshotSelection::Ref(name) => {
+                transactions::ref_row(&connection, &name)?
+                    .ok_or(RuntimeError::RefNotFound(name))?
+                    .1
+            }
+            SnapshotSelection::SnapshotId(id) => Some(id),
+            SnapshotSelection::SequenceNumber(sequence) => {
+                let sequence =
+                    i64::try_from(sequence).map_err(|_| RuntimeError::SnapshotNotFound)?;
+                let mut stmt = connection
+                    .prepare("SELECT snapshot_id FROM otmp_snapshots WHERE sequence_number=?1")?;
+                let ids = stmt
+                    .query_map([sequence], |r| r.get::<_, Vec<u8>>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                match ids.as_slice() {
+                    [] => return Err(RuntimeError::SnapshotNotFound),
+                    [id] => Some(id_from_blob(id.clone())?),
+                    _ => return Err(RuntimeError::Corrupt("duplicate snapshot sequence".into())),
+                }
+            }
+        };
+        let descriptor = id.map(|id| descriptor(&connection, id)).transpose()?;
+        Ok(ResolvedSnapshot {
+            state: self,
+            descriptor,
+        })
+    }
+    fn anchor(&self) -> HeadAnchor {
+        HeadAnchor {
+            table_id: self.head.table_id,
+            table_version: self.head.table_version.0,
+            root_revision: self.head.root_revision.0,
+            semantic_state_sha256: self.head.semantic_state_sha256,
+        }
+    }
+    fn coordinates(&self) -> MetadataCoordinates {
+        MetadataCoordinates {
+            table_id: self.head.table_id,
+            table_version: self.head.table_version.0,
+            commit_id: self.commit.commit_id,
+            semantic_state_sha256: self.head.semantic_state_sha256,
+            main_snapshot_id: self.current_main,
+        }
+    }
 }
 fn descriptor(connection: &Connection, id: Id) -> Result<SnapshotDescriptor, RuntimeError> {
     let row = connection.query_row("SELECT parent_snapshot_id,sequence_number,committed_table_version,schema_id,partition_spec_id,sort_order_id,operation,committed_at_ms,summary_json,metadata_json FROM otmp_snapshots WHERE snapshot_id=?1",[id.as_bytes().as_slice()], |r| Ok((r.get::<_,Option<Vec<u8>>>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get::<_,String>(8)?,r.get::<_,String>(9)?))).optional()?.ok_or(RuntimeError::SnapshotNotFound)?;
@@ -33,6 +177,7 @@ fn descriptor(connection: &Connection, id: Id) -> Result<SnapshotDescriptor, Run
         metadata: canonical_json::parse_canonical(row.9.as_bytes())?,
     })
 }
+
 pub(crate) fn ancestry(
     connection: &Connection,
     mut tip: Option<Id>,
@@ -111,4 +256,503 @@ pub(super) fn validate_append_rebase(
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationScope {
+    Current,
+    RetainedHistory,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct VerificationReport {
+    pub scope: VerificationScope,
+    pub anchor: HeadAnchor,
+    pub completed: bool,
+    pub generations_checked: u64,
+    pub commits_checked: u64,
+    pub snapshots_checked: u64,
+    pub objects_checked: u64,
+    pub bytes_checked: u64,
+}
+impl<S: ObjectStore> Table<S> {
+    pub async fn pin_metadata(
+        &self,
+        selection: MetadataSelection,
+    ) -> Result<PinnedMetadata, RuntimeError> {
+        let mut state = self.pin().await?;
+        let anchor = state.anchor();
+        if let MetadataSelection::TableVersion(version) = selection {
+            if version > anchor.table_version {
+                return Err(RuntimeError::MetadataVersionNotFound(version));
+            }
+            let mut seen = BTreeSet::from([state.generation.generation_id]);
+            while state.head.table_version.0 > version {
+                let reference = state
+                    .generation
+                    .physical_parent
+                    .clone()
+                    .ok_or(RuntimeError::HistoryNotRetained(version))?;
+                state = self.load_parent(&state, &reference, &mut seen).await?;
+            }
+            if state.head.table_version.0 != version {
+                return Err(RuntimeError::HistoryNotRetained(version));
+            }
+        }
+        Ok(PinnedMetadata {
+            coordinates: state.coordinates(),
+            state,
+            anchor,
+        })
+    }
+    async fn load_parent(
+        &self,
+        child: &PinnedTable,
+        reference: &ObjectReference,
+        seen: &mut BTreeSet<Id>,
+    ) -> Result<PinnedTable, RuntimeError> {
+        if reference.media_type.as_deref() != Some(GENERATION_MEDIA_TYPE)
+            || reference.length.is_none()
+        {
+            return Err(RuntimeError::Corrupt(
+                "invalid physical parent reference".into(),
+            ));
+        }
+        let object = verified_read(&self.store, reference).await?;
+        let generation: Generation = canonical_json::from_slice_canonical(&object.bytes)?;
+        validate_generation_edge(&child.generation, &generation, seen)?;
+        let commit_object = verified_read(&self.store, &generation.semantic_commit).await?;
+        let commit: SemanticCommit = canonical_json::from_slice_canonical(&commit_object.bytes)?;
+        // This internal envelope only drives common validation; historical coordinates never expose a root revision.
+        let head = Head {
+            table_version: generation.table_version,
+            semantic_state_sha256: generation.semantic_state_sha256,
+            semantic_commit: generation.semantic_commit.clone(),
+            metadata_generation: reference.clone(),
+            required_reader_features: commit.required_reader_features_after_commit.clone(),
+            required_writer_features: commit.required_writer_features_after_commit.clone(),
+            ..child.head.clone()
+        };
+        self.load_pin(
+            StoredObject {
+                bytes: child.raw_head.clone(),
+                version: child.head_version.clone(),
+            },
+            head,
+        )
+        .await
+    }
+    async fn verify_retained_commit_tail(
+        &self,
+        state: &PinnedTable,
+        seen: &mut BTreeSet<Id>,
+    ) -> Result<(), RuntimeError> {
+        let mut reference = Some(state.head.semantic_commit.clone());
+        let mut commits = Vec::new();
+        let mut previous_version = None;
+        while let Some(r) = reference.take() {
+            if r.media_type.as_deref() != Some(super::COMMIT_MEDIA_TYPE) || r.length.is_none() {
+                return Err(RuntimeError::Corrupt(
+                    "invalid retained commit reference".into(),
+                ));
+            }
+            let bytes = verified_read(&self.store, &r).await?.bytes;
+            let commit: SemanticCommit = canonical_json::from_slice_canonical(&bytes)?;
+            commit.validate_runtime_profile()?;
+            if commit.table_id != state.head.table_id
+                || previous_version
+                    .is_some_and(|v: u64| commit.table_version.0.checked_add(1) != Some(v))
+            {
+                return Err(RuntimeError::Corrupt(
+                    "invalid retained semantic ancestry".into(),
+                ));
+            }
+            let hash = if let Some(previous) = commit.previous_semantic_state_sha256 {
+                super::next_state_hash(previous, &super::commit_body(&commit)?)
+            } else {
+                super::genesis_state_hash(&super::commit_body(&commit)?)
+            };
+            if hash != commit.semantic_state_sha256 {
+                return Err(RuntimeError::Corrupt(
+                    "retained semantic state hash mismatch".into(),
+                ));
+            }
+            commit
+                .required_reader_features_after_commit
+                .require_supported(&BTreeSet::from([
+                    super::CORE_FEATURE,
+                    super::PARQUET_FEATURE,
+                    super::SQLITE_COW_FEATURE,
+                    "otmp.refs.v1",
+                ]))?;
+            seen.insert(commit.commit_id);
+            previous_version = Some(commit.table_version.0);
+            reference.clone_from(&commit.parent_commit);
+            commits.push((r, commit));
+        }
+        commits.reverse();
+        let mut reconstructed: Option<image::CheckpointImage> = None;
+        for (reference, commit) in commits {
+            let checkpoint = if let Some(parent) = &reconstructed {
+                let row = image::open_readonly(&parent.path)?.query_row(
+                    "SELECT semantic_state_sha256 FROM otmp_meta",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if Some(hash_from_blob(row)?) != commit.previous_semantic_state_sha256 {
+                    return Err(RuntimeError::Corrupt(
+                        "retained semantic hash chain mismatch".into(),
+                    ));
+                }
+                image::replay_semantic_commit(&parent.path, &commit, &reference.uri)?
+            } else {
+                image::replay_genesis(&commit, &reference.uri)?
+            };
+            image::validate_commit_projection(&checkpoint.path, &commit)?;
+            reconstructed = Some(checkpoint);
+        }
+        image::compare_logical_images(
+            &reconstructed
+                .ok_or_else(|| RuntimeError::Corrupt("empty semantic history".into()))?
+                .path,
+            &state.image.path,
+        )
+    }
+
+    pub async fn verify(&self) -> Result<(), RuntimeError> {
+        self.verify_with_report(VerificationScope::Current)
+            .await
+            .map(|_| ())
+    }
+    pub async fn verify_history(&self) -> Result<(), RuntimeError> {
+        self.verify_with_report(VerificationScope::RetainedHistory)
+            .await
+            .map(|_| ())
+    }
+    pub async fn verify_with_report(
+        &self,
+        scope: VerificationScope,
+    ) -> Result<VerificationReport, RuntimeError> {
+        let cache = ReadCache {
+            inner: self.store.clone(),
+            objects: std::sync::Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+        };
+        let table = Table::new(cache);
+        let mut state = table.pin().await?;
+        let mut report = VerificationReport {
+            scope,
+            anchor: state.anchor(),
+            completed: false,
+            generations_checked: 0,
+            commits_checked: 0,
+            snapshots_checked: 0,
+            objects_checked: 0,
+            bytes_checked: 0,
+        };
+        let mut seen = BTreeSet::from([state.generation.generation_id]);
+        let mut commits = BTreeSet::new();
+        let mut snapshots = BTreeSet::new();
+        loop {
+            report.generations_checked += 1;
+            commits.insert(state.commit.commit_id);
+            let connection = image::open_readonly(&state.image.path)?;
+            let query = if scope == VerificationScope::RetainedHistory {
+                "SELECT snapshot_id FROM otmp_snapshots"
+            } else {
+                "SELECT DISTINCT snapshot_id FROM otmp_refs WHERE snapshot_id IS NOT NULL"
+            };
+            let mut stmt = connection.prepare(query)?;
+            for row in stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))? {
+                let id = id_from_blob(row?)?;
+                for ancestor in ancestry(&connection, Some(id))? {
+                    snapshots.insert(ancestor);
+                }
+                for file in state
+                    .resolve_snapshot(SnapshotSelection::SnapshotId(id))?
+                    .files()?
+                {
+                    verified_read(
+                        &table.store,
+                        &ObjectReference {
+                            uri: file.uri,
+                            sha256: file.content_sha256.ok_or_else(|| {
+                                RuntimeError::Corrupt("missing content hash".into())
+                            })?,
+                            length: Some(JsonU64(file.file_size_bytes)),
+                            media_type: None,
+                        },
+                    )
+                    .await?;
+                }
+            }
+            if scope == VerificationScope::Current {
+                break;
+            }
+            let Some(reference) = state.generation.physical_parent.clone() else {
+                table
+                    .verify_retained_commit_tail(&state, &mut commits)
+                    .await?;
+                break;
+            };
+            let parent = table.load_parent(&state, &reference, &mut seen).await?;
+            image::validate_transition(&parent.image.path, &state.image.path, &state.commit)?;
+            state = parent;
+        }
+        let objects = table.store.objects.lock().await;
+        report.objects_checked = objects.len() as u64;
+        report.bytes_checked = objects.values().map(|o| o.bytes.len() as u64).sum();
+        report.commits_checked = commits.len() as u64;
+        report.snapshots_checked = snapshots.len() as u64;
+        report.completed = true;
+        Ok(report)
+    }
+}
+fn validate_generation_edge(
+    child: &Generation,
+    parent: &Generation,
+    seen: &mut BTreeSet<Id>,
+) -> Result<(), RuntimeError> {
+    if !seen.insert(parent.generation_id)
+        || child.table_id != parent.table_id
+        || parent.table_version.0 > child.table_version.0
+        || (parent.table_version == child.table_version
+            && (parent.semantic_state_sha256 != child.semantic_state_sha256
+                || parent.semantic_commit != child.semantic_commit))
+    {
+        return Err(RuntimeError::Corrupt(
+            "invalid retained generation ancestry".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct ReadCache<S> {
+    inner: S,
+    objects: std::sync::Arc<tokio::sync::Mutex<BTreeMap<String, StoredObject>>>,
+}
+#[async_trait::async_trait]
+impl<S: ObjectStore> ObjectStore for ReadCache<S> {
+    async fn read(&self, key: &RelativeUri) -> Result<StoredObject, StorageError> {
+        let mut objects = self.objects.lock().await;
+        if let Some(object) = objects.get(key.as_str()) {
+            return Ok(object.clone());
+        }
+        let object = self.inner.read(key).await?;
+        objects.insert(key.to_string(), object.clone());
+        Ok(object)
+    }
+    async fn create_from_reader(
+        &self,
+        _key: &RelativeUri,
+        _reader: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+        _length: Option<u64>,
+    ) -> Result<crate::storage::CreatedObject, StorageError> {
+        Err(StorageError::Unsupported("read-only verification".into()))
+    }
+    async fn create_head(&self, _bytes: &[u8]) -> ConditionalWriteOutcome {
+        ConditionalWriteOutcome::Indeterminate {
+            source: StorageError::Unsupported("read-only verification".into()),
+        }
+    }
+    async fn replace_head(
+        &self,
+        _version: &ObjectVersion,
+        _bytes: &[u8],
+    ) -> ConditionalWriteOutcome {
+        ConditionalWriteOutcome::Indeterminate {
+            source: StorageError::Unsupported("read-only verification".into()),
+        }
+    }
+    async fn delete_if_version(
+        &self,
+        _key: &RelativeUri,
+        _version: &ObjectVersion,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::Unsupported("read-only verification".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::InMemoryObjectStore;
+    use crate::runtime::{head_key, new_id, object_reference};
+    use crate::{
+        CommitMetadata, InitializeRequest, OperationRequest, Requirement, TransactionRequest,
+    };
+    use otmp_protocol::object_hash;
+
+    async fn setup() -> (InMemoryObjectStore, Table<InMemoryObjectStore>) {
+        let store = InMemoryObjectStore::default();
+        let table = Table::new(store.clone());
+        let schema =
+            serde_json::from_slice(include_bytes!("../../../conformance/sources/schema.json"))
+                .unwrap();
+        table
+            .initialize(InitializeRequest::new(schema))
+            .await
+            .unwrap();
+        (store, table)
+    }
+    async fn repack(store: &InMemoryObjectStore, change: impl FnOnce(&mut Generation)) {
+        let raw = store.read(&head_key().unwrap()).await.unwrap();
+        let mut head: Head = canonical_json::from_slice_canonical(&raw.bytes).unwrap();
+        let mut generation: Generation = canonical_json::from_slice_canonical(
+            &store
+                .read(&head.metadata_generation.uri)
+                .await
+                .unwrap()
+                .bytes,
+        )
+        .unwrap();
+        generation.physical_parent = Some(head.metadata_generation.clone());
+        generation.generation_id = new_id();
+        change(&mut generation);
+        let bytes = canonical_json::to_vec(&generation).unwrap();
+        let uri = format!(
+            "_otmp/generations/{}/{}.json",
+            generation.table_version.0, generation.generation_id
+        )
+        .parse()
+        .unwrap();
+        store.create_bytes(&uri, &bytes).await.unwrap();
+        head.metadata_generation = object_reference(
+            uri,
+            object_hash(&bytes),
+            bytes.len() as u64,
+            GENERATION_MEDIA_TYPE,
+        );
+        head.root_revision.0 += 1;
+        assert!(matches!(
+            store
+                .replace_head(&raw.version, &canonical_json::to_vec(&head).unwrap())
+                .await,
+            ConditionalWriteOutcome::Applied { .. }
+        ));
+    }
+    async fn property(table: &Table<InMemoryObjectStore>) {
+        table
+            .transact(&TransactionRequest {
+                idempotency_key: "one".into(),
+                requirements: vec![Requirement::PropertyIs {
+                    key: "owner".into(),
+                    value: CanonicalValue::Null,
+                }],
+                operations: vec![OperationRequest::SetProperties {
+                    operation_id: "set".into(),
+                    updates: [("owner".into(), CanonicalValue::Bool(true))].into(),
+                    removals: vec![],
+                }],
+                commit_metadata: CommitMetadata::default(),
+            })
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn same_version_generations_have_separate_anchor_and_deduplicated_verification() {
+        let (store, table) = setup().await;
+        repack(&store, |_| {}).await;
+        let selected = table
+            .pin_metadata(MetadataSelection::TableVersion(0))
+            .await
+            .unwrap();
+        assert_eq!(selected.anchor().root_revision, 1);
+        assert_eq!(selected.coordinates().table_version, 0);
+        let before = store.read_count();
+        let report = table
+            .verify_with_report(VerificationScope::RetainedHistory)
+            .await
+            .unwrap();
+        assert_eq!(report.generations_checked, 2);
+        assert_eq!(report.commits_checked, 1);
+        assert_eq!(store.read_count() - before, report.objects_checked);
+    }
+    #[tokio::test]
+    async fn retention_boundary_is_distinct_from_missing_explicit_parent() {
+        let (store, table) = setup().await;
+        property(&table).await;
+        repack(&store, |g| g.physical_parent = None).await;
+        let report = table
+            .verify_with_report(VerificationScope::RetainedHistory)
+            .await
+            .unwrap();
+        assert_eq!(report.generations_checked, 1);
+        assert_eq!(report.commits_checked, 2);
+        assert!(matches!(
+            table.pin_metadata(MetadataSelection::TableVersion(0)).await,
+            Err(RuntimeError::HistoryNotRetained(0))
+        ));
+        repack(&store, |g| {
+            g.physical_parent.as_mut().unwrap().uri =
+                "_otmp/generations/missing.json".parse().unwrap();
+        })
+        .await;
+        assert!(matches!(
+            table.pin_metadata(MetadataSelection::TableVersion(0)).await,
+            Err(RuntimeError::Storage(StorageError::NotFound(_)))
+        ));
+        table.verify().await.unwrap();
+    }
+    #[tokio::test]
+    async fn unknown_required_feature_is_rejected_before_metadata_reads() {
+        let (store, table) = setup().await;
+        let object = store.read(&head_key().unwrap()).await.unwrap();
+        let mut head: Head = canonical_json::from_slice_canonical(&object.bytes).unwrap();
+        let mut features = head.required_reader_features.as_slice().to_vec();
+        features.push("otmp.unknown.v1".into());
+        features.sort();
+        head.required_reader_features = otmp_protocol::FeatureSet::new(features).unwrap();
+        store.replace_object_for_test(&head_key().unwrap(), canonical_json::to_vec(&head).unwrap());
+        let before = store.read_count();
+        assert!(table.pin().await.is_err());
+        assert_eq!(store.read_count() - before, 1);
+    }
+
+    #[tokio::test]
+    async fn null_and_real_empty_snapshots_are_distinct_without_file_queries() {
+        let (_, table) = setup().await;
+        let state = table.pin().await.unwrap();
+        assert!(
+            state
+                .resolve_snapshot(SnapshotSelection::Ref("main".into()))
+                .unwrap()
+                .descriptor()
+                .is_none()
+        );
+        let id = new_id();
+        let connection = Connection::open(&state.image.path).unwrap();
+        connection.execute("INSERT INTO otmp_snapshots(snapshot_id,parent_snapshot_id,sequence_number,schema_id,partition_spec_id,sort_order_id,operation,committed_table_version,committed_at_ms) VALUES(?1,NULL,1,1,0,0,'append',1,1)",[id.as_bytes().as_slice()]).unwrap();
+        let selected = state
+            .resolve_snapshot(SnapshotSelection::SnapshotId(id))
+            .unwrap();
+        assert!(selected.descriptor().is_some());
+        assert!(selected.files().unwrap().is_empty());
+        connection
+            .execute("DROP TABLE otmp_snapshot_file_changes", [])
+            .unwrap();
+        assert!(
+            state
+                .resolve_snapshot(SnapshotSelection::SequenceNumber(1))
+                .unwrap()
+                .descriptor()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn parsed_generation_graph_rejects_cycles_increases_and_divergence() {
+        let (_, table) = setup().await;
+        let pinned = table.pin().await.unwrap();
+        let child = pinned.generation;
+        let mut seen = BTreeSet::from([child.generation_id]);
+        assert!(validate_generation_edge(&child, &child, &mut seen).is_err());
+        let mut parent = child.clone();
+        parent.generation_id = new_id();
+        parent.table_version.0 = 1;
+        assert!(validate_generation_edge(&child, &parent, &mut BTreeSet::new()).is_err());
+        parent.table_version.0 = 0;
+        parent.semantic_state_sha256 = Sha256::digest(b"different");
+        assert!(validate_generation_edge(&child, &parent, &mut BTreeSet::new()).is_err());
+    }
 }

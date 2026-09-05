@@ -1,12 +1,11 @@
 pub(crate) mod history;
 pub(crate) mod transactions;
-
+pub use history::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use transactions::RefType;
 pub use transactions::{
-    OperationRequest, OperationResult, Requirement, TransactionRequest, TransactionResult,
+    OperationRequest, OperationResult, RefType, Requirement, TransactionRequest, TransactionResult,
 };
 
 use otmp_protocol::{
@@ -287,8 +286,8 @@ pub struct PinnedTable {
     raw_head: Vec<u8>,
     head_version: ObjectVersion,
     head: Head,
-    _commit: SemanticCommit,
-    _generation: Generation,
+    commit: SemanticCommit,
+    generation: Generation,
     current_main: Option<Id>,
     checkpoint_bytes: Vec<u8>,
     image: MaterializedImage,
@@ -678,30 +677,11 @@ impl<S: ObjectStore> Table<S> {
             raw_head: raw_head.bytes,
             head_version: raw_head.version,
             head,
-            _commit: commit,
-            _generation: generation,
+            commit,
+            generation,
             checkpoint_bytes: checkpoint.bytes,
             image,
         })
-    }
-
-    pub async fn verify(&self) -> Result<(), RuntimeError> {
-        let pinned = self.pin().await?;
-        for file in pinned.files("main")? {
-            verified_read(
-                &self.store,
-                &ObjectReference {
-                    uri: file.uri,
-                    sha256: file
-                        .content_sha256
-                        .ok_or_else(|| RuntimeError::Corrupt("missing content hash".into()))?,
-                    length: Some(JsonU64(file.file_size_bytes)),
-                    media_type: None,
-                },
-            )
-            .await?;
-        }
-        Ok(())
     }
 
     pub async fn stage_file(

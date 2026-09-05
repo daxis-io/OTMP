@@ -1692,83 +1692,6 @@ fn hash_from_blob(blob: Vec<u8>) -> Result<Sha256, RuntimeError> {
     Ok(Sha256::from_bytes(bytes))
 }
 
-pub(crate) fn apply_metadata(
-    parent: &[u8],
-    commit: &SemanticCommit,
-    uri: &otmp_protocol::RelativeUri,
-    operations: &[crate::OperationRequest],
-) -> Result<CheckpointImage, RuntimeError> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join("metadata.sqlite3");
-    fs::write(&path, parent)?;
-    let mut connection = Connection::open(&path)?;
-    connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE;")?;
-    let tx = connection.transaction()?;
-    crate::runtime::transactions::apply_operations(&tx, operations, commit.table_version.0)?;
-    let hash = otmp_protocol::object_hash(&canonical_json::to_vec(commit)?);
-    let version = sqlite_i64(commit.table_version.0, "version")?;
-    let intent = &commit.intents[0];
-    let result = canonical_string(&intent.result)?;
-    tx.execute("INSERT INTO otmp_commits(table_version,commit_id,parent_table_version,created_at_ms,intent_count,semantic_state_sha256,commit_object_uri,commit_object_sha256,operation_summary_json,result_json,metadata_json) VALUES(?1,?2,?3,?4,1,?5,?6,?7,?8,?9,?10)", params![version,commit.commit_id.as_bytes().as_slice(),version-1,commit.created_at_ms.0,commit.semantic_state_sha256.as_bytes().as_slice(),uri.as_str(),hash.as_bytes().as_slice(),canonical_string(&commit.operations)?,result,canonical_string(&commit.metadata)?])?;
-    tx.execute(
-        "INSERT INTO otmp_idempotency VALUES(?1,?2,?3,?4,?5)",
-        params![
-            intent.key,
-            intent.intent_sha256.as_bytes().as_slice(),
-            commit.commit_id.as_bytes().as_slice(),
-            version,
-            result
-        ],
-    )?;
-    tx.execute("UPDATE otmp_meta SET table_version=?1,semantic_state_sha256=?2,last_commit_id=?3,last_commit_sha256=?4", params![version,commit.semantic_state_sha256.as_bytes().as_slice(),commit.commit_id.as_bytes().as_slice(),hash.as_bytes().as_slice()])?;
-    tx.commit()?;
-    drop(connection);
-    finish_checkpoint(directory, path)
-}
-
-fn validate_metadata_projection(
-    connection: &Connection,
-    commit: &SemanticCommit,
-) -> Result<(), RuntimeError> {
-    use crate::OperationRequest;
-    let version = sqlite_i64(commit.table_version.0, "version")?;
-    for value in &commit.operations {
-        let CanonicalValue::Object(fields) = value else {
-            continue;
-        };
-        if matches!(fields.get("type"),Some(CanonicalValue::String(t)) if t=="initialize_table" || t=="commit_snapshot")
-        {
-            continue;
-        }
-        let operation: OperationRequest =
-            canonical_json::from_slice_canonical(&canonical_json::to_vec(value)?)?;
-        let valid = match operation {
-            OperationRequest::SetProperties {
-                updates, removals, ..
-            } => {
-                let mut valid = true;
-                for (key, value) in updates {
-                    let row:Option<(String,i64)>=connection.query_row("SELECT value_json,updated_version FROM otmp_properties WHERE property_key=?1",[key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-                    valid &= row == Some((canonical_string(&value)?, version));
-                }
-                for key in removals {
-                    valid &= !connection.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM otmp_properties WHERE property_key=?1)",
-                        [key],
-                        |r| r.get::<_, bool>(0),
-                    )?;
-                }
-                valid
-            }
-        };
-        if !valid {
-            return Err(RuntimeError::Corrupt(
-                "metadata operation differs from relational projection".into(),
-            ));
-        }
-    }
-    Ok(())
-}
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -2230,7 +2153,144 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+pub(crate) fn apply_metadata(
+    parent: &[u8],
+    commit: &SemanticCommit,
+    uri: &otmp_protocol::RelativeUri,
+    operations: &[crate::OperationRequest],
+) -> Result<CheckpointImage, RuntimeError> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("metadata.sqlite3");
+    fs::write(&path, parent)?;
+    let mut connection = Connection::open(&path)?;
+    connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE;")?;
+    let tx = connection.transaction()?;
+    crate::runtime::transactions::apply_operations(&tx, operations, commit.table_version.0)?;
+    let hash = otmp_protocol::object_hash(&canonical_json::to_vec(commit)?);
+    let version = sqlite_i64(commit.table_version.0, "version")?;
+    let intent = &commit.intents[0];
+    let result = canonical_string(&intent.result)?;
+    tx.execute("INSERT INTO otmp_commits(table_version,commit_id,parent_table_version,created_at_ms,intent_count,semantic_state_sha256,commit_object_uri,commit_object_sha256,operation_summary_json,result_json,metadata_json) VALUES(?1,?2,?3,?4,1,?5,?6,?7,?8,?9,?10)", params![version,commit.commit_id.as_bytes().as_slice(),version-1,commit.created_at_ms.0,commit.semantic_state_sha256.as_bytes().as_slice(),uri.as_str(),hash.as_bytes().as_slice(),canonical_string(&commit.operations)?,result,canonical_string(&commit.metadata)?])?;
+    tx.execute(
+        "INSERT INTO otmp_idempotency VALUES(?1,?2,?3,?4,?5)",
+        params![
+            intent.key,
+            intent.intent_sha256.as_bytes().as_slice(),
+            commit.commit_id.as_bytes().as_slice(),
+            version,
+            result
+        ],
+    )?;
+    tx.execute("UPDATE otmp_meta SET table_version=?1,semantic_state_sha256=?2,last_commit_id=?3,last_commit_sha256=?4", params![version,commit.semantic_state_sha256.as_bytes().as_slice(),commit.commit_id.as_bytes().as_slice(),hash.as_bytes().as_slice()])?;
+    tx.commit()?;
+    drop(connection);
+    finish_checkpoint(directory, path)
+}
+
+pub(crate) fn validate_transition(
+    parent: &Path,
+    selected: &Path,
+    commit: &SemanticCommit,
+) -> Result<(), RuntimeError> {
+    let previous = open_readonly(parent)?;
+    let version: i64 =
+        previous.query_row("SELECT table_version FROM otmp_meta", [], |r| r.get(0))?;
+    if u64::try_from(version).ok() == Some(commit.table_version.0) {
+        return compare_logical_images(parent, selected);
+    }
+    let selected_connection = open_readonly(selected)?;
+    let uri: String = selected_connection.query_row(
+        "SELECT commit_object_uri FROM otmp_commits WHERE commit_id=?1",
+        [commit.commit_id.as_bytes().as_slice()],
+        |r| r.get(0),
+    )?;
+    let expected = replay_semantic_commit(parent, commit, &uri.parse()?)?;
+    compare_logical_images(&expected.path, selected)
+}
+
+pub(crate) fn replay_semantic_commit(
+    parent: &Path,
+    commit: &SemanticCommit,
+    uri: &otmp_protocol::RelativeUri,
+) -> Result<CheckpointImage, RuntimeError> {
+    let previous = open_readonly(parent)?;
+    let version: i64 =
+        previous.query_row("SELECT table_version FROM otmp_meta", [], |r| r.get(0))?;
+    if version.checked_add(1).and_then(|n| u64::try_from(n).ok()) != Some(commit.table_version.0) {
+        return Err(RuntimeError::Corrupt(
+            "retained semantic version gap".into(),
+        ));
+    }
+    let requirements = commit
+        .requirements
+        .iter()
+        .map(|v| canonical_json::from_slice_canonical(&canonical_json::to_vec(v)?))
+        .collect::<Result<Vec<crate::Requirement>, otmp_protocol::ProtocolError>>()?;
+    crate::runtime::transactions::evaluate(&previous, &requirements)?;
+    let is_append = matches!(&commit.operations[0],CanonicalValue::Object(o) if o.get("type") == Some(&CanonicalValue::String("commit_snapshot".into())));
+    if is_append {
+        replay_append(&fs::read(parent)?, commit, uri)
+    } else {
+        let operations = commit
+            .operations
+            .iter()
+            .map(|v| canonical_json::from_slice_canonical(&canonical_json::to_vec(v)?))
+            .collect::<Result<Vec<crate::OperationRequest>, otmp_protocol::ProtocolError>>()?;
+        let request = crate::TransactionRequest {
+            idempotency_key: commit.intents[0].key.clone(),
+            requirements,
+            operations: operations.clone(),
+            commit_metadata: canonical_json::from_slice_canonical(&canonical_json::to_vec(
+                &commit.metadata,
+            )?)?,
+        };
+        let results = crate::runtime::transactions::prepare_operations(&previous, &request)?;
+        let durable = crate::runtime::transactions::DurableResult {
+            table_version: commit.table_version.0,
+            commit_id: commit.commit_id,
+            operation_results: results,
+        };
+        if canonical_json::to_value(&durable)? != commit.intents[0].result {
+            return Err(RuntimeError::Corrupt(
+                "durable metadata result differs from operations".into(),
+            ));
+        }
+        apply_metadata(&fs::read(parent)?, commit, uri, &operations)
+    }
+}
+
+pub(crate) fn compare_logical_images(a: &Path, b: &Path) -> Result<(), RuntimeError> {
+    fn rows(path: &Path) -> Result<BTreeMap<String, Vec<String>>, RuntimeError> {
+        let connection = open_readonly(path)?;
+        let mut tables=connection.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE 'otmp_%' ORDER BY name")?;
+        let names = tables
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut result = BTreeMap::new();
+        for name in names {
+            let mut stmt =
+                connection.prepare(&format!("SELECT * FROM \"{}\"", name.replace('"', "\"\"")))?;
+            let count = stmt.column_count();
+            let mut values = stmt
+                .query_map([], |r| {
+                    (0..count)
+                        .map(|i| r.get::<_, rusqlite::types::Value>(i))
+                        .collect::<Result<Vec<_>, _>>()
+                })?
+                .map(|r| r.map(|v| format!("{v:?}")))
+                .collect::<Result<Vec<_>, _>>()?;
+            values.sort();
+            result.insert(name, values);
+        }
+        Ok(result)
+    }
+    if rows(a)? != rows(b)? {
+        return Err(RuntimeError::Corrupt(
+            "retained commit does not explain relational transition".into(),
+        ));
+    }
+    Ok(())
+}
 fn replay_append(
     parent: &[u8],
     commit: &SemanticCommit,
@@ -2304,6 +2364,50 @@ fn replay_append(
             files: &files,
         },
     )
+}
+
+fn validate_metadata_projection(
+    connection: &Connection,
+    commit: &SemanticCommit,
+) -> Result<(), RuntimeError> {
+    use crate::OperationRequest;
+    let version = sqlite_i64(commit.table_version.0, "version")?;
+    for value in &commit.operations {
+        let CanonicalValue::Object(fields) = value else {
+            continue;
+        };
+        if matches!(fields.get("type"),Some(CanonicalValue::String(t)) if t=="initialize_table" || t=="commit_snapshot")
+        {
+            continue;
+        }
+        let operation: OperationRequest =
+            canonical_json::from_slice_canonical(&canonical_json::to_vec(value)?)?;
+        let valid = match operation {
+            OperationRequest::SetProperties {
+                updates, removals, ..
+            } => {
+                let mut valid = true;
+                for (key, value) in updates {
+                    let row:Option<(String,i64)>=connection.query_row("SELECT value_json,updated_version FROM otmp_properties WHERE property_key=?1",[key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                    valid &= row == Some((canonical_string(&value)?, version));
+                }
+                for key in removals {
+                    valid &= !connection.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM otmp_properties WHERE property_key=?1)",
+                        [key],
+                        |r| r.get::<_, bool>(0),
+                    )?;
+                }
+                valid
+            }
+        };
+        if !valid {
+            return Err(RuntimeError::Corrupt(
+                "metadata operation differs from relational projection".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2408,4 +2512,38 @@ mod regeneration {
             }
         }
     }
+}
+
+pub(crate) fn replay_genesis(
+    commit: &SemanticCommit,
+    uri: &otmp_protocol::RelativeUri,
+) -> Result<CheckpointImage, RuntimeError> {
+    if commit.table_version.0 != 0 {
+        return Err(RuntimeError::Corrupt(
+            "missing retained genesis commit".into(),
+        ));
+    }
+    let CanonicalValue::Object(operation) = &commit.operations[0] else {
+        return Err(RuntimeError::Corrupt("invalid genesis".into()));
+    };
+    let schema: Schema = canonical_json::from_slice_canonical(&canonical_json::to_vec(
+        operation
+            .get("schema")
+            .ok_or_else(|| RuntimeError::Corrupt("missing genesis schema".into()))?,
+    )?)?;
+    create_genesis(&GenesisImage {
+        table_id: commit.table_id,
+        schema: &schema,
+        created_at_ms: commit.created_at_ms.0,
+        semantic_state: commit.semantic_state_sha256,
+        commit_id: commit.commit_id,
+        commit_hash: otmp_protocol::object_hash(&canonical_json::to_vec(commit)?),
+        commit_uri: uri.as_str(),
+        operation_json: &canonical_string(&commit.operations)?,
+        result_json: &canonical_string(&commit.intents[0].result)?,
+        intent_hash: commit.intents[0].intent_sha256,
+        metadata_json: &canonical_string(&commit.metadata)?,
+        reader_features_json: &canonical_string(&commit.required_reader_features_after_commit)?,
+        writer_features_json: &canonical_string(&commit.required_writer_features_after_commit)?,
+    })
 }

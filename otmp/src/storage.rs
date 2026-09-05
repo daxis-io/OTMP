@@ -23,6 +23,21 @@ impl ObjectVersion {
     pub fn from_sha256(hash: Sha256) -> Self {
         Self(hash.to_string())
     }
+
+    /// Constructs a version from a provider-defined opaque token.
+    ///
+    /// Providers must keep this token out of protocol objects and treat it as
+    /// private runtime state.
+    #[must_use]
+    pub fn from_opaque(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    /// Returns the provider-defined opaque token.
+    #[must_use]
+    pub fn as_opaque(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +69,8 @@ pub enum StorageError {
     VerificationFailed(String),
     #[error("injected storage failure: {0}")]
     Injected(String),
+    #[error("storage operation is unsupported: {0}")]
+    Unsupported(String),
 }
 
 impl StorageError {
@@ -66,7 +83,7 @@ impl StorageError {
             Self::MaximumLengthExceeded | Self::VerificationFailed(_) => {
                 "OTMP_FINGERPRINT_MISMATCH"
             }
-            Self::Io(_) | Self::Injected(_) => "OTMP_STORAGE_ERROR",
+            Self::Io(_) | Self::Injected(_) | Self::Unsupported(_) => "OTMP_STORAGE_ERROR",
         }
     }
 

@@ -218,6 +218,10 @@ impl SemanticCommit {
             if !matches!(
                 kind.as_str(),
                 "property_is"
+                    | "ref_absent"
+                    | "ref_exists"
+                    | "ref_snapshot_is"
+                    | "snapshot_exists"
                     | "current_schema_is"
                     | "default_partition_spec_is"
                     | "default_sort_order_is"

@@ -80,7 +80,7 @@ fn valid_snapshot_commit() -> SemanticCommit {
     }
 }
 
-fn valid_gate1_snapshot_commit() -> SemanticCommit {
+fn valid_profile_snapshot_commit() -> SemanticCommit {
     let mut commit = valid_snapshot_commit();
     let CanonicalValue::Object(operation) = &mut commit.operations[0] else {
         unreachable!();
@@ -605,9 +605,14 @@ fn semantic_commit_rejects_a_malformed_initialize_operation() {
 
 #[test]
 fn semantic_commit_rejects_initial_snapshots_and_unqualified_unknown_operations() {
-    let mut genesis: SemanticCommit = canonical_json::from_slice_canonical(include_bytes!(
-        "../../conformance/tables/genesis/_otmp/commits/0/01a067c2-4891-7c40-9557-0edcdf176cee.json"
-    ))
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../conformance/tables/genesis");
+    let head: otmp_protocol::Head =
+        canonical_json::from_slice_canonical(&std::fs::read(root.join("_otmp/HEAD")).unwrap())
+            .unwrap();
+    let mut genesis: SemanticCommit = canonical_json::from_slice_canonical(
+        &std::fs::read(root.join(head.semantic_commit.uri.as_str())).unwrap(),
+    )
     .unwrap();
     let valid_snapshot = valid_snapshot_commit();
     let CanonicalValue::Object(snapshot_operation) = &valid_snapshot.operations[0] else {
@@ -635,13 +640,13 @@ fn semantic_commit_rejects_initial_snapshots_and_unqualified_unknown_operations(
     };
     operation.insert("type".into(), string("com.example.extension"));
     extension.validate().unwrap();
-    assert!(extension.validate_gate1().is_err());
+    assert!(extension.validate_runtime_profile().is_err());
 }
 
 #[test]
-fn gate1_semantic_validation_rejects_malformed_file_descriptors() {
-    let valid = valid_gate1_snapshot_commit();
-    valid.validate_gate1().unwrap();
+fn profile_semantic_validation_rejects_malformed_file_descriptors() {
+    let valid = valid_profile_snapshot_commit();
+    valid.validate_runtime_profile().unwrap();
 
     for (field, value) in [
         ("uri", string("../escape.parquet")),
@@ -661,6 +666,9 @@ fn gate1_semantic_validation_rejects_malformed_file_descriptors() {
             unreachable!();
         };
         file.insert(field.into(), value);
-        assert!(malformed.validate_gate1().is_err(), "accepted {field}");
+        assert!(
+            malformed.validate_runtime_profile().is_err(),
+            "accepted {field}"
+        );
     }
 }

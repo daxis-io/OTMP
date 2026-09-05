@@ -4,10 +4,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use otmp::{
-    AppendFile, AppendRequest, AppendResult, AppendRetryPolicy, CommitMetadata,
-    ConditionalWriteOutcome, FileFormat, InMemoryObjectStore, InitializeRequest,
-    InjectedConditional, ObjectStore, ObjectVersion, SnapshotMetadata, SourceFingerprint,
-    StorageError, Table,
+    AppendFile, AppendRequest, AppendResult, CommitMetadata, ConditionalWriteOutcome, FileFormat,
+    InMemoryObjectStore, InitializeRequest, InjectedConditional, ObjectStore, ObjectVersion,
+    SnapshotMetadata, SourceFingerprint, StorageError, Table, TransactionRetryPolicy,
 };
 use otmp_protocol::{
     CanonicalValue, Field, Generation, Head, LogicalType, RelativeUri, Schema, SemanticCommit,
@@ -176,7 +175,7 @@ async fn retry_exhaustion_retains_caller_owned_verified_staging() {
         .unwrap();
     let uri = staged.uri().clone();
     store.inject_conditional(InjectedConditional::Conflict);
-    let table = table.with_retry_policy(AppendRetryPolicy {
+    let table = table.with_retry_policy(TransactionRetryPolicy {
         maximum_rebases: 0,
         maximum_indeterminate_reconciliations: 3,
     });
@@ -199,7 +198,7 @@ async fn indeterminate_reconciliation_limit_returns_retryable_error() {
     for _ in 0..3 {
         store.inject_conditional(InjectedConditional::IndeterminateBefore);
     }
-    let table = table.with_retry_policy(AppendRetryPolicy {
+    let table = table.with_retry_policy(TransactionRetryPolicy {
         maximum_rebases: 8,
         maximum_indeterminate_reconciliations: 2,
     });
@@ -682,4 +681,87 @@ async fn second_idempotency_check_cleans_high_level_duplicate_staging() {
         store.inner.read(&paused_key).await,
         Err(StorageError::NotFound(_))
     ));
+}
+
+fn property_transaction(key: &str, property: &str) -> otmp::TransactionRequest {
+    otmp::TransactionRequest {
+        idempotency_key: key.into(),
+        requirements: vec![otmp::Requirement::PropertyIs {
+            key: property.into(),
+            value: CanonicalValue::Null,
+        }],
+        operations: vec![otmp::OperationRequest::SetProperties {
+            operation_id: "set".into(),
+            updates: [(property.into(), CanonicalValue::Bool(true))].into(),
+            removals: vec![],
+        }],
+        commit_metadata: CommitMetadata::default(),
+    }
+}
+#[tokio::test]
+async fn unrelated_properties_rebase_but_stale_touched_property_conflicts() {
+    for same_property in [false, true] {
+        let store = TwoWriterStore::new();
+        let table = Table::new(store.clone());
+        table
+            .initialize(InitializeRequest::new(schema()))
+            .await
+            .unwrap();
+        store.enabled.store(true, Ordering::SeqCst);
+        let a = property_transaction("a", "owner");
+        let b = property_transaction(
+            "b",
+            if same_property {
+                "owner"
+            } else {
+                "description"
+            },
+        );
+        let (a, b) = tokio::join!(table.transact(&a), table.transact(&b));
+        if same_property {
+            assert_eq!(u8::from(a.is_ok()) + u8::from(b.is_ok()), 1);
+            let error = a.err().or_else(|| b.err()).unwrap();
+            assert_eq!(error.code(), "OTMP_SEMANTIC_CONFLICT");
+        } else {
+            a.unwrap();
+            b.unwrap();
+            assert_eq!(table.pin().await.unwrap().status().table_version, 2);
+        }
+        table.verify().await.unwrap();
+    }
+}
+#[tokio::test]
+async fn metadata_concurrent_idempotency_returns_the_committed_hash() {
+    let store = TwoWriterStore::new();
+    let table = Table::new(store.clone());
+    table
+        .initialize(InitializeRequest::new(schema()))
+        .await
+        .unwrap();
+    store.enabled.store(true, Ordering::SeqCst);
+    let request = property_transaction("same", "owner");
+    let (a, b) = tokio::join!(table.transact(&request), table.transact(&request));
+    assert_eq!(a.unwrap(), b.unwrap());
+    assert_eq!(table.pin().await.unwrap().status().table_version, 1);
+}
+#[tokio::test]
+async fn append_rebases_across_unrelated_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data");
+    tokio::fs::write(&path, b"a").await.unwrap();
+    let store = TwoWriterStore::new();
+    let table = Table::new(store.clone());
+    table
+        .initialize(InitializeRequest::new(schema()))
+        .await
+        .unwrap();
+    store.enabled.store(true, Ordering::SeqCst);
+    let append = request(path, b"a", "append");
+    let property = property_transaction("property", "owner");
+    let (a, b) = tokio::join!(table.append_files(&append), table.transact(&property));
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(table.pin().await.unwrap().status().table_version, 2);
+    assert_eq!(table.pin().await.unwrap().files("main").unwrap().len(), 1);
+    table.verify().await.unwrap();
 }

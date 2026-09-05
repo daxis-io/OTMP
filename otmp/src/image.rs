@@ -97,6 +97,7 @@ pub(crate) struct AppendImage<'a> {
     pub intent_hash: Sha256,
     pub snapshot_id: Id,
     pub parent_snapshot_id: Option<Id>,
+    pub target_ref: &'a str,
     pub sequence_number: u64,
     pub summary: &'a BTreeMap<String, CanonicalValue>,
     pub snapshot_metadata_json: &'a str,
@@ -271,19 +272,21 @@ pub(crate) fn apply_append(
             ],
         )?;
         transaction.execute(
-            "INSERT INTO otmp_ref_live_files(ref_name, file_id, added_snapshot_id, data_sequence_number, file_sequence_number) VALUES('main', ?1, ?2, ?3, ?3)",
+            "INSERT INTO otmp_ref_live_files(ref_name, file_id, added_snapshot_id, data_sequence_number, file_sequence_number) VALUES(?4, ?1, ?2, ?3, ?3)",
             params![
                 file.file_id.as_bytes().as_slice(),
                 input.snapshot_id.as_bytes().as_slice(),
                 sqlite_i64(input.sequence_number, "sequence number")?,
+                input.target_ref,
             ],
         )?;
     }
     let updated_refs = transaction.execute(
-        "UPDATE otmp_refs SET snapshot_id=?1, updated_version=?2 WHERE ref_name='main' AND ref_type='branch'",
+        "UPDATE otmp_refs SET snapshot_id=?1, updated_version=?2 WHERE ref_name=?3 AND ref_type='branch'",
         params![
             input.snapshot_id.as_bytes().as_slice(),
             sqlite_i64(input.table_version, "table version")?,
+            input.target_ref,
         ],
     )?;
     if updated_refs != 1 {
@@ -483,7 +486,7 @@ pub(crate) fn validate(path: &Path, expected: &ExpectedImage<'_>) -> Result<(), 
             "previous semantic state does not match relational history".into(),
         ));
     }
-    validate_gate1_history(&connection, expected.table_version, meta.7)?;
+    validate_relational_history(&connection, expected.table_version, meta.7)?;
     let missing_ref_snapshot: i64 = connection.query_row(
         "SELECT count(*) FROM otmp_refs r WHERE r.snapshot_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM otmp_snapshots s WHERE s.snapshot_id=r.snapshot_id)",
         [],
@@ -504,25 +507,61 @@ pub(crate) fn validate(path: &Path, expected: &ExpectedImage<'_>) -> Result<(), 
             "live membership is inconsistent".into(),
         ));
     }
-    let unexpected_gate1_rows: i64 = connection.query_row(
+    let unexpected_profile_rows: i64 = connection.query_row(
         "SELECT (SELECT count(*) FROM otmp_snapshot_file_changes WHERE change_kind != 'add') + (SELECT count(*) FROM otmp_snapshots WHERE operation != 'append') + (SELECT count(*) FROM otmp_files WHERE file_kind != 'data' OR file_format != 'parquet' OR object_identity IS NOT NULL OR partition_spec_id != 0 OR sort_order_id != 0 OR content_sha256 IS NULL)",
         [],
         |row| row.get(0),
     )?;
-    if unexpected_gate1_rows != 0 {
+    if unexpected_profile_rows != 0 {
         return Err(RuntimeError::Corrupt(
-            "relational state uses features outside the Gate 1 append profile".into(),
+            "relational state uses features outside the local/full-image profile append profile"
+                .into(),
         ));
     }
-    let reconstructed_membership_errors: i64 = connection.query_row(
-        "WITH RECURSIVE lineage(snapshot_id, parent_snapshot_id) AS (SELECT snapshot_id, parent_snapshot_id FROM otmp_snapshots WHERE snapshot_id=(SELECT snapshot_id FROM otmp_refs WHERE ref_name='main') UNION ALL SELECT s.snapshot_id, s.parent_snapshot_id FROM otmp_snapshots s JOIN lineage l ON s.snapshot_id=l.parent_snapshot_id), expected(file_id) AS (SELECT DISTINCT c.file_id FROM otmp_snapshot_file_changes c JOIN lineage l ON l.snapshot_id=c.snapshot_id WHERE c.change_kind='add') SELECT (SELECT count(*) FROM expected e WHERE NOT EXISTS(SELECT 1 FROM otmp_ref_live_files r WHERE r.ref_name='main' AND r.file_id=e.file_id)) + (SELECT count(*) FROM otmp_ref_live_files r WHERE r.ref_name='main' AND NOT EXISTS(SELECT 1 FROM expected e WHERE e.file_id=r.file_id))",
-        [],
-        |row| row.get(0),
-    )?;
-    if reconstructed_membership_errors != 0 {
-        return Err(RuntimeError::Corrupt(
-            "materialized live membership does not match snapshot ancestry".into(),
-        ));
+    let mut refs = connection.prepare("SELECT ref_name,ref_type,snapshot_id FROM otmp_refs")?;
+    for row in refs.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<Vec<u8>>>(2)?,
+        ))
+    })? {
+        let (name, kind, snapshot) = row?;
+        let mut expected = BTreeSet::new();
+        if kind == "branch" {
+            for id in crate::runtime::history::ancestry(
+                &connection,
+                snapshot.map(id_from_blob).transpose()?,
+            )? {
+                let mut changes = connection.prepare("SELECT c.file_id,c.snapshot_id,s.sequence_number FROM otmp_snapshot_file_changes c JOIN otmp_snapshots s USING(snapshot_id) WHERE c.snapshot_id=?1 AND c.change_kind='add'")?;
+                for row in changes.query_map([id.as_bytes().as_slice()], |r| {
+                    Ok((
+                        r.get::<_, Vec<u8>>(0)?,
+                        r.get::<_, Vec<u8>>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })? {
+                    expected.insert(row?);
+                }
+            }
+        }
+        let mut rows = connection.prepare("SELECT file_id,added_snapshot_id,data_sequence_number,file_sequence_number FROM otmp_ref_live_files WHERE ref_name=?1")?;
+        let actual = rows
+            .query_map([name], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if actual != expected {
+            return Err(RuntimeError::Corrupt(
+                "materialized membership differs from snapshot ancestry".into(),
+            ));
+        }
     }
     validate_schemas(&connection)?;
     validate_file_descriptors(&connection)?;
@@ -552,83 +591,29 @@ pub(crate) fn validate(path: &Path, expected: &ExpectedImage<'_>) -> Result<(), 
     Ok(())
 }
 
-fn validate_gate1_history(
+fn validate_relational_history(
     connection: &Connection,
     table_version: u64,
     last_sequence_number: i64,
 ) -> Result<(), RuntimeError> {
-    let expected_version = sqlite_i64(table_version, "table version")?;
-    let snapshot_count: i64 =
-        connection.query_row("SELECT count(*) FROM otmp_snapshots", [], |row| row.get(0))?;
-    let invalid_snapshot_versions: i64 = connection.query_row(
-        "SELECT count(*) FROM otmp_snapshots WHERE committed_table_version < 1 OR committed_table_version > ?1 OR sequence_number != committed_table_version",
-        [expected_version],
-        |row| row.get(0),
-    )?;
-    let duplicate_snapshot_versions: i64 = connection.query_row(
-        "SELECT count(*) FROM (SELECT committed_table_version FROM otmp_snapshots GROUP BY committed_table_version HAVING count(*) != 1)",
-        [],
-        |row| row.get(0),
-    )?;
-    if snapshot_count != expected_version
-        || invalid_snapshot_versions != 0
-        || duplicate_snapshot_versions != 0
-        || last_sequence_number != expected_version
+    let version = sqlite_i64(table_version, "table version")?;
+    let invalid: i64 = connection.query_row("SELECT count(*) FROM otmp_snapshots WHERE committed_table_version < 1 OR committed_table_version > ?1 OR sequence_number < 1", [version], |r| r.get(0))?;
+    let (count, distinct, maximum): (i64,i64,i64) = connection.query_row("SELECT count(*),count(DISTINCT sequence_number),coalesce(max(sequence_number),0) FROM otmp_snapshots", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+    let duplicates: i64 = connection.query_row("SELECT count(*) FROM (SELECT committed_table_version FROM otmp_snapshots GROUP BY committed_table_version HAVING count(*)>1)", [], |r| r.get(0))?;
+    let ancestry: i64 = connection.query_row("SELECT count(*) FROM otmp_snapshots s LEFT JOIN otmp_snapshots p ON p.snapshot_id=s.parent_snapshot_id WHERE s.parent_snapshot_id IS NOT NULL AND (p.snapshot_id IS NULL OR p.sequence_number>=s.sequence_number OR p.committed_table_version>=s.committed_table_version)", [], |r| r.get(0))?;
+    let refs: i64 = connection.query_row("SELECT count(*) FROM otmp_refs WHERE created_version>updated_version OR updated_version>?1 OR (ref_type='tag' AND snapshot_id IS NULL)", [version], |r| r.get(0))?;
+    let main: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM otmp_refs WHERE ref_name='main' AND ref_type='branch' AND created_version=0)", [], |r| r.get(0))?;
+    if invalid != 0
+        || duplicates != 0
+        || count != distinct
+        || count != maximum
+        || maximum != last_sequence_number
+        || ancestry != 0
+        || refs != 0
+        || !main
     {
         return Err(RuntimeError::Corrupt(
-            "Gate 1 snapshot history or sequence allocator is inconsistent".into(),
-        ));
-    }
-    let ancestry_errors: i64 = connection.query_row(
-        "SELECT count(*) FROM otmp_snapshots s LEFT JOIN otmp_snapshots p ON p.committed_table_version=s.committed_table_version-1 WHERE (s.committed_table_version=1 AND s.parent_snapshot_id IS NOT NULL) OR (s.committed_table_version>1 AND (p.snapshot_id IS NULL OR s.parent_snapshot_id IS NULL OR s.parent_snapshot_id != p.snapshot_id))",
-        [],
-        |row| row.get(0),
-    )?;
-    if ancestry_errors != 0 {
-        return Err(RuntimeError::Corrupt(
-            "Gate 1 snapshot ancestry is not contiguous".into(),
-        ));
-    }
-    let expected_snapshot = if table_version == 0 {
-        None
-    } else {
-        Some(connection.query_row(
-            "SELECT snapshot_id FROM otmp_snapshots WHERE committed_table_version=?1",
-            [expected_version],
-            |row| row.get::<_, Vec<u8>>(0),
-        )?)
-    };
-    let refs = {
-        let mut statement = connection.prepare(
-            "SELECT ref_name, ref_type, snapshot_id, created_version, updated_version, retention_json, metadata_json FROM otmp_refs ORDER BY ref_name",
-        )?;
-        statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<Vec<u8>>>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    if refs.as_slice()
-        != [(
-            "main".to_owned(),
-            "branch".to_owned(),
-            expected_snapshot,
-            0,
-            expected_version,
-            "{}".to_owned(),
-            "{}".to_owned(),
-        )]
-    {
-        return Err(RuntimeError::Corrupt(
-            "Gate 1 ref state is inconsistent".into(),
+            "snapshot, sequence, ancestry, or ref invariant violated".into(),
         ));
     }
     Ok(())
@@ -657,7 +642,7 @@ fn validate_file_descriptors(connection: &Connection) -> Result<(), RuntimeError
             .map_err(|_| RuntimeError::Corrupt("invalid partition spec ID".into()))?;
         if spec_id != 0 || !tuple.is_empty() {
             return Err(RuntimeError::Corrupt(
-                "Gate 1 requires empty partition tuples for spec 0".into(),
+                "local/full-image profile requires empty partition tuples for spec 0".into(),
             ));
         }
         if hash_from_blob(stored_hash)? != partition_hash(spec_id, &tuple_cbor) {
@@ -972,6 +957,7 @@ pub(crate) fn validate_commit_projection(
         ));
     }
     validate_snapshot_projection(&connection, commit)?;
+    validate_metadata_projection(&connection, commit)?;
     for intent in &commit.intents {
         let projected: Option<(Vec<u8>, Vec<u8>, i64, String)> = connection
             .query_row(
@@ -1312,7 +1298,13 @@ fn validate_snapshot_changes(
         ));
     }
     for file in &operation.added_files {
-        validate_projected_file(connection, commit, &operation.snapshot, file)?;
+        validate_projected_file(
+            connection,
+            commit,
+            &operation.snapshot,
+            file,
+            &operation.target_ref,
+        )?;
     }
     Ok(())
 }
@@ -1322,6 +1314,7 @@ fn validate_projected_file(
     commit: &SemanticCommit,
     snapshot: &ProjectedSemanticSnapshot,
     file: &ProjectedSemanticFile,
+    target_ref: &str,
 ) -> Result<(), RuntimeError> {
     let projected: Option<ProjectedFileRow> = connection
         .query_row(
@@ -1389,8 +1382,8 @@ fn validate_projected_file(
     }
     let live_projection: Option<(Vec<u8>, i64, i64)> = connection
         .query_row(
-            "SELECT added_snapshot_id, data_sequence_number, file_sequence_number FROM otmp_ref_live_files WHERE ref_name='main' AND file_id=?1",
-            [file.file_id.as_bytes().as_slice()],
+            "SELECT added_snapshot_id, data_sequence_number, file_sequence_number FROM otmp_ref_live_files WHERE ref_name=?2 AND file_id=?1",
+            params![file.file_id.as_bytes().as_slice(),target_ref],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
@@ -1568,7 +1561,7 @@ fn finish_checkpoint(
     })
 }
 
-fn insert_schema(
+pub(crate) fn insert_schema(
     transaction: &Transaction<'_>,
     schema: &Schema,
     version: u64,
@@ -1699,6 +1692,83 @@ fn hash_from_blob(blob: Vec<u8>) -> Result<Sha256, RuntimeError> {
     Ok(Sha256::from_bytes(bytes))
 }
 
+pub(crate) fn apply_metadata(
+    parent: &[u8],
+    commit: &SemanticCommit,
+    uri: &otmp_protocol::RelativeUri,
+    operations: &[crate::OperationRequest],
+) -> Result<CheckpointImage, RuntimeError> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("metadata.sqlite3");
+    fs::write(&path, parent)?;
+    let mut connection = Connection::open(&path)?;
+    connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE;")?;
+    let tx = connection.transaction()?;
+    crate::runtime::transactions::apply_operations(&tx, operations, commit.table_version.0)?;
+    let hash = otmp_protocol::object_hash(&canonical_json::to_vec(commit)?);
+    let version = sqlite_i64(commit.table_version.0, "version")?;
+    let intent = &commit.intents[0];
+    let result = canonical_string(&intent.result)?;
+    tx.execute("INSERT INTO otmp_commits(table_version,commit_id,parent_table_version,created_at_ms,intent_count,semantic_state_sha256,commit_object_uri,commit_object_sha256,operation_summary_json,result_json,metadata_json) VALUES(?1,?2,?3,?4,1,?5,?6,?7,?8,?9,?10)", params![version,commit.commit_id.as_bytes().as_slice(),version-1,commit.created_at_ms.0,commit.semantic_state_sha256.as_bytes().as_slice(),uri.as_str(),hash.as_bytes().as_slice(),canonical_string(&commit.operations)?,result,canonical_string(&commit.metadata)?])?;
+    tx.execute(
+        "INSERT INTO otmp_idempotency VALUES(?1,?2,?3,?4,?5)",
+        params![
+            intent.key,
+            intent.intent_sha256.as_bytes().as_slice(),
+            commit.commit_id.as_bytes().as_slice(),
+            version,
+            result
+        ],
+    )?;
+    tx.execute("UPDATE otmp_meta SET table_version=?1,semantic_state_sha256=?2,last_commit_id=?3,last_commit_sha256=?4", params![version,commit.semantic_state_sha256.as_bytes().as_slice(),commit.commit_id.as_bytes().as_slice(),hash.as_bytes().as_slice()])?;
+    tx.commit()?;
+    drop(connection);
+    finish_checkpoint(directory, path)
+}
+
+fn validate_metadata_projection(
+    connection: &Connection,
+    commit: &SemanticCommit,
+) -> Result<(), RuntimeError> {
+    use crate::OperationRequest;
+    let version = sqlite_i64(commit.table_version.0, "version")?;
+    for value in &commit.operations {
+        let CanonicalValue::Object(fields) = value else {
+            continue;
+        };
+        if matches!(fields.get("type"),Some(CanonicalValue::String(t)) if t=="initialize_table" || t=="commit_snapshot")
+        {
+            continue;
+        }
+        let operation: OperationRequest =
+            canonical_json::from_slice_canonical(&canonical_json::to_vec(value)?)?;
+        let valid = match operation {
+            OperationRequest::SetProperties {
+                updates, removals, ..
+            } => {
+                let mut valid = true;
+                for (key, value) in updates {
+                    let row:Option<(String,i64)>=connection.query_row("SELECT value_json,updated_version FROM otmp_properties WHERE property_key=?1",[key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                    valid &= row == Some((canonical_string(&value)?, version));
+                }
+                for key in removals {
+                    valid &= !connection.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM otmp_properties WHERE property_key=?1)",
+                        [key],
+                        |r| r.get::<_, bool>(0),
+                    )?;
+                }
+                valid
+            }
+        };
+        if !valid {
+            return Err(RuntimeError::Corrupt(
+                "metadata operation differs from relational projection".into(),
+            ));
+        }
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -1864,39 +1934,38 @@ mod tests {
             &expected(table_id, commit_id, state, commit_hash),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("snapshot history"), "{error}");
+        assert!(error.to_string().contains("snapshot, sequence"), "{error}");
     }
 
     #[test]
-    fn gate1_history_rejects_ref_shape_and_sequence_allocator_divergence() {
+    fn profile_history_rejects_ref_shape_and_sequence_allocator_divergence() {
         for mutation in [
             "UPDATE otmp_refs SET ref_type='tag' WHERE ref_name='main'",
-            "INSERT INTO otmp_refs(ref_name, ref_type, snapshot_id, created_version, updated_version) VALUES('other', 'branch', NULL, 1, 1)",
-            "UPDATE otmp_refs SET metadata_json='{\"unexpected\":true}' WHERE ref_name='main'",
+            "UPDATE otmp_refs SET updated_version=2 WHERE ref_name='main'",
         ] {
             let (image, _) = static_append_projection();
             let connection = Connection::open(&image.path).unwrap();
             connection.execute(mutation, []).unwrap();
-            let error = validate_gate1_history(&connection, 1, 1).unwrap_err();
-            assert!(error.to_string().contains("ref state"), "{error}");
+            let error = validate_relational_history(&connection, 1, 1).unwrap_err();
+            assert!(error.to_string().contains("ref invariant"), "{error}");
         }
 
         let (image, _) = static_append_projection();
         let connection = Connection::open(&image.path).unwrap();
         for last_sequence in [0, 2] {
-            let error = validate_gate1_history(&connection, 1, last_sequence).unwrap_err();
-            assert!(error.to_string().contains("sequence allocator"), "{error}");
+            let error = validate_relational_history(&connection, 1, last_sequence).unwrap_err();
+            assert!(error.to_string().contains("sequence"), "{error}");
         }
     }
 
     #[test]
-    fn gate1_history_rejects_truncated_snapshot_ancestry() {
+    fn profile_history_rejects_truncated_snapshot_ancestry() {
         let (image, _) = static_append_projection();
         let snapshot_id = Id::from_str("018f31f4-2bbd-7e47-a8bd-e5c9b36d8b0e").unwrap();
         let connection = Connection::open(&image.path).unwrap();
         connection
             .execute(
-                "INSERT INTO otmp_snapshots(snapshot_id, parent_snapshot_id, sequence_number, schema_id, partition_spec_id, sort_order_id, operation, committed_table_version, committed_at_ms) VALUES(?1, NULL, 2, 1, 0, 0, 'append', 2, 2)",
+                "INSERT INTO otmp_snapshots(snapshot_id, parent_snapshot_id, sequence_number, schema_id, partition_spec_id, sort_order_id, operation, committed_table_version, committed_at_ms) VALUES(?1, ?1, 2, 1, 0, 0, 'append', 2, 2)",
                 [snapshot_id.as_bytes().as_slice()],
             )
             .unwrap();
@@ -1907,7 +1976,7 @@ mod tests {
             )
             .unwrap();
 
-        let error = validate_gate1_history(&connection, 2, 2).unwrap_err();
+        let error = validate_relational_history(&connection, 2, 2).unwrap_err();
         assert!(error.to_string().contains("ancestry"), "{error}");
     }
 
@@ -2157,6 +2226,186 @@ mod tests {
             drop(connection);
 
             assert!(validate_commit_projection(&image.path, &commit).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+fn replay_append(
+    parent: &[u8],
+    commit: &SemanticCommit,
+    uri: &otmp_protocol::RelativeUri,
+) -> Result<CheckpointImage, RuntimeError> {
+    let operation: ProjectedCommitSnapshot =
+        canonical_json::from_slice_canonical(&canonical_json::to_vec(&commit.operations[0])?)?;
+    let files = operation
+        .added_files
+        .into_iter()
+        .map(|f| {
+            let cbor = encode_partition_tuple(&f.partition_values);
+            Ok(ImageFile {
+                file_id: f.file_id,
+                uri: f.uri,
+                format: FileFormat::Parquet,
+                file_size_bytes: f.file_size_bytes.0,
+                record_count: f.record_count.0,
+                schema_id: u32::try_from(f.schema_id.0)
+                    .map_err(|_| RuntimeError::Corrupt("schema ID overflow".into()))?,
+                partition_spec_id: 0,
+                sort_order_id: 0,
+                partition_hash: partition_hash(0, &cbor),
+                partition_values_cbor: cbor,
+                content_sha256: f.content_sha256,
+                metadata_json: canonical_string(&f.metadata)?,
+                metrics: f
+                    .metrics
+                    .into_iter()
+                    .map(|m| {
+                        Ok(ImageMetric {
+                            field_id: u32::try_from(m.field_id.0)
+                                .map_err(|_| RuntimeError::Corrupt("field ID overflow".into()))?,
+                            column_size_bytes: m.column_size_bytes.map(|v| v.0),
+                            value_count: m.value_count.map(|v| v.0),
+                            null_count: m.null_count.map(|v| v.0),
+                            nan_count: m.nan_count.map(|v| v.0),
+                            distinct_count: m.distinct_count.map(|v| v.0),
+                            lower_bound_cbor: m.lower_bound.as_ref().map(encode_typed_scalar),
+                            upper_bound_cbor: m.upper_bound.as_ref().map(encode_typed_scalar),
+                            metadata_json: canonical_string(&m.metadata)?,
+                        })
+                    })
+                    .collect::<Result<_, RuntimeError>>()?,
+            })
+        })
+        .collect::<Result<Vec<_>, RuntimeError>>()?;
+    let CanonicalValue::Object(summary) = operation.snapshot.summary else {
+        return Err(RuntimeError::Corrupt("invalid summary".into()));
+    };
+    apply_append(
+        parent,
+        &AppendImage {
+            table_version: commit.table_version.0,
+            created_at_ms: commit.created_at_ms.0,
+            semantic_state: commit.semantic_state_sha256,
+            commit_id: commit.commit_id,
+            commit_hash: otmp_protocol::object_hash(&canonical_json::to_vec(commit)?),
+            commit_uri: uri.as_str(),
+            operation_json: &canonical_string(&commit.operations)?,
+            result_json: &canonical_string(&commit.intents[0].result)?,
+            commit_metadata_json: &canonical_string(&commit.metadata)?,
+            idempotency_key: &commit.intents[0].key,
+            intent_hash: commit.intents[0].intent_sha256,
+            snapshot_id: operation.snapshot.snapshot_id,
+            parent_snapshot_id: operation.snapshot.parent_snapshot_id,
+            target_ref: &operation.target_ref,
+            sequence_number: operation.snapshot.sequence_number.0,
+            summary: &summary,
+            snapshot_metadata_json: &canonical_string(&operation.snapshot.metadata)?,
+            files: &files,
+        },
+    )
+}
+
+#[cfg(test)]
+mod regeneration {
+    use super::*;
+    use otmp_protocol::{Generation, Head, object_hash};
+
+    #[test]
+    fn canonical_packages_regenerate_from_retained_commits() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../conformance/tables");
+        for package in ["genesis", "append", "transactions"] {
+            let package = root.join(package);
+            let head: Head = canonical_json::from_slice_canonical(
+                &fs::read(package.join("_otmp/HEAD")).unwrap(),
+            )
+            .unwrap();
+            let mut reference = Some(head.metadata_generation);
+            let mut generations = Vec::new();
+            while let Some(r) = reference {
+                let bytes = fs::read(package.join(r.uri.as_str())).unwrap();
+                let generation: Generation = canonical_json::from_slice_canonical(&bytes).unwrap();
+                assert_eq!(canonical_json::to_vec(&generation).unwrap(), bytes);
+                reference = generation.physical_parent.clone();
+                generations.push(generation);
+            }
+            generations.reverse();
+            let mut previous: Option<Vec<u8>> = None;
+            for generation in generations {
+                let bytes =
+                    fs::read(package.join(generation.semantic_commit.uri.as_str())).unwrap();
+                let commit: SemanticCommit = canonical_json::from_slice_canonical(&bytes).unwrap();
+                assert_eq!(canonical_json::to_vec(&commit).unwrap(), bytes);
+                let checkpoint = if let Some(previous) = previous {
+                    let CanonicalValue::Object(operation) = &commit.operations[0] else {
+                        panic!("operation")
+                    };
+                    if operation.get("type")
+                        == Some(&CanonicalValue::String("commit_snapshot".into()))
+                    {
+                        replay_append(&previous, &commit, &generation.semantic_commit.uri).unwrap()
+                    } else {
+                        let operations = commit
+                            .operations
+                            .iter()
+                            .map(|o| {
+                                canonical_json::from_slice_canonical(
+                                    &canonical_json::to_vec(o).unwrap(),
+                                )
+                                .unwrap()
+                            })
+                            .collect::<Vec<_>>();
+                        apply_metadata(
+                            &previous,
+                            &commit,
+                            &generation.semantic_commit.uri,
+                            &operations,
+                        )
+                        .unwrap()
+                    }
+                } else {
+                    let CanonicalValue::Object(operation) = &commit.operations[0] else {
+                        panic!("genesis operation")
+                    };
+                    let schema: Schema = canonical_json::from_slice_canonical(
+                        &canonical_json::to_vec(&operation["schema"]).unwrap(),
+                    )
+                    .unwrap();
+                    create_genesis(&GenesisImage {
+                        table_id: commit.table_id,
+                        schema: &schema,
+                        created_at_ms: commit.created_at_ms.0,
+                        semantic_state: commit.semantic_state_sha256,
+                        commit_id: commit.commit_id,
+                        commit_hash: object_hash(&bytes),
+                        commit_uri: generation.semantic_commit.uri.as_str(),
+                        operation_json: &canonical_string(&commit.operations).unwrap(),
+                        result_json: &canonical_string(&commit.intents[0].result).unwrap(),
+                        intent_hash: commit.intents[0].intent_sha256,
+                        metadata_json: &canonical_string(&commit.metadata).unwrap(),
+                        reader_features_json: &canonical_string(
+                            &commit.required_reader_features_after_commit,
+                        )
+                        .unwrap(),
+                        writer_features_json: &canonical_string(
+                            &commit.required_writer_features_after_commit,
+                        )
+                        .unwrap(),
+                    })
+                    .unwrap()
+                };
+                let stored =
+                    fs::read(package.join(generation.metadata_image.checkpoint.uri.as_str()))
+                        .unwrap();
+                assert_eq!(
+                    object_hash(&checkpoint.bytes),
+                    object_hash(&stored),
+                    "checkpoint regeneration at version {}",
+                    commit.table_version.0
+                );
+                assert_eq!(checkpoint.bytes, stored);
+                previous = Some(checkpoint.bytes);
+            }
         }
     }
 }

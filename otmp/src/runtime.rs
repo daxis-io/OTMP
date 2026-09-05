@@ -1,6 +1,13 @@
+pub(crate) mod history;
+pub(crate) mod transactions;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+use transactions::RefType;
+pub use transactions::{
+    OperationRequest, OperationResult, Requirement, TransactionRequest, TransactionResult,
+};
 
 use otmp_protocol::{
     CHECKPOINT_MEDIA_TYPE, COMMIT_MEDIA_TYPE, CORE_FEATURE, CanonicalValue, FeatureSet,
@@ -187,12 +194,12 @@ impl InitializeRequest {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AppendRetryPolicy {
+pub struct TransactionRetryPolicy {
     pub maximum_rebases: u32,
     pub maximum_indeterminate_reconciliations: u32,
 }
 
-impl Default for AppendRetryPolicy {
+impl Default for TransactionRetryPolicy {
     fn default() -> Self {
         Self {
             maximum_rebases: 8,
@@ -282,6 +289,7 @@ pub struct PinnedTable {
     head: Head,
     _commit: SemanticCommit,
     _generation: Generation,
+    current_main: Option<Id>,
     checkpoint_bytes: Vec<u8>,
     image: MaterializedImage,
 }
@@ -289,17 +297,12 @@ pub struct PinnedTable {
 impl PinnedTable {
     #[must_use]
     pub fn status(&self) -> Status {
-        let current_snapshot_id = query_optional_id(
-            &self.image.path,
-            "SELECT snapshot_id FROM otmp_refs WHERE ref_name='main'",
-        )
-        .unwrap_or(None);
         Status {
             table_id: self.head.table_id,
             table_version: self.head.table_version.0,
             root_revision: self.head.root_revision.0,
             semantic_state_sha256: self.head.semantic_state_sha256,
-            current_snapshot_id,
+            current_snapshot_id: self.current_main,
         }
     }
 
@@ -373,7 +376,7 @@ impl PinnedTable {
 #[derive(Clone)]
 pub struct Table<S> {
     store: S,
-    retry_policy: AppendRetryPolicy,
+    retry_policy: TransactionRetryPolicy,
 }
 
 impl<S: ObjectStore> Table<S> {
@@ -381,12 +384,12 @@ impl<S: ObjectStore> Table<S> {
     pub fn new(store: S) -> Self {
         Self {
             store,
-            retry_policy: AppendRetryPolicy::default(),
+            retry_policy: TransactionRetryPolicy::default(),
         }
     }
 
     #[must_use]
-    pub fn with_retry_policy(mut self, retry_policy: AppendRetryPolicy) -> Self {
+    pub fn with_retry_policy(mut self, retry_policy: TransactionRetryPolicy) -> Self {
         self.retry_policy = retry_policy;
         self
     }
@@ -396,13 +399,14 @@ impl<S: ObjectStore> Table<S> {
         request.schema.validate()?;
         if request.schema.schema_id != 1 || request.schema.parent_schema_id.is_some() {
             return Err(RuntimeError::InvalidInitialize(
-                "Gate 1 genesis requires schema_id 1 with no parent schema".into(),
+                "local/full-image profile genesis requires schema_id 1 with no parent schema"
+                    .into(),
             ));
         }
         let table_id = new_id();
         let commit_id = new_id();
         let created_at_ms = now_ms()?;
-        let features = gate1_features()?;
+        let features = runtime_features()?;
         let metadata = CanonicalValue::Object(request.metadata.clone());
         let result = object([("ref", string("main")), ("table_version", string("0"))]);
         let initialize_operation = object([
@@ -573,17 +577,32 @@ impl<S: ObjectStore> Table<S> {
     pub async fn pin(&self) -> Result<PinnedTable, RuntimeError> {
         let raw_head = self.store.read(&head_key()?).await?;
         let head: Head = canonical_json::from_slice_canonical(&raw_head.bytes)?;
-        let supported = BTreeSet::from([CORE_FEATURE, PARQUET_FEATURE, SQLITE_COW_FEATURE]);
+        self.load_pin(raw_head, head).await
+    }
+
+    async fn load_pin(
+        &self,
+        raw_head: StoredObject,
+        head: Head,
+    ) -> Result<PinnedTable, RuntimeError> {
+        let supported = BTreeSet::from([
+            CORE_FEATURE,
+            PARQUET_FEATURE,
+            SQLITE_COW_FEATURE,
+            "otmp.refs.v1",
+        ]);
         head.validate(&supported)?;
         head.required_writer_features
             .require_supported(&supported)?;
 
         let commit_object = verified_read(&self.store, &head.semantic_commit).await?;
         let commit: SemanticCommit = canonical_json::from_slice_canonical(&commit_object.bytes)?;
-        commit.validate_gate1()?;
+        commit.validate_runtime_profile()?;
         if commit.table_id != head.table_id
             || commit.table_version != head.table_version
             || commit.semantic_state_sha256 != head.semantic_state_sha256
+            || commit.required_reader_features_after_commit != head.required_reader_features
+            || commit.required_writer_features_after_commit != head.required_writer_features
         {
             return Err(RuntimeError::Corrupt(
                 "semantic commit does not match HEAD".into(),
@@ -601,7 +620,7 @@ impl<S: ObjectStore> Table<S> {
         let generation_object = verified_read(&self.store, &head.metadata_generation).await?;
         let generation: Generation =
             canonical_json::from_slice_canonical(&generation_object.bytes)?;
-        generation.validate_gate1()?;
+        generation.validate_runtime_profile()?;
         if generation.table_id != head.table_id
             || generation.table_version != head.table_version
             || generation.semantic_state_sha256 != head.semantic_state_sha256
@@ -650,7 +669,12 @@ impl<S: ObjectStore> Table<S> {
             },
         )?;
         image::validate_commit_projection(&image.path, &commit)?;
+        let current_main = query_optional_id(
+            &image.path,
+            "SELECT snapshot_id FROM otmp_refs WHERE ref_name='main'",
+        )?;
         Ok(PinnedTable {
+            current_main,
             raw_head: raw_head.bytes,
             head_version: raw_head.version,
             head,
@@ -664,15 +688,18 @@ impl<S: ObjectStore> Table<S> {
     pub async fn verify(&self) -> Result<(), RuntimeError> {
         let pinned = self.pin().await?;
         for file in pinned.files("main")? {
-            let reference = ObjectReference {
-                uri: file.uri,
-                sha256: file.content_sha256.ok_or_else(|| {
-                    RuntimeError::Corrupt("Gate 1 file has no content hash".into())
-                })?,
-                length: Some(JsonU64(file.file_size_bytes)),
-                media_type: None,
-            };
-            verified_read(&self.store, &reference).await?;
+            verified_read(
+                &self.store,
+                &ObjectReference {
+                    uri: file.uri,
+                    sha256: file
+                        .content_sha256
+                        .ok_or_else(|| RuntimeError::Corrupt("missing content hash".into()))?,
+                    length: Some(JsonU64(file.file_size_bytes)),
+                    media_type: None,
+                },
+            )
+            .await?;
         }
         Ok(())
     }
@@ -768,11 +795,25 @@ impl<S: ObjectStore> Table<S> {
             cleanup(&self.store, &staged).await;
             return Ok(result);
         }
+        let base_tip = transactions::ref_row(
+            &image::open_readonly(&first_pin.image.path)?,
+            &request.target_ref,
+        )?;
+        if let Err(error) = history::validate_append_rebase(
+            &second_pin,
+            &request.target_ref,
+            base_tip,
+            first_pin.head.table_version.0,
+        ) {
+            cleanup(&self.store, &staged).await;
+            return Err(error);
+        }
         if let Err(error) = validate_request(request, &second_pin) {
             cleanup(&self.store, &staged).await;
             return Err(error);
         }
-        self.commit_staged_files(request, &staged).await
+        self.commit_staged_from_base(request, &staged, &first_pin)
+            .await
     }
 
     pub async fn commit_staged_files(
@@ -780,19 +821,65 @@ impl<S: ObjectStore> Table<S> {
         request: &AppendRequest,
         staged: &[VerifiedStagedFile],
     ) -> Result<AppendResult, RuntimeError> {
-        let logical = logical_intent(request)?;
-        let logical_hash = intent_hash(&logical);
+        let pinned = self.pin().await?;
+        self.commit_staged_from_base(request, staged, &pinned).await
+    }
+
+    async fn commit_staged_from_base(
+        &self,
+        request: &AppendRequest,
+        staged: &[VerifiedStagedFile],
+        pinned: &PinnedTable,
+    ) -> Result<AppendResult, RuntimeError> {
+        let logical_hash = intent_hash(&logical_intent(request)?);
+        validate_staged(request, staged, pinned.head.table_id)?;
+        let base_tip = transactions::ref_row(
+            &image::open_readonly(&pinned.image.path)?,
+            &request.target_ref,
+        )?;
+        let base_version = pinned.head.table_version.0;
+        let (result, _) = self
+            .publish_transaction(&request.idempotency_key, logical_hash, staged, |parent| {
+                if parent.head.table_id != pinned.head.table_id {
+                    return Err(RuntimeError::SemanticConflict(
+                        "table identity changed".into(),
+                    ));
+                }
+                history::validate_append_rebase(
+                    parent,
+                    &request.target_ref,
+                    base_tip,
+                    base_version,
+                )?;
+                validate_request(request, parent)?;
+                build_candidate(request, staged, logical_hash, parent)
+            })
+            .await?;
+        Ok(result)
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep conditional outcomes and reconciliation in one state machine.
+    async fn publish_transaction<R: serde::de::DeserializeOwned>(
+        &self,
+        key: &str,
+        logical_hash: Sha256,
+        staged: &[VerifiedStagedFile],
+        build: impl Fn(&PinnedTable) -> Result<Candidate<R>, RuntimeError>,
+    ) -> Result<(R, Sha256), RuntimeError> {
         let mut parent = self.pin().await?;
-        validate_staged(request, staged, parent.head.table_id)?;
+        let table_id = parent.head.table_id;
+
         let mut rebases = 0;
         loop {
-            if let Some(result) =
-                check_idempotency(&parent, &request.idempotency_key, logical_hash)?
-            {
+            if parent.head.table_id != table_id {
+                return Err(RuntimeError::SemanticConflict(
+                    "table identity changed during publication".into(),
+                ));
+            }
+            if let Some(result) = replay::<R>(&parent, key, logical_hash)? {
                 return Ok(result);
             }
-            validate_request(request, &parent)?;
-            let candidate = build_candidate(request, staged, logical_hash, &parent)?;
+            let candidate = build(&parent)?;
             for staged_file in staged {
                 let version = self
                     .store
@@ -828,17 +915,20 @@ impl<S: ObjectStore> Table<S> {
                     .replace_head(&parent.head_version, &candidate.head_bytes)
                     .await
                 {
-                    ConditionalWriteOutcome::Applied { .. } => return Ok(candidate.result),
+                    ConditionalWriteOutcome::Applied { .. } => {
+                        return Ok((candidate.result, candidate.semantic_state));
+                    }
                     ConditionalWriteOutcome::Conflict { .. } => break,
                     ConditionalWriteOutcome::Indeterminate { source } => {
                         indeterminate += 1;
                         match self.pin().await {
                             Ok(current) => {
-                                if let Some(result) = check_idempotency(
-                                    &current,
-                                    &request.idempotency_key,
-                                    logical_hash,
-                                )? {
+                                if current.head.table_id != table_id {
+                                    return Err(RuntimeError::SemanticConflict(
+                                        "table identity changed during reconciliation".into(),
+                                    ));
+                                }
+                                if let Some(result) = replay::<R>(&current, key, logical_hash)? {
                                     return Ok(result);
                                 }
                                 if current.head_version == parent.head_version
@@ -865,9 +955,12 @@ impl<S: ObjectStore> Table<S> {
                 }
             }
             let winner = self.pin().await?;
-            if let Some(result) =
-                check_idempotency(&winner, &request.idempotency_key, logical_hash)?
-            {
+            if winner.head.table_id != table_id {
+                return Err(RuntimeError::SemanticConflict(
+                    "table identity changed after conflict".into(),
+                ));
+            }
+            if let Some(result) = replay::<R>(&winner, key, logical_hash)? {
                 return Ok(result);
             }
             rebases += 1;
@@ -879,7 +972,8 @@ impl<S: ObjectStore> Table<S> {
     }
 }
 
-struct Candidate {
+struct Candidate<R = AppendResult> {
+    semantic_state: Sha256,
     commit_uri: RelativeUri,
     commit_bytes: Vec<u8>,
     checkpoint_uri: RelativeUri,
@@ -887,7 +981,7 @@ struct Candidate {
     generation_uri: RelativeUri,
     generation_bytes: Vec<u8>,
     head_bytes: Vec<u8>,
-    result: AppendResult,
+    result: R,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -903,8 +997,12 @@ fn build_candidate(
         .0
         .checked_add(1)
         .ok_or_else(|| RuntimeError::InvalidAppend("table version exhausted".into()))?;
-    let (_, parent_snapshot, last_sequence) =
-        image::current_schema_and_snapshot(&parent.image.path)?;
+    let (_, _, last_sequence) = image::current_schema_and_snapshot(&parent.image.path)?;
+    let (_, parent_snapshot) = transactions::ref_row(
+        &image::open_readonly(&parent.image.path)?,
+        &request.target_ref,
+    )?
+    .ok_or_else(|| RuntimeError::RefNotFound(request.target_ref.clone()))?;
     let sequence_number = last_sequence
         .checked_add(1)
         .ok_or_else(|| RuntimeError::InvalidAppend("sequence number exhausted".into()))?;
@@ -988,7 +1086,7 @@ fn build_candidate(
     let operation = object([
         ("operation_id", string("append-main")),
         ("type", string("commit_snapshot")),
-        ("target_ref", string("main")),
+        ("target_ref", string(&request.target_ref)),
         ("snapshot", snapshot),
         ("added_files", CanonicalValue::Array(operation_files)),
         ("removed_file_ids", CanonicalValue::Array(Vec::new())),
@@ -1097,12 +1195,37 @@ fn build_candidate(
             intent_hash: logical_hash,
             snapshot_id,
             parent_snapshot_id: parent_snapshot,
+            target_ref: &request.target_ref,
             sequence_number,
             summary: &derived_summary,
             snapshot_metadata_json: &snapshot_metadata_json,
             files: &image_files,
         },
     )?;
+    finish_candidate(
+        parent,
+        &commit,
+        commit_uri,
+        commit_bytes,
+        checkpoint,
+        result,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn finish_candidate<R>(
+    parent: &PinnedTable,
+    commit: &SemanticCommit,
+    commit_uri: RelativeUri,
+    commit_bytes: Vec<u8>,
+    checkpoint: image::CheckpointImage,
+    result: R,
+) -> Result<Candidate<R>, RuntimeError> {
+    commit.validate_runtime_profile()?;
+    let table_version = commit.table_version.0;
+    let commit_id = commit.commit_id;
+    let created_at_ms = commit.created_at_ms.0;
+    let commit_hash = object_hash(&commit_bytes);
     let checkpoint_hash = object_hash(&checkpoint.bytes);
     let checkpoint_id = new_id();
     let checkpoint_uri: RelativeUri =
@@ -1188,7 +1311,14 @@ fn build_candidate(
         required_reader_features: parent.head.required_reader_features.clone(),
         required_writer_features: parent.head.required_writer_features.clone(),
     };
+    image::validate_commit_projection(&checkpoint.path, commit)?;
+    let committed_state = image::open_readonly(&checkpoint.path)?.query_row(
+        "SELECT semantic_state_sha256 FROM otmp_commits WHERE commit_id=?1",
+        [commit.commit_id.as_bytes().as_slice()],
+        |r| r.get(0),
+    )?;
     Ok(Candidate {
+        semantic_state: hash_from_blob(committed_state)?,
         commit_uri,
         commit_bytes,
         checkpoint_uri,
@@ -1289,7 +1419,16 @@ fn validate_request(request: &AppendRequest, pinned: &PinnedTable) -> Result<(),
     }
     if request.target_ref != "main" || request.files.is_empty() {
         return Err(RuntimeError::InvalidAppend(
-            "Gate 1 requires one non-empty append batch to main".into(),
+            "local/full-image profile requires one non-empty append batch to main".into(),
+        ));
+    }
+    let connection = image::open_readonly(&pinned.image.path)?;
+    if !matches!(
+        transactions::ref_row(&connection, &request.target_ref)?,
+        Some((RefType::Branch, _))
+    ) {
+        return Err(RuntimeError::InvalidAppend(
+            "target must exist and be a branch".into(),
         ));
     }
     let (current_schema, _, _) = image::current_schema_and_snapshot(&pinned.image.path)?;
@@ -1314,7 +1453,7 @@ fn validate_request(request: &AppendRequest, pinned: &PinnedTable) -> Result<(),
             || file.record_count > i64::MAX as u64
         {
             return Err(RuntimeError::InvalidAppend(
-                "file assertions do not match Gate 1 table defaults".into(),
+                "file assertions do not match local/full-image profile table defaults".into(),
             ));
         }
         let entry = canonical_json::to_vec(&LogicalFile {
@@ -1539,7 +1678,7 @@ fn commit_body(commit: &SemanticCommit) -> Result<Vec<u8>, RuntimeError> {
     Ok(canonical_json::encode(&value)?)
 }
 
-fn gate1_features() -> Result<FeatureSet, ProtocolError> {
+fn runtime_features() -> Result<FeatureSet, ProtocolError> {
     FeatureSet::new(vec![
         CORE_FEATURE.into(),
         PARQUET_FEATURE.into(),
@@ -1655,4 +1794,23 @@ mod u64_string {
         }
         value.parse().map_err(serde::de::Error::custom)
     }
+}
+
+fn replay<R: serde::de::DeserializeOwned>(
+    pinned: &PinnedTable,
+    key: &str,
+    intent: Sha256,
+) -> Result<Option<(R, Sha256)>, RuntimeError> {
+    let Some((stored_hash, result)) = image::idempotency(&pinned.image.path, key)? else {
+        return Ok(None);
+    };
+    if stored_hash != intent {
+        return Err(RuntimeError::IdempotencyConflict);
+    }
+    let connection = image::open_readonly(&pinned.image.path)?;
+    let hash = connection.query_row("SELECT c.semantic_state_sha256 FROM otmp_commits c JOIN otmp_idempotency i ON i.commit_id=c.commit_id AND i.table_version=c.table_version WHERE i.idempotency_key=?1", [key], |r| r.get(0))?;
+    Ok(Some((
+        canonical_json::from_slice_canonical(result.as_bytes())?,
+        hash_from_blob(hash)?,
+    )))
 }

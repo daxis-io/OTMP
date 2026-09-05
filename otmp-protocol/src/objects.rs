@@ -195,7 +195,8 @@ impl SemanticCommit {
                     snapshots += 1;
                     validate_append_profile(fields)?;
                 }
-                "initialize_table" | "set_properties" => {}
+                "initialize_table" | "set_properties" | "create_ref" | "replace_ref"
+                | "drop_ref" | "add_schema" | "set_current_schema" => {}
                 _ => {
                     return Err(ProtocolError::InvalidObject(
                         "unsupported runtime operation".into(),

@@ -9,7 +9,7 @@ import tempfile
 
 root = pathlib.Path(__file__).resolve().parent.parent
 binary = root / 'target/debug/otmp'
-for kind in ('properties',):
+for kind in ('properties', 'refs'):
     for point in ('during_temporary_head_creation', 'after_immutable_uploads',
                   'after_final_head_rename'):
         with tempfile.TemporaryDirectory(prefix='otmp-metadata-crash-') as scratch:
@@ -31,7 +31,7 @@ for kind in ('properties',):
             outcome = subprocess.run([binary, 'transact', table, '--manifest', manifest],
                                      env={**os.environ, 'OTMP_FAILPOINT': point}, capture_output=True)
             assert outcome.returncode == 86, (point, outcome.stderr)
-            subprocess.run([binary, 'verify', table], check=True, stdout=subprocess.DEVNULL)
+            subprocess.run([binary, 'verify', table, '--history'], check=True, stdout=subprocess.DEVNULL)
             head = json.loads((table / '_otmp/HEAD').read_bytes())
             expected = 1 if point == 'after_final_head_rename' else 0
             assert int(head['table_version']) == expected
@@ -40,4 +40,4 @@ for kind in ('properties',):
                 assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
                 assert db.execute('SELECT last_sequence_number FROM otmp_meta').fetchone()[0] == 0
                 assert db.execute('SELECT count(*) FROM otmp_snapshots').fetchone()[0] == 0
-print('metadata process-crash evidence passed for 3 scenarios')
+print('metadata process-crash evidence passed for 6 scenarios')

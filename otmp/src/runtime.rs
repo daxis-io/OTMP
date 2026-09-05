@@ -1663,6 +1663,7 @@ fn runtime_features() -> Result<FeatureSet, ProtocolError> {
         CORE_FEATURE.into(),
         PARQUET_FEATURE.into(),
         SQLITE_COW_FEATURE.into(),
+        "otmp.refs.v1".into(),
     ])
 }
 

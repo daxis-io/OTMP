@@ -26,14 +26,13 @@ claim of complete Core Reader or Direct Writer conformance.
 - One non-empty atomic Parquet-descriptor append batch to `main` is supported.
   The runtime validates metadata assertions but treats Parquet contents as
   opaque bytes.
-- The local/full-image profile accepts its exact `initialize_table`, `set_properties`, and `commit_snapshot`
+- The local/full-image profile accepts its exact `initialize_table`, `set_properties`, `create_ref`, `replace_ref`, `drop_ref`, and `commit_snapshot`
   operation shapes. It fails closed on every other core or extension operation
   instead of silently treating an unimplemented semantic mutation as valid.
 - Pinning verifies the complete supported semantic projection: snapshot fields,
   target ref, add-only change set, immutable file descriptors, partition
   tuples and hashes, and file metrics must agree with the relational image.
-- The relational history has no snapshot at genesis and a contiguous global snapshot sequence independent of metadata-only table versions. The local/full-image profile exposes exactly one
-  `main` branch, whose ancestry, current snapshot, and sequence allocator are
+- The relational history has no snapshot at genesis and a contiguous global snapshot sequence independent of metadata-only table versions. The local/full-image profile supports branches and immutable tags; each branch, whose ancestry, current snapshot, and sequence allocator are
   checked against that history before reads or writes proceed.
 - Property updates and removals share one private SQLite transaction and conditional publication. Every touched key requires an exact `property_is` precondition. Metadata-only commits advance table version without allocating a snapshot or sequence.
 - An idempotency key binds to the canonical logical intent. A committed retry
@@ -52,6 +51,8 @@ claim of complete Core Reader or Direct Writer conformance.
   rename, and final directory `fsync`.
 
 Metadata selection pins current HEAD once, then follows retained content-hashed physical ancestry. Snapshot selectors resolve against that selected image. Current verification checks current tips; retained-history verification replays semantic transitions and verifies historical bytes. Neither scope lists objects or repairs state. CLI status separates the selected metadata coordinates from the current anchor.
+
+Named refs support create, branch replacement, and drop with exact base-state requirements. Branch live rows are rebuilt from snapshot ancestry; tags resolve snapshots without live rows. Ref-only commits allocate no snapshots. New tables advertise `otmp.refs.v1` from genesis. The transaction fixture retains versions 0–5.
 
 ## Publication and visibility
 

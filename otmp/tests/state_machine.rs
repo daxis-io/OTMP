@@ -765,3 +765,109 @@ async fn append_rebases_across_unrelated_metadata() {
     assert_eq!(table.pin().await.unwrap().files("main").unwrap().len(), 1);
     table.verify().await.unwrap();
 }
+
+#[tokio::test]
+async fn append_prepared_before_explicit_ref_replacement_conflicts_even_if_tip_is_same() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data");
+    tokio::fs::write(&path, b"a").await.unwrap();
+    let store = PauseAfterDataCreateStore::new();
+    let table = Table::new(store.clone());
+    table
+        .initialize(InitializeRequest::new(schema()))
+        .await
+        .unwrap();
+    let snapshot = table
+        .append_files(&request(path.clone(), b"a", "first"))
+        .await
+        .unwrap();
+    store.pause.store(true, Ordering::SeqCst);
+    let append = request(path, b"a", "prepared");
+    let writer = table.clone();
+    let task = tokio::spawn(async move { writer.append_files(&append).await });
+    store.entered.notified().await;
+    table
+        .transact(&otmp::TransactionRequest {
+            idempotency_key: "replace".into(),
+            requirements: vec![
+                otmp::Requirement::RefExists {
+                    name: "main".into(),
+                    ref_type: otmp::RefType::Branch,
+                },
+                otmp::Requirement::RefSnapshotIs {
+                    name: "main".into(),
+                    snapshot_id: Some(snapshot.snapshot_id),
+                },
+                otmp::Requirement::SnapshotExists {
+                    snapshot_id: snapshot.snapshot_id,
+                },
+            ],
+            operations: vec![otmp::OperationRequest::ReplaceRef {
+                operation_id: "replace".into(),
+                name: "main".into(),
+                snapshot_id: snapshot.snapshot_id,
+            }],
+            commit_metadata: CommitMetadata::default(),
+        })
+        .await
+        .unwrap();
+    store.release.notify_one();
+    let error = task.await.unwrap().unwrap_err();
+    assert_eq!(error.code(), "OTMP_SEMANTIC_CONFLICT");
+    assert_eq!(table.pin().await.unwrap().files("main").unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn append_rebases_across_another_branch_without_mixing_ancestry() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data");
+    tokio::fs::write(&path, b"a").await.unwrap();
+    let store = PauseAfterDataCreateStore::new();
+    let table = Table::new(store.clone());
+    table
+        .initialize(InitializeRequest::new(schema()))
+        .await
+        .unwrap();
+    table
+        .transact(&otmp::TransactionRequest {
+            idempotency_key: "branch".into(),
+            requirements: vec![otmp::Requirement::RefAbsent {
+                name: "audit".into(),
+            }],
+            operations: vec![otmp::OperationRequest::CreateRef {
+                operation_id: "branch".into(),
+                name: "audit".into(),
+                ref_type: otmp::RefType::Branch,
+                snapshot_id: None,
+            }],
+            commit_metadata: CommitMetadata::default(),
+        })
+        .await
+        .unwrap();
+    store.pause.store(true, Ordering::SeqCst);
+    let main = request(path.clone(), b"a", "main");
+    let writer = table.clone();
+    let task = tokio::spawn(async move { writer.append_files(&main).await });
+    store.entered.notified().await;
+    store.pause.store(false, Ordering::SeqCst);
+    let mut audit = request(path, b"a", "audit");
+    audit.target_ref = "audit".into();
+    let first = table.append_files(&audit).await.unwrap();
+    store.release.notify_one();
+    let second = task.await.unwrap().unwrap();
+    assert_eq!((first.sequence_number, second.sequence_number), (1, 2));
+    let pin = table.pin().await.unwrap();
+    assert_eq!(pin.files("main").unwrap().len(), 1);
+    assert_eq!(pin.files("audit").unwrap().len(), 1);
+    for id in [first.snapshot_id, second.snapshot_id] {
+        assert_eq!(
+            pin.resolve_snapshot(otmp::SnapshotSelection::SnapshotId(id))
+                .unwrap()
+                .descriptor()
+                .unwrap()
+                .parent_snapshot_id,
+            None
+        );
+    }
+    table.verify_history().await.unwrap();
+}

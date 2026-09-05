@@ -1397,7 +1397,7 @@ fn validate_request(request: &AppendRequest, pinned: &PinnedTable) -> Result<(),
             "invalid idempotency key".into(),
         ));
     }
-    if request.target_ref != "main" || request.files.is_empty() {
+    if request.files.is_empty() {
         return Err(RuntimeError::InvalidAppend(
             "local/full-image profile requires one non-empty append batch to main".into(),
         ));

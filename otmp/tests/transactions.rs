@@ -212,7 +212,7 @@ async fn null_branches_tags_and_invalid_mutations() {
         ))
         .await
         .unwrap();
-    let snapshot = append(&table, source.path(), "root", "main", 1).await;
+    let snapshot = append(&table, source.path(), "root", "empty", 1).await;
     table
         .transact(&metadata(
             "tag",
@@ -232,7 +232,7 @@ async fn null_branches_tags_and_invalid_mutations() {
         .await
         .unwrap();
     let pin = table.pin().await.unwrap();
-    assert_eq!(pin.files("main").unwrap().len(), 1);
+    assert!(pin.files("main").unwrap().is_empty());
     assert_eq!(
         pin.resolve_snapshot(SnapshotSelection::Ref("v1".into()))
             .unwrap()
@@ -372,5 +372,136 @@ async fn ref_movement_rematerializes_live_membership() {
             version
         );
     }
+    table.verify_history().await.unwrap();
+}
+
+#[tokio::test]
+async fn verification_checks_historical_bytes_only_in_retained_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = tempfile::NamedTempFile::new().unwrap();
+    let table = Table::new(LocalObjectStore::new(dir.path()).unwrap());
+    table
+        .initialize(InitializeRequest::new(schema()))
+        .await
+        .unwrap();
+    table
+        .transact(&metadata(
+            "branch",
+            vec![Requirement::RefAbsent {
+                name: "temporary".into(),
+            }],
+            vec![OperationRequest::CreateRef {
+                operation_id: "create".into(),
+                name: "temporary".into(),
+                ref_type: otmp::RefType::Branch,
+                snapshot_id: None,
+            }],
+        ))
+        .await
+        .unwrap();
+    let snapshot = append(&table, source.path(), "only-historical", "temporary", 1).await;
+    table
+        .transact(&metadata(
+            "drop",
+            vec![
+                Requirement::RefExists {
+                    name: "temporary".into(),
+                    ref_type: otmp::RefType::Branch,
+                },
+                Requirement::RefSnapshotIs {
+                    name: "temporary".into(),
+                    snapshot_id: Some(snapshot.snapshot_id),
+                },
+            ],
+            vec![OperationRequest::DropRef {
+                operation_id: "drop".into(),
+                name: "temporary".into(),
+            }],
+        ))
+        .await
+        .unwrap();
+    std::fs::write(dir.path().join("unreachable-orphan"), b"not OTMP").unwrap();
+    table.verify_history().await.unwrap();
+    std::fs::remove_file(dir.path().join(snapshot.files[0].uri.as_str())).unwrap();
+    table.verify().await.unwrap();
+    assert!(matches!(
+        table.verify_history().await,
+        Err(otmp::RuntimeError::Storage(otmp::StorageError::NotFound(_)))
+    ));
+}
+
+#[tokio::test]
+async fn tag_is_readable_but_cannot_be_replaced_or_appended() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = tempfile::NamedTempFile::new().unwrap();
+    let table = Table::new(LocalObjectStore::new(dir.path()).unwrap());
+    table
+        .initialize(InitializeRequest::new(schema()))
+        .await
+        .unwrap();
+    let snapshot = append(&table, source.path(), "A", "main", 1).await;
+    table
+        .transact(&metadata(
+            "tag",
+            vec![
+                Requirement::RefAbsent {
+                    name: "release".into(),
+                },
+                Requirement::SnapshotExists {
+                    snapshot_id: snapshot.snapshot_id,
+                },
+            ],
+            vec![OperationRequest::CreateRef {
+                operation_id: "tag".into(),
+                name: "release".into(),
+                ref_type: otmp::RefType::Tag,
+                snapshot_id: Some(snapshot.snapshot_id),
+            }],
+        ))
+        .await
+        .unwrap();
+    let before = table.pin().await.unwrap().status();
+    let change = metadata(
+        "replace",
+        vec![
+            Requirement::RefExists {
+                name: "release".into(),
+                ref_type: otmp::RefType::Tag,
+            },
+            Requirement::RefSnapshotIs {
+                name: "release".into(),
+                snapshot_id: Some(snapshot.snapshot_id),
+            },
+            Requirement::SnapshotExists {
+                snapshot_id: snapshot.snapshot_id,
+            },
+        ],
+        vec![OperationRequest::ReplaceRef {
+            operation_id: "replace".into(),
+            name: "release".into(),
+            snapshot_id: snapshot.snapshot_id,
+        }],
+    );
+    assert!(table.transact(&change).await.is_err());
+    let mut request = otmp::AppendRequest::new("tag-append", vec![]);
+    request.target_ref = "release".into();
+    // A real source descriptor ensures rejection is about the target ref.
+    request.files.push(otmp::AppendFile {
+        source_path: source.path().into(),
+        fingerprint: otmp::SourceFingerprint {
+            sha256: otmp_protocol::Sha256::digest(b"A"),
+            length: 1,
+        },
+        format: otmp::FileFormat::Parquet,
+        record_count: 1,
+        schema_id: 1,
+        partition_spec_id: 0,
+        sort_order_id: 0,
+        partition_values: std::collections::BTreeMap::default(),
+        metrics: vec![],
+        metadata: std::collections::BTreeMap::default(),
+    });
+    assert!(table.append_files(&request).await.is_err());
+    assert_eq!(table.pin().await.unwrap().status(), before);
     table.verify_history().await.unwrap();
 }

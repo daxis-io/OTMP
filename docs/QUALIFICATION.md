@@ -23,7 +23,7 @@ claim of complete Core Reader or Direct Writer conformance.
 - Data is staged at a table-relative UUIDv7 destination. The runtime checks the
   expected length and SHA-256 while copying, reopens and rehashes the stored
   object, and revalidates it immediately before publication.
-- One non-empty atomic Parquet-descriptor append batch to `main` is supported.
+- One non-empty atomic Parquet-descriptor append batch to any branch is supported.
   The runtime validates metadata assertions but treats Parquet contents as
   opaque bytes.
 - The local/full-image profile accepts its exact `initialize_table`, `set_properties`, `create_ref`, `replace_ref`, `drop_ref`, and `commit_snapshot`

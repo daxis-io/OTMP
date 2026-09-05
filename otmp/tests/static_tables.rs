@@ -49,7 +49,7 @@ async fn static_transactions_package_separates_versions_and_snapshots() {
     let table = Table::new(LocalObjectStore::new(root).unwrap());
     table.verify().await.unwrap();
     let pinned = table.pin().await.unwrap();
-    assert_eq!(pinned.status().table_version, 2);
+    assert_eq!(pinned.status().table_version, 5);
 
-    assert_eq!(pinned.files("main").unwrap().len(), 1);
+    assert_eq!(pinned.files("main").unwrap().len(), 2);
 }

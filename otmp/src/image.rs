@@ -129,6 +129,7 @@ pub(crate) fn create_genesis(input: &GenesisImage<'_>) -> Result<CheckpointImage
     )?;
     for feature in [
         "otmp.core.v2",
+        "otmp.refs.v1",
         "otmp.data.parquet.v1",
         "otmp.metadata.sqlite3-cow.v1",
     ] {
@@ -2399,6 +2400,38 @@ fn validate_metadata_projection(
                     )?;
                 }
                 valid
+            }
+            OperationRequest::CreateRef {
+                name,
+                ref_type,
+                snapshot_id,
+                ..
+            } => {
+                let row = crate::runtime::transactions::ref_row(connection, &name)?;
+                let created: Option<i64> = connection
+                    .query_row(
+                        "SELECT created_version FROM otmp_refs WHERE ref_name=?1",
+                        [name],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                row == Some((ref_type, snapshot_id)) && created == Some(version)
+            }
+            OperationRequest::ReplaceRef {
+                name, snapshot_id, ..
+            } => {
+                let row = crate::runtime::transactions::ref_row(connection, &name)?;
+                let updated: Option<i64> = connection
+                    .query_row(
+                        "SELECT updated_version FROM otmp_refs WHERE ref_name=?1",
+                        [name],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                row == Some((crate::RefType::Branch, Some(snapshot_id))) && updated == Some(version)
+            }
+            OperationRequest::DropRef { name, .. } => {
+                crate::runtime::transactions::ref_row(connection, &name)?.is_none()
             }
         };
         if !valid {

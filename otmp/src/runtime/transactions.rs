@@ -52,6 +52,14 @@ pub enum RefType {
     Branch,
     Tag,
 }
+impl RefType {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Branch => "branch",
+            Self::Tag => "tag",
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -61,11 +69,33 @@ pub enum OperationRequest {
         updates: BTreeMap<String, CanonicalValue>,
         removals: Vec<String>,
     },
+    CreateRef {
+        operation_id: String,
+        #[serde(rename = "ref")]
+        name: String,
+        ref_type: RefType,
+        #[serde(deserialize_with = "required_snapshot")]
+        snapshot_id: Option<Id>,
+    },
+    ReplaceRef {
+        operation_id: String,
+        #[serde(rename = "ref")]
+        name: String,
+        snapshot_id: Id,
+    },
+    DropRef {
+        operation_id: String,
+        #[serde(rename = "ref")]
+        name: String,
+    },
 }
 impl OperationRequest {
     fn id(&self) -> &str {
         match self {
-            Self::SetProperties { operation_id, .. } => operation_id,
+            Self::SetProperties { operation_id, .. }
+            | Self::CreateRef { operation_id, .. }
+            | Self::ReplaceRef { operation_id, .. }
+            | Self::DropRef { operation_id, .. } => operation_id,
         }
     }
 }
@@ -86,6 +116,14 @@ pub enum OperationResult {
         operation_id: String,
         keys: Vec<String>,
     },
+    Ref {
+        operation_id: String,
+        #[serde(rename = "ref")]
+        name: String,
+        ref_type: RefType,
+        #[serde(deserialize_with = "required_snapshot")]
+        snapshot_id: Option<Id>,
+    },
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -105,6 +143,20 @@ pub(crate) struct DurableResult {
 
 fn invalid(message: &str) -> RuntimeError {
     RuntimeError::InvalidTransaction(message.into())
+}
+fn required(request: &TransactionRequest, requirement: &Requirement) -> Result<(), RuntimeError> {
+    if request
+        .requirements
+        .iter()
+        .filter(|r| *r == requirement)
+        .count()
+        != 1
+    {
+        return Err(invalid(
+            "operation requires exactly one matching precondition",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn ref_row(
@@ -284,6 +336,12 @@ impl<'a> PreparedTransaction<'a> {
         )
     }
 }
+fn validate_ref_name<'a>(name: &'a str, refs: &mut BTreeSet<&'a str>) -> Result<(), RuntimeError> {
+    if name.is_empty() || name.chars().any(char::is_control) || !refs.insert(name) {
+        return Err(invalid("invalid or repeated ref name"));
+    }
+    Ok(())
+}
 
 pub(crate) fn apply_operations(
     tx: &Transaction<'_>,
@@ -303,7 +361,42 @@ pub(crate) fn apply_operations(
                     tx.execute("DELETE FROM otmp_properties WHERE property_key=?1", [key])?;
                 }
             }
+            OperationRequest::CreateRef {
+                name,
+                ref_type,
+                snapshot_id,
+                ..
+            } => {
+                tx.execute("INSERT INTO otmp_refs(ref_name,ref_type,snapshot_id,created_version,updated_version) VALUES(?1,?2,?3,?4,?4)", params![name, ref_type.as_str(), snapshot_id.map(|id| id.as_bytes().to_vec()), version])?;
+                if *ref_type == RefType::Branch {
+                    materialize_branch(tx, name, *snapshot_id)?;
+                }
+            }
+            OperationRequest::ReplaceRef {
+                name, snapshot_id, ..
+            } => {
+                tx.execute(
+                    "UPDATE otmp_refs SET snapshot_id=?1, updated_version=?2 WHERE ref_name=?3",
+                    params![snapshot_id.as_bytes().as_slice(), version, name],
+                )?;
+                materialize_branch(tx, name, Some(*snapshot_id))?;
+            }
+            OperationRequest::DropRef { name, .. } => {
+                tx.execute("DELETE FROM otmp_ref_live_files WHERE ref_name=?1", [name])?;
+                tx.execute("DELETE FROM otmp_refs WHERE ref_name=?1", [name])?;
+            }
         }
+    }
+    Ok(())
+}
+fn materialize_branch(
+    tx: &Transaction<'_>,
+    name: &str,
+    snapshot: Option<Id>,
+) -> Result<(), RuntimeError> {
+    tx.execute("DELETE FROM otmp_ref_live_files WHERE ref_name=?1", [name])?;
+    for id in super::history::ancestry(tx, snapshot)? {
+        tx.execute("INSERT INTO otmp_ref_live_files SELECT ?1,c.file_id,c.snapshot_id,s.sequence_number,s.sequence_number FROM otmp_snapshot_file_changes c JOIN otmp_snapshots s USING(snapshot_id) WHERE c.snapshot_id=?2 AND c.change_kind='add'", params![name, id.as_bytes().as_slice()])?;
     }
     Ok(())
 }
@@ -353,6 +446,7 @@ pub(crate) fn prepare_operations(
     evaluate(connection, &request.requirements)?;
     let mut ids = BTreeSet::new();
     let mut keys = BTreeSet::new();
+    let mut refs = BTreeSet::new();
 
     let mut results = Vec::new();
     for operation in &request.operations {
@@ -392,6 +486,90 @@ pub(crate) fn prepare_operations(
                 OperationResult::Properties {
                     operation_id: operation_id.clone(),
                     keys: touched,
+                }
+            }
+            OperationRequest::CreateRef {
+                operation_id,
+                name,
+                ref_type,
+                snapshot_id,
+            } => {
+                required(request, &Requirement::RefAbsent { name: name.clone() })?;
+                if *ref_type == RefType::Tag && snapshot_id.is_none() {
+                    return Err(invalid("tags require a snapshot"));
+                }
+                if let Some(id) = snapshot_id {
+                    required(request, &Requirement::SnapshotExists { snapshot_id: *id })?;
+                }
+                validate_ref_name(name, &mut refs)?;
+                OperationResult::Ref {
+                    operation_id: operation_id.clone(),
+                    name: name.clone(),
+                    ref_type: *ref_type,
+                    snapshot_id: *snapshot_id,
+                }
+            }
+            OperationRequest::ReplaceRef {
+                operation_id,
+                name,
+                snapshot_id,
+            } => {
+                let (_, old) = ref_row(connection, name)?
+                    .ok_or_else(|| RuntimeError::RefNotFound(name.clone()))?;
+                required(
+                    request,
+                    &Requirement::RefExists {
+                        name: name.clone(),
+                        ref_type: RefType::Branch,
+                    },
+                )?;
+                required(
+                    request,
+                    &Requirement::RefSnapshotIs {
+                        name: name.clone(),
+                        snapshot_id: old,
+                    },
+                )?;
+                required(
+                    request,
+                    &Requirement::SnapshotExists {
+                        snapshot_id: *snapshot_id,
+                    },
+                )?;
+                validate_ref_name(name, &mut refs)?;
+                OperationResult::Ref {
+                    operation_id: operation_id.clone(),
+                    name: name.clone(),
+                    ref_type: RefType::Branch,
+                    snapshot_id: Some(*snapshot_id),
+                }
+            }
+            OperationRequest::DropRef { operation_id, name } => {
+                if name == "main" {
+                    return Err(invalid("main cannot be dropped"));
+                }
+                let (kind, old) = ref_row(connection, name)?
+                    .ok_or_else(|| RuntimeError::RefNotFound(name.clone()))?;
+                required(
+                    request,
+                    &Requirement::RefExists {
+                        name: name.clone(),
+                        ref_type: kind,
+                    },
+                )?;
+                required(
+                    request,
+                    &Requirement::RefSnapshotIs {
+                        name: name.clone(),
+                        snapshot_id: old,
+                    },
+                )?;
+                validate_ref_name(name, &mut refs)?;
+                OperationResult::Ref {
+                    operation_id: operation_id.clone(),
+                    name: name.clone(),
+                    ref_type: kind,
+                    snapshot_id: old,
                 }
             }
         };

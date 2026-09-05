@@ -143,3 +143,234 @@ async fn metadata_transactions_are_snapshot_free_and_replay_stable() {
     );
     table.verify_history().await.unwrap();
 }
+
+fn metadata(
+    key: &str,
+    requirements: Vec<Requirement>,
+    operations: Vec<OperationRequest>,
+) -> TransactionRequest {
+    TransactionRequest {
+        idempotency_key: key.into(),
+        requirements,
+        operations,
+        commit_metadata: CommitMetadata::default(),
+    }
+}
+
+async fn append(
+    table: &Table<LocalObjectStore>,
+    source: &std::path::Path,
+    key: &str,
+    branch: &str,
+    schema_id: u32,
+) -> otmp::AppendResult {
+    let bytes = key.as_bytes();
+    std::fs::write(source, bytes).unwrap();
+    let mut request = otmp::AppendRequest::new(
+        key,
+        vec![otmp::AppendFile {
+            source_path: source.into(),
+            fingerprint: otmp::SourceFingerprint {
+                sha256: otmp_protocol::Sha256::digest(bytes),
+                length: bytes.len() as u64,
+            },
+            format: otmp::FileFormat::Parquet,
+            record_count: 1,
+            schema_id,
+            partition_spec_id: 0,
+            sort_order_id: 0,
+            partition_values: std::collections::BTreeMap::default(),
+            metrics: vec![],
+            metadata: std::collections::BTreeMap::default(),
+        }],
+    );
+    request.target_ref = branch.into();
+    table.append_files(&request).await.unwrap()
+}
+
+#[tokio::test]
+async fn null_branches_tags_and_invalid_mutations() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = tempfile::NamedTempFile::new().unwrap();
+    let table = Table::new(LocalObjectStore::new(dir.path()).unwrap());
+    table
+        .initialize(InitializeRequest::new(schema()))
+        .await
+        .unwrap();
+    table
+        .transact(&metadata(
+            "empty",
+            vec![Requirement::RefAbsent {
+                name: "empty".into(),
+            }],
+            vec![OperationRequest::CreateRef {
+                operation_id: "empty".into(),
+                name: "empty".into(),
+                ref_type: otmp::RefType::Branch,
+                snapshot_id: None,
+            }],
+        ))
+        .await
+        .unwrap();
+    let snapshot = append(&table, source.path(), "root", "main", 1).await;
+    table
+        .transact(&metadata(
+            "tag",
+            vec![
+                Requirement::RefAbsent { name: "v1".into() },
+                Requirement::SnapshotExists {
+                    snapshot_id: snapshot.snapshot_id,
+                },
+            ],
+            vec![OperationRequest::CreateRef {
+                operation_id: "tag".into(),
+                name: "v1".into(),
+                ref_type: otmp::RefType::Tag,
+                snapshot_id: Some(snapshot.snapshot_id),
+            }],
+        ))
+        .await
+        .unwrap();
+    let pin = table.pin().await.unwrap();
+    assert_eq!(pin.files("main").unwrap().len(), 1);
+    assert_eq!(
+        pin.resolve_snapshot(SnapshotSelection::Ref("v1".into()))
+            .unwrap()
+            .files()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        pin.resolve_snapshot(SnapshotSelection::SequenceNumber(99))
+            .is_err()
+    );
+    assert!(
+        table
+            .pin_metadata(MetadataSelection::TableVersion(99))
+            .await
+            .is_err()
+    );
+    let drop_main = metadata(
+        "drop-main",
+        vec![
+            Requirement::RefExists {
+                name: "main".into(),
+                ref_type: otmp::RefType::Branch,
+            },
+            Requirement::RefSnapshotIs {
+                name: "main".into(),
+                snapshot_id: None,
+            },
+        ],
+        vec![OperationRequest::DropRef {
+            operation_id: "drop".into(),
+            name: "main".into(),
+        }],
+    );
+    assert!(table.transact(&drop_main).await.is_err());
+    table.verify_history().await.unwrap();
+}
+
+#[tokio::test]
+async fn ref_movement_rematerializes_live_membership() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = tempfile::NamedTempFile::new().unwrap();
+    let table = Table::new(LocalObjectStore::new(dir.path()).unwrap());
+    table
+        .initialize(InitializeRequest::new(schema()))
+        .await
+        .unwrap();
+    let a = append(&table, source.path(), "A", "main", 1).await;
+    let before = table.pin().await.unwrap();
+    let result = table
+        .transact(&property("property", CanonicalValue::Bool(true)))
+        .await
+        .unwrap();
+    assert_eq!(result.table_version, 2);
+    assert_eq!(
+        table.pin().await.unwrap().files("main").unwrap(),
+        before.files("main").unwrap()
+    );
+    let create = metadata(
+        "audit",
+        vec![
+            Requirement::RefAbsent {
+                name: "audit".into(),
+            },
+            Requirement::SnapshotExists {
+                snapshot_id: a.snapshot_id,
+            },
+        ],
+        vec![OperationRequest::CreateRef {
+            operation_id: "create".into(),
+            name: "audit".into(),
+            ref_type: otmp::RefType::Branch,
+            snapshot_id: Some(a.snapshot_id),
+        }],
+    );
+    table.transact(&create).await.unwrap();
+    let b = append(&table, source.path(), "B", "main", 1).await;
+    assert_eq!(b.sequence_number, 2);
+    assert_eq!(b.table_version, 4);
+    assert_eq!(table.pin().await.unwrap().files("audit").unwrap().len(), 1);
+    table
+        .transact(&metadata(
+            "move",
+            vec![
+                Requirement::RefExists {
+                    name: "audit".into(),
+                    ref_type: otmp::RefType::Branch,
+                },
+                Requirement::RefSnapshotIs {
+                    name: "audit".into(),
+                    snapshot_id: Some(a.snapshot_id),
+                },
+                Requirement::SnapshotExists {
+                    snapshot_id: b.snapshot_id,
+                },
+            ],
+            vec![OperationRequest::ReplaceRef {
+                operation_id: "move".into(),
+                name: "audit".into(),
+                snapshot_id: b.snapshot_id,
+            }],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(table.pin().await.unwrap().files("audit").unwrap().len(), 2);
+    let stale = metadata(
+        "stale",
+        vec![
+            Requirement::RefExists {
+                name: "audit".into(),
+                ref_type: otmp::RefType::Branch,
+            },
+            Requirement::RefSnapshotIs {
+                name: "audit".into(),
+                snapshot_id: Some(a.snapshot_id),
+            },
+            Requirement::SnapshotExists {
+                snapshot_id: b.snapshot_id,
+            },
+        ],
+        vec![OperationRequest::ReplaceRef {
+            operation_id: "stale".into(),
+            name: "audit".into(),
+            snapshot_id: b.snapshot_id,
+        }],
+    );
+    assert!(table.transact(&stale).await.is_err());
+    for version in 0..=5 {
+        assert_eq!(
+            table
+                .pin_metadata(MetadataSelection::TableVersion(version))
+                .await
+                .unwrap()
+                .coordinates()
+                .table_version,
+            version
+        );
+    }
+    table.verify_history().await.unwrap();
+}

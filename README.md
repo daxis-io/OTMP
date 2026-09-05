@@ -1,11 +1,11 @@
 # OTMP 0.0.2-alpha
 
-This repository is a Rust proof of concept for a baisc catalog free and full image subset of the Open Table Metadata Protocol (OTMP).
+This repository is an experimental Rust catalog-optional local/full-image implementation of the Open Table Metadata Protocol (OTMP).
 
 
 ## Workspace
 
-The workspace contains exactly three production crates:
+The workspace contains three crates:
 
 - `otmp-protocol`: portable protocol values, canonical codecs, validation, and
   domain-separated hashes;
@@ -32,3 +32,15 @@ cargo run -p otmp-cli -- verify TABLE
 Append manifests must supply the expected SHA-256 and length. A local source
 path is an execution input and is excluded from logical intent identity. Command
 success is JSON on stdout; failures are structured JSON on stderr.
+
+## Project documents
+
+- [Specification](spec/OTMP-0.0.2-alpha.md)
+- [Qualification and reproduction](docs/QUALIFICATION.md)
+- [Catalog integration](docs/CATALOG-INTEGRATION.md)
+- [Conformance fixtures](conformance/README.md)
+- [Contributing](CONTRIBUTING.md)
+
+This is an evolving pre-release v1 development line. The `0.0.2-alpha`
+identifiers remain in use; no backward compatibility or fixture migration is
+promised before the first official release.

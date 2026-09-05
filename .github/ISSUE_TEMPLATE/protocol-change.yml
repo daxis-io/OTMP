@@ -1,0 +1,10 @@
+name: Protocol change
+description: Proposed contract, rationale, invariants, alternatives and conformance cases
+body:
+  - type: textarea
+    id: details
+    attributes:
+      label: Protocol change
+      description: Proposed contract, rationale, invariants, alternatives and conformance cases
+    validations:
+      required: true

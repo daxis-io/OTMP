@@ -1,0 +1,10 @@
+name: Bug report
+description: Reproduction steps, expected behavior, actual behavior, revision and environment
+body:
+  - type: textarea
+    id: details
+    attributes:
+      label: Bug report
+      description: Reproduction steps, expected behavior, actual behavior, revision and environment
+    validations:
+      required: true

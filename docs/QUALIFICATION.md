@@ -1,8 +1,8 @@
-# OTMP 0.0.2-alpha Gate 1 qualification
+# Local/full-image qualification
 
 ## Qualified claim
 
-> **Gate 1 passed for the Rust local/full-image OTMP subset: self-contained
+> **Qualification demonstrated for the Rust local/full-image OTMP subset: self-contained
 > genesis, pinned catalog-free reads, byte-verified table-relative staging,
 > idempotent Parquet-descriptor append, conditional-publication reconciliation,
 > and append-safe rebase.**
@@ -26,14 +26,14 @@ claim of complete Core Reader or Direct Writer conformance.
 - One non-empty atomic Parquet-descriptor append batch to `main` is supported.
   The runtime validates metadata assertions but treats Parquet contents as
   opaque bytes.
-- Gate 1 accepts only its exact `initialize_table` and `commit_snapshot`
+- The local/full-image profile accepts only its exact `initialize_table` and `commit_snapshot`
   operation shapes. It fails closed on every other core or extension operation
   instead of silently treating an unimplemented semantic mutation as valid.
 - Pinning verifies the complete supported semantic projection: snapshot fields,
   target ref, add-only change set, immutable file descriptors, partition
   tuples and hashes, and file metrics must agree with the relational image.
 - The relational history has no snapshot at genesis and exactly one contiguous
-  append snapshot per positive table version. Gate 1 exposes exactly one
+  append snapshot per positive table version. The local/full-image profile exposes exactly one
   `main` branch, whose ancestry, current snapshot, and sequence allocator are
   checked against that history before reads or writes proceed.
 - An idempotency key binds to the canonical logical intent. A committed retry
@@ -71,14 +71,20 @@ lower-level `commit_staged_files` API never deletes caller-owned staging.
 
 ## Verification evidence
 
+Install rustup, Python 3, bash, and a native C build toolchain. Install the pinned
+verification tools in [CONTRIBUTING.md](../CONTRIBUTING.md). The checked-in
+Rust toolchain selects all required compiler components. No maintainer-local
+files, cloud accounts, credentials, or environment variables are needed.
+
 The workspace qualification commands are:
 
 ```bash
-cargo fmt --all -- --check
+cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo nextest run --workspace --all-features
 cargo test --workspace --doc
 cargo check -p otmp-protocol --target wasm32-unknown-unknown
+python3 conformance/regenerate.py --check
 bash tests/run-subprocess.sh
 cargo deny check
 cargo audit
@@ -100,7 +106,7 @@ failure.
 
 ## Deferred work
 
-Gate 1 deliberately does not include:
+The local/full-image profile deliberately does not include:
 
 - a complete Core Reader or Direct Writer profile;
 - cloud object-store correctness or a production storage adapter;
@@ -117,4 +123,4 @@ Gate 1 deliberately does not include:
 Local object versions are fencing values only and are never serialized as
 portable object identity. Unreachable immutable artifacts can remain after a
 crash or a failed candidate publication; normal readers do not list storage and
-Gate 1 provides no garbage collector.
+The local/full-image profile provides no garbage collector.

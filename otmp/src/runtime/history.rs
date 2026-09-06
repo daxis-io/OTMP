@@ -1,15 +1,15 @@
 use super::{
-    BTreeMap, BTreeSet, CanonicalValue, ConditionalWriteOutcome, GENERATION_MEDIA_TYPE, Generation,
-    Head, Id, JsonU64, LiveFile, ObjectReference, ObjectStore, ObjectVersion, PinnedTable, RefType,
-    RelativeUri, RuntimeError, SemanticCommit, Serialize, Sha256, StorageError, StoredObject,
-    Table, canonical_json, hash_from_blob, id_from_blob, image, nonnegative, string, transactions,
-    verified_read,
+    BTreeMap, BTreeSet, CanonicalValue, GENERATION_MEDIA_TYPE, Generation, Head, Id, JsonU64,
+    LiveFile, ObjectReference, ObjectStore, PinnedTable, RefType, RuntimeError, SemanticCommit,
+    Serialize, Sha256, StoredObject, Table, canonical_json, hash_from_blob, id_from_blob, image,
+    nonnegative, string, transactions, verified_read,
 };
 use rusqlite::{Connection, OptionalExtension};
 
 #[cfg(test)]
 std::thread_local! {
     pub(super) static DATA_HASHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(super) static VERIFIED_HASHES: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
     static SNAPSHOT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -324,10 +324,10 @@ impl<S: ObjectStore> Table<S> {
                 "invalid physical parent reference".into(),
             ));
         }
-        let object = verified_read(&self.store, reference).await?;
+        let object = self.read_metadata(reference).await?;
         let generation: Generation = canonical_json::from_slice_canonical(&object.bytes)?;
         validate_generation_edge(&child.generation, &generation, seen)?;
-        let commit_object = verified_read(&self.store, &generation.semantic_commit).await?;
+        let commit_object = self.read_metadata(&generation.semantic_commit).await?;
         let commit: SemanticCommit = canonical_json::from_slice_canonical(&commit_object.bytes)?;
         // This internal envelope only drives common validation; historical coordinates never expose a root revision.
         let head = Head {
@@ -364,8 +364,8 @@ impl<S: ObjectStore> Table<S> {
                     "invalid retained commit reference".into(),
                 ));
             }
-            let bytes = verified_read(&self.store, &r).await?.bytes;
-            let commit: SemanticCommit = canonical_json::from_slice_canonical(&bytes)?;
+            let object = self.read_metadata(&r).await?;
+            let commit: SemanticCommit = canonical_json::from_slice_canonical(&object.bytes)?;
             commit.validate_runtime_profile()?;
             if commit.table_id != state.head.table_id
                 || previous_version
@@ -441,11 +441,10 @@ impl<S: ObjectStore> Table<S> {
         &self,
         scope: VerificationScope,
     ) -> Result<VerificationReport, RuntimeError> {
-        let cache = ReadCache {
-            inner: self.store.clone(),
-            objects: std::sync::Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
-        };
-        let table = Table::new(cache);
+        let mut table = Self::new(self.store.clone());
+        table.metadata_cache = Some(std::sync::Arc::new(
+            tokio::sync::Mutex::new(BTreeMap::new()),
+        ));
         let mut state = table.pin().await?;
         let mut report = VerificationReport {
             scope,
@@ -454,8 +453,8 @@ impl<S: ObjectStore> Table<S> {
             generations_checked: 0,
             commits_checked: 0,
             snapshots_checked: 0,
-            objects_checked: 0,
-            bytes_checked: 0,
+            objects_checked: 1, // the single anchored HEAD read
+            bytes_checked: state.raw_head.len() as u64,
         };
         let mut seen = BTreeSet::from([state.generation.generation_id]);
         let mut commits = BTreeSet::new();
@@ -478,27 +477,24 @@ impl<S: ObjectStore> Table<S> {
             image::validate_transition(&parent.image.path, &state.image.path, &state.commit)?;
             state = parent;
         }
-        // Finish metadata traversal first, so even a file URI that also names a
-        // metadata object reuses the already-read bytes. Data bytes are discarded
-        // immediately after verification instead of accumulating in the cache.
+        // Metadata objects share validated bytes, while user bytes are discarded
+        // immediately. A URI appearing in both roles still uses one read/hash.
+        let cache = table.metadata_cache.as_ref().expect("verification cache");
         for reference in file_references.values() {
-            if table
-                .store
-                .objects
-                .lock()
-                .await
-                .contains_key(reference.uri.as_str())
-            {
-                verified_read(&table.store, reference).await?;
+            if let Some(cached) = cache.lock().await.get(reference.uri.as_str()) {
+                cached.check(reference)?;
             } else {
                 let object = verified_read(&self.store, reference).await?;
                 report.objects_checked += 1;
                 report.bytes_checked += object.bytes.len() as u64;
             }
         }
-        let objects = table.store.objects.lock().await;
+        let objects = cache.lock().await;
         report.objects_checked += objects.len() as u64;
-        report.bytes_checked += objects.values().map(|o| o.bytes.len() as u64).sum::<u64>();
+        report.bytes_checked += objects
+            .values()
+            .map(|o| o.object.bytes.len() as u64)
+            .sum::<u64>();
         report.commits_checked = commits.len() as u64;
         report.snapshots_checked = snapshots.len() as u64;
         report.completed = true;
@@ -579,11 +575,52 @@ fn validate_generation_edge(
     Ok(())
 }
 
-#[derive(Clone)]
-struct ReadCache<S> {
-    inner: S,
-    // Only metadata needs to be materialized again (e.g. physical repacks).
-    objects: std::sync::Arc<tokio::sync::Mutex<BTreeMap<String, StoredObject>>>,
+pub(super) type VerifiedMetadataCache = BTreeMap<String, VerifiedMetadata>;
+
+pub(super) struct VerifiedMetadata {
+    object: std::sync::Arc<StoredObject>,
+    sha256: Sha256,
+}
+impl VerifiedMetadata {
+    fn check(&self, reference: &ObjectReference) -> Result<(), RuntimeError> {
+        if self.sha256 != reference.sha256
+            || reference
+                .length
+                .is_some_and(|length| length.0 != self.object.bytes.len() as u64)
+        {
+            return Err(RuntimeError::Corrupt(format!(
+                "conflicting object reference: {}",
+                reference.uri
+            )));
+        }
+        Ok(())
+    }
+}
+impl<S: ObjectStore> Table<S> {
+    pub(super) async fn read_metadata(
+        &self,
+        reference: &ObjectReference,
+    ) -> Result<std::sync::Arc<StoredObject>, RuntimeError> {
+        let Some(cache) = &self.metadata_cache else {
+            return Ok(std::sync::Arc::new(
+                verified_read(&self.store, reference).await?,
+            ));
+        };
+        let mut objects = cache.lock().await;
+        if let Some(cached) = objects.get(reference.uri.as_str()) {
+            cached.check(reference)?;
+            return Ok(cached.object.clone());
+        }
+        let object = std::sync::Arc::new(verified_read(&self.store, reference).await?);
+        objects.insert(
+            reference.uri.to_string(),
+            VerifiedMetadata {
+                object: object.clone(),
+                sha256: reference.sha256,
+            },
+        );
+        Ok(object)
+    }
 }
 
 fn record_file_reference(
@@ -603,56 +640,14 @@ fn record_file_reference(
     Ok(())
 }
 
-#[async_trait::async_trait]
-impl<S: ObjectStore> ObjectStore for ReadCache<S> {
-    async fn read(&self, key: &RelativeUri) -> Result<StoredObject, StorageError> {
-        let mut objects = self.objects.lock().await;
-        if let Some(object) = objects.get(key.as_str()) {
-            return Ok(object.clone());
-        }
-        let object = self.inner.read(key).await?;
-        objects.insert(key.to_string(), object.clone());
-        Ok(object)
-    }
-    async fn create_from_reader(
-        &self,
-        _key: &RelativeUri,
-        _reader: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
-        _length: Option<u64>,
-    ) -> Result<crate::storage::CreatedObject, StorageError> {
-        Err(StorageError::Unsupported("read-only verification".into()))
-    }
-    async fn create_head(&self, _bytes: &[u8]) -> ConditionalWriteOutcome {
-        ConditionalWriteOutcome::Indeterminate {
-            source: StorageError::Unsupported("read-only verification".into()),
-        }
-    }
-    async fn replace_head(
-        &self,
-        _version: &ObjectVersion,
-        _bytes: &[u8],
-    ) -> ConditionalWriteOutcome {
-        ConditionalWriteOutcome::Indeterminate {
-            source: StorageError::Unsupported("read-only verification".into()),
-        }
-    }
-    async fn delete_if_version(
-        &self,
-        _key: &RelativeUri,
-        _version: &ObjectVersion,
-    ) -> Result<bool, StorageError> {
-        Err(StorageError::Unsupported("read-only verification".into()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InMemoryObjectStore;
     use crate::runtime::{head_key, new_id, object_reference};
     use crate::{
         CommitMetadata, InitializeRequest, OperationRequest, Requirement, TransactionRequest,
     };
+    use crate::{ConditionalWriteOutcome, InMemoryObjectStore, StorageError};
     use otmp_protocol::object_hash;
 
     async fn setup() -> (InMemoryObjectStore, Table<InMemoryObjectStore>) {
@@ -721,6 +716,38 @@ mod tests {
             .await
             .unwrap();
     }
+    #[tokio::test]
+    async fn metadata_cache_shares_bytes_and_checks_each_reference() {
+        let (store, mut table) = setup().await;
+        let head: Head = canonical_json::from_slice_canonical(
+            &store.read(&head_key().unwrap()).await.unwrap().bytes,
+        )
+        .unwrap();
+        table.metadata_cache = Some(std::sync::Arc::new(
+            tokio::sync::Mutex::new(BTreeMap::new()),
+        ));
+        let before = store.read_count();
+        let first = table.read_metadata(&head.semantic_commit).await.unwrap();
+        let second = table.read_metadata(&head.semantic_commit).await.unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        for reference in [
+            ObjectReference {
+                sha256: Sha256::digest(b"wrong"),
+                ..head.semantic_commit.clone()
+            },
+            ObjectReference {
+                length: Some(JsonU64(1)),
+                ..head.semantic_commit.clone()
+            },
+        ] {
+            assert!(matches!(
+                table.read_metadata(&reference).await,
+                Err(RuntimeError::Corrupt(_))
+            ));
+        }
+        assert_eq!(store.read_count() - before, 1);
+    }
+
     #[test]
     fn repeated_file_uris_must_agree_on_hash_and_length() {
         let original = ObjectReference {
@@ -815,19 +842,27 @@ mod tests {
     #[tokio::test]
     async fn same_version_generations_have_separate_anchor_and_deduplicated_verification() {
         let (store, table) = setup().await;
-        repack(&store, |_| {}).await;
+        for _ in 0..8 {
+            repack(&store, |_| {}).await;
+        }
         let selected = table
             .pin_metadata(MetadataSelection::TableVersion(0))
             .await
             .unwrap();
-        assert_eq!(selected.anchor().root_revision, 1);
+        assert_eq!(selected.anchor().root_revision, 8);
         assert_eq!(selected.coordinates().table_version, 0);
         let before = store.read_count();
+        VERIFIED_HASHES.with(|counts| counts.borrow_mut().clear());
         let report = table
             .verify_with_report(VerificationScope::RetainedHistory)
             .await
             .unwrap();
-        assert_eq!(report.generations_checked, 2);
+        VERIFIED_HASHES.with(|counts| {
+            for (uri, count) in counts.borrow().iter() {
+                assert_eq!(*count, 1, "repeated content verification for {uri}");
+            }
+        });
+        assert_eq!(report.generations_checked, 9);
         assert_eq!(report.commits_checked, 1);
         assert_eq!(store.read_count() - before, report.objects_checked);
     }

@@ -27,14 +27,17 @@ the official release without compatibility or migration promises.
   URI-based read deduplication; no listing or orphan discovery. Verification
   enumerates each immutable snapshot's changes once and hashes each distinct user
   object once, discarding its bytes afterward. Deterministic counters cover
-  histories of 8, 16, and 32 snapshots; relational transition validation still
+  histories of 8, 16, and 32 snapshots and eight physical repacks that share a
+  checkpoint. Cached metadata uses shared bytes and checks each reference against
+  its previously verified hash and length; relational transition validation still
   processes the retained full images.
 - A bounded S3-compatible single-put adapter with a stateful local HTTP test
   endpoint that consumes complete bodies and enforces conditional writes.
   Scenarios cover actual HTTP 412 responses, stale CAS, two competing writers,
   immutable create collisions with matching and mismatching bytes, token
   round-trip, missing-ETag readback, and response loss after applying a write.
-  A runtime transaction test proves reconciliation without double publication.
+  Runtime tests prove reconciliation without double publication and reject
+  initialization/publication success until HEAD reads provide a usable ETag.
   Every HTTP scenario asserts zero list requests. Separate unit tests cover body
   limits and unsupported conditional deletion. Live provider evidence remains
   separate and missing credentials produce `not_run`.

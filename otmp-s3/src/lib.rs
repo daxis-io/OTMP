@@ -120,8 +120,13 @@ impl S3ObjectStore {
             .get(&Self::path(key))
             .await
             .map_err(storage_error)?;
-        let version =
-            Self::object_version(result.meta.e_tag.as_deref(), result.meta.version.as_deref())?;
+        // Runtime reconciliation treats a successful HEAD read as a writable
+        // anchor. Version IDs alone are sufficient only for immutable objects.
+        let version = if key.as_str() == HEAD_KEY {
+            Self::head_version(result.meta.e_tag.as_deref(), result.meta.version.as_deref())?
+        } else {
+            Self::object_version(result.meta.e_tag.as_deref(), result.meta.version.as_deref())?
+        };
         let bytes = result.bytes().await.map_err(storage_error)?;
         Ok(StoredObject {
             bytes: bytes.to_vec(),

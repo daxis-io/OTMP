@@ -289,7 +289,7 @@ pub struct PinnedTable {
     commit: SemanticCommit,
     generation: Generation,
     current_main: Option<Id>,
-    checkpoint_bytes: Vec<u8>,
+    checkpoint: std::sync::Arc<StoredObject>,
     image: MaterializedImage,
 }
 
@@ -376,6 +376,8 @@ impl PinnedTable {
 pub struct Table<S> {
     store: S,
     retry_policy: TransactionRetryPolicy,
+    // Present only on the private reader used by an anchored verification run.
+    metadata_cache: Option<std::sync::Arc<tokio::sync::Mutex<history::VerifiedMetadataCache>>>,
 }
 
 impl<S: ObjectStore> Table<S> {
@@ -384,6 +386,7 @@ impl<S: ObjectStore> Table<S> {
         Self {
             store,
             retry_policy: TransactionRetryPolicy::default(),
+            metadata_cache: None,
         }
     }
 
@@ -539,7 +542,13 @@ impl<S: ObjectStore> Table<S> {
             match self.store.create_head(&head_bytes).await {
                 ConditionalWriteOutcome::Applied { .. } => break,
                 ConditionalWriteOutcome::Conflict { .. } => {
-                    let current = self.store.read(&head_key()?).await?;
+                    let current = self.store.read(&head_key()?).await.map_err(|error| {
+                        if reconciliations > 0 {
+                            RuntimeError::PublicationIndeterminate
+                        } else {
+                            error.into()
+                        }
+                    })?;
                     if current.bytes == head_bytes {
                         break;
                     }
@@ -585,9 +594,9 @@ impl<S: ObjectStore> Table<S> {
         head: Head,
     ) -> Result<PinnedTable, RuntimeError> {
         Self::validate_head_features(&head)?;
-        let commit_object = verified_read(&self.store, &head.semantic_commit).await?;
+        let commit_object = self.read_metadata(&head.semantic_commit).await?;
         let commit = canonical_json::from_slice_canonical(&commit_object.bytes)?;
-        let generation_object = verified_read(&self.store, &head.metadata_generation).await?;
+        let generation_object = self.read_metadata(&head.metadata_generation).await?;
         let generation = canonical_json::from_slice_canonical(&generation_object.bytes)?;
         self.load_pin_objects(raw_head, head, commit, generation)
             .await
@@ -652,7 +661,7 @@ impl<S: ObjectStore> Table<S> {
             length: Some(generation.metadata_image.checkpoint.length),
             media_type: Some(CHECKPOINT_MEDIA_TYPE.into()),
         };
-        let checkpoint = verified_read(&self.store, &checkpoint_ref).await?;
+        let checkpoint = self.read_metadata(&checkpoint_ref).await?;
         if checkpoint.bytes.len() % image::PAGE_SIZE as usize != 0
             || (checkpoint.bytes.len() / image::PAGE_SIZE as usize) as u64
                 != generation.metadata_image.page_count.0
@@ -696,7 +705,7 @@ impl<S: ObjectStore> Table<S> {
             head,
             commit,
             generation,
-            checkpoint_bytes: checkpoint.bytes,
+            checkpoint,
             image,
         })
     }
@@ -951,7 +960,15 @@ impl<S: ObjectStore> Table<S> {
                     }
                 }
             }
-            let winner = self.pin().await?;
+            // A retry conflict does not resolve an earlier response loss. If the
+            // winner cannot be pinned, this attempt may still have committed.
+            let winner = self.pin().await.map_err(|error| {
+                if indeterminate > 0 {
+                    RuntimeError::PublicationIndeterminate
+                } else {
+                    error
+                }
+            })?;
             if winner.head.table_id != table_id {
                 return Err(RuntimeError::SemanticConflict(
                     "table identity changed after conflict".into(),
@@ -1177,7 +1194,7 @@ fn build_candidate(
         })
         .collect::<Result<Vec<_>, RuntimeError>>()?;
     let checkpoint = image::apply_append(
-        &parent.checkpoint_bytes,
+        &parent.checkpoint.bytes,
         &AppendImage {
             table_version,
             created_at_ms,
@@ -1651,6 +1668,13 @@ async fn verified_read<S: ObjectStore>(
     reference: &ObjectReference,
 ) -> Result<StoredObject, RuntimeError> {
     let object = store.read(&reference.uri).await?;
+    #[cfg(test)]
+    history::VERIFIED_HASHES.with(|counts| {
+        *counts
+            .borrow_mut()
+            .entry(reference.uri.to_string())
+            .or_default() += 1;
+    });
     #[cfg(test)]
     if reference.media_type.is_none() {
         history::DATA_HASHES.with(|count| count.set(count.get() + 1));

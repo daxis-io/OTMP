@@ -366,7 +366,7 @@ impl<'a> PreparedTransaction<'a> {
         let commit_uri: RelativeUri =
             format!("_otmp/commits/{table_version}/{commit_id}.json").parse()?;
         let checkpoint = image::apply_metadata(
-            &self.base.checkpoint_bytes,
+            &self.base.checkpoint.bytes,
             &commit,
             &commit_uri,
             &self.request.operations,

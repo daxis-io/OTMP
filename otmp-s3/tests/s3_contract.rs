@@ -131,6 +131,26 @@ async fn http_immutable_collision_checks_exact_length_and_hash() {
 }
 
 #[tokio::test]
+async fn initialization_cannot_reconcile_a_head_without_a_usable_cas_token() {
+    let server = ScriptedS3::start().await;
+    {
+        let mut state = server.state.lock().unwrap();
+        state.omit_put_etag = true;
+        state.omit_get_etag = true;
+    }
+    let table = otmp::Table::new(server.store.clone());
+    let schema =
+        serde_json::from_slice(include_bytes!("../../conformance/sources/schema.json")).unwrap();
+    let outcome = table.initialize(otmp::InitializeRequest::new(schema)).await;
+    assert!(
+        matches!(outcome, Err(otmp::RuntimeError::PublicationIndeterminate)),
+        "{outcome:?}"
+    );
+    assert_eq!(server.state.lock().unwrap().head_writes.len(), 1);
+    server.finish().await;
+}
+
+#[tokio::test]
 async fn version_only_head_readback_stays_indeterminate() {
     let server = ScriptedS3::start().await;
     {
@@ -142,15 +162,13 @@ async fn version_only_head_readback_stays_indeterminate() {
         server.store.create_head(b"head").await,
         ConditionalWriteOutcome::Indeterminate { .. }
     ));
-    let head = server
-        .store
-        .read(&"_otmp/HEAD".parse().unwrap())
-        .await
-        .unwrap();
-    assert_eq!(head.bytes, b"head");
+    assert!(matches!(
+        server.store.read(&"_otmp/HEAD".parse().unwrap()).await,
+        Err(StorageError::Unsupported(_))
+    ));
     assert_eq!(
-        S3ObjectStore::provider_version(&head.version),
-        Some((None, Some("version-1".into())))
+        server.state.lock().unwrap().objects["/bucket/_otmp/HEAD"].bytes,
+        b"head"
     );
     assert_eq!(server.state.lock().unwrap().head_writes.len(), 1);
     server.finish().await;
@@ -193,7 +211,7 @@ async fn tokenless_immutable_create_reconciles_by_exact_readback() {
 #[tokio::test]
 async fn post_apply_response_loss_is_indeterminate_and_preserves_the_written_body() {
     let server = ScriptedS3::start().await;
-    server.state.lock().unwrap().lose_next_head_response = true;
+    server.state.lock().unwrap().lose_next_head_response = Some(ResponseLoss::ReadableHead);
     assert!(matches!(
         server.store.create_head(b"authored body").await,
         ConditionalWriteOutcome::Indeterminate { .. }
@@ -213,6 +231,15 @@ async fn post_apply_response_loss_is_indeterminate_and_preserves_the_written_bod
 
 #[tokio::test]
 async fn transaction_reconciles_post_apply_response_loss_without_double_publication() {
+    transaction_reconciliation(false).await;
+}
+
+#[tokio::test]
+async fn transaction_stays_indeterminate_until_head_readback_has_a_usable_token() {
+    transaction_reconciliation(true).await;
+}
+
+async fn transaction_reconciliation(omit_tokens_after_apply: bool) {
     use otmp::{
         CommitMetadata, InitializeRequest, OperationRequest, Requirement, Table, TransactionRequest,
     };
@@ -238,7 +265,22 @@ async fn transaction_reconciles_post_apply_response_loss_without_double_publicat
         }],
         commit_metadata: CommitMetadata::default(),
     };
-    server.state.lock().unwrap().lose_next_head_response = true;
+    {
+        let mut state = server.state.lock().unwrap();
+        state.lose_next_head_response = Some(if omit_tokens_after_apply {
+            ResponseLoss::HeadWithoutEtag
+        } else {
+            ResponseLoss::ReadableHead
+        });
+    }
+    if omit_tokens_after_apply {
+        let outcome = table.transact(&request).await;
+        assert!(
+            matches!(outcome, Err(otmp::RuntimeError::PublicationIndeterminate)),
+            "{outcome:?}"
+        );
+        server.state.lock().unwrap().omit_get_etag = false;
+    }
     let result = table.transact(&request).await.unwrap();
     assert_eq!(result.table_version, 1);
     assert_eq!(table.transact(&request).await.unwrap(), result);
@@ -269,6 +311,10 @@ struct HttpObject {
     etag: String,
     version: String,
 }
+enum ResponseLoss {
+    ReadableHead,
+    HeadWithoutEtag,
+}
 #[derive(Default)]
 struct ServerState {
     objects: std::collections::BTreeMap<String, HttpObject>,
@@ -279,7 +325,7 @@ struct ServerState {
     head_writes: Vec<Vec<u8>>,
     omit_put_etag: bool,
     omit_get_etag: bool,
-    lose_next_head_response: bool,
+    lose_next_head_response: Option<ResponseLoss>,
     lost_responses: u64,
 }
 struct ScriptedS3 {
@@ -423,8 +469,9 @@ fn handle_request(state: &mut ServerState, request: HttpRequest) -> Option<Vec<u
             state.objects.insert(request.path.clone(), object.clone());
             if request.path == "/bucket/_otmp/HEAD" {
                 state.head_writes.push(object.bytes.clone());
-                if std::mem::take(&mut state.lose_next_head_response) {
+                if let Some(loss) = state.lose_next_head_response.take() {
                     state.lost_responses += 1;
+                    state.omit_get_etag = matches!(loss, ResponseLoss::HeadWithoutEtag);
                     return None;
                 }
             }

@@ -7,6 +7,12 @@ use super::{
 };
 use rusqlite::{Connection, OptionalExtension};
 
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static DATA_HASHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static SNAPSHOT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MetadataSelection {
     Current,
@@ -333,12 +339,14 @@ impl<S: ObjectStore> Table<S> {
             required_writer_features: commit.required_writer_features_after_commit.clone(),
             ..child.head.clone()
         };
-        self.load_pin(
+        self.load_pin_objects(
             StoredObject {
                 bytes: child.raw_head.clone(),
                 version: child.head_version.clone(),
             },
             head,
+            commit,
+            generation,
         )
         .await
     }
@@ -452,39 +460,11 @@ impl<S: ObjectStore> Table<S> {
         let mut seen = BTreeSet::from([state.generation.generation_id]);
         let mut commits = BTreeSet::new();
         let mut snapshots = BTreeSet::new();
+        let mut file_references = BTreeMap::new();
         loop {
             report.generations_checked += 1;
             commits.insert(state.commit.commit_id);
-            let connection = image::open_readonly(&state.image.path)?;
-            let query = if scope == VerificationScope::RetainedHistory {
-                "SELECT snapshot_id FROM otmp_snapshots"
-            } else {
-                "SELECT DISTINCT snapshot_id FROM otmp_refs WHERE snapshot_id IS NOT NULL"
-            };
-            let mut stmt = connection.prepare(query)?;
-            for row in stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))? {
-                let id = id_from_blob(row?)?;
-                for ancestor in ancestry(&connection, Some(id))? {
-                    snapshots.insert(ancestor);
-                }
-                for file in state
-                    .resolve_snapshot(SnapshotSelection::SnapshotId(id))?
-                    .files()?
-                {
-                    verified_read(
-                        &table.store,
-                        &ObjectReference {
-                            uri: file.uri,
-                            sha256: file.content_sha256.ok_or_else(|| {
-                                RuntimeError::Corrupt("missing content hash".into())
-                            })?,
-                            length: Some(JsonU64(file.file_size_bytes)),
-                            media_type: None,
-                        },
-                    )
-                    .await?;
-                }
-            }
+            collect_snapshot_files(&state, scope, &mut snapshots, &mut file_references)?;
             if scope == VerificationScope::Current {
                 break;
             }
@@ -498,15 +478,88 @@ impl<S: ObjectStore> Table<S> {
             image::validate_transition(&parent.image.path, &state.image.path, &state.commit)?;
             state = parent;
         }
+        // Finish metadata traversal first, so even a file URI that also names a
+        // metadata object reuses the already-read bytes. Data bytes are discarded
+        // immediately after verification instead of accumulating in the cache.
+        for reference in file_references.values() {
+            if table
+                .store
+                .objects
+                .lock()
+                .await
+                .contains_key(reference.uri.as_str())
+            {
+                verified_read(&table.store, reference).await?;
+            } else {
+                let object = verified_read(&self.store, reference).await?;
+                report.objects_checked += 1;
+                report.bytes_checked += object.bytes.len() as u64;
+            }
+        }
         let objects = table.store.objects.lock().await;
-        report.objects_checked = objects.len() as u64;
-        report.bytes_checked = objects.values().map(|o| o.bytes.len() as u64).sum();
+        report.objects_checked += objects.len() as u64;
+        report.bytes_checked += objects.values().map(|o| o.bytes.len() as u64).sum::<u64>();
         report.commits_checked = commits.len() as u64;
         report.snapshots_checked = snapshots.len() as u64;
         report.completed = true;
         Ok(report)
     }
 }
+fn collect_snapshot_files(
+    state: &PinnedTable,
+    scope: VerificationScope,
+    snapshots: &mut BTreeSet<Id>,
+    file_references: &mut BTreeMap<String, ObjectReference>,
+) -> Result<(), RuntimeError> {
+    let connection = image::open_readonly(&state.image.path)?;
+    let query = if scope == VerificationScope::RetainedHistory {
+        "SELECT snapshot_id FROM otmp_snapshots"
+    } else {
+        "SELECT DISTINCT snapshot_id FROM otmp_refs WHERE snapshot_id IS NOT NULL"
+    };
+    let mut stmt = connection.prepare(query)?;
+    let mut pending = stmt
+        .query_map([], |r| r.get::<_, Vec<u8>>(0))?
+        .map(|row| id_from_blob(row?))
+        .collect::<Result<Vec<_>, RuntimeError>>()?;
+    while let Some(id) = pending.pop() {
+        // Snapshot rows and changes are immutable. Relational transition
+        // validation below checks that older images agree with this image.
+        if !snapshots.insert(id) {
+            continue;
+        }
+        #[cfg(test)]
+        SNAPSHOT_VISITS.with(|count| count.set(count.get() + 1));
+        if let Some(parent) = descriptor(&connection, id)?.parent_snapshot_id {
+            pending.push(parent);
+        }
+        let mut files = connection.prepare(
+                    "SELECT f.uri,f.content_sha256,f.file_size_bytes FROM otmp_files f JOIN otmp_snapshot_file_changes c USING(file_id) WHERE c.snapshot_id=?1 AND c.change_kind='add'"
+                )?;
+        for row in files.query_map([id.as_bytes().as_slice()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<Vec<u8>>>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })? {
+            let (uri, hash, length) = row?;
+            record_file_reference(
+                file_references,
+                ObjectReference {
+                    uri: uri.parse()?,
+                    sha256: hash_from_blob(
+                        hash.ok_or_else(|| RuntimeError::Corrupt("missing content hash".into()))?,
+                    )?,
+                    length: Some(JsonU64(nonnegative(length, "file length")?)),
+                    media_type: None,
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_generation_edge(
     child: &Generation,
     parent: &Generation,
@@ -529,8 +582,27 @@ fn validate_generation_edge(
 #[derive(Clone)]
 struct ReadCache<S> {
     inner: S,
+    // Only metadata needs to be materialized again (e.g. physical repacks).
     objects: std::sync::Arc<tokio::sync::Mutex<BTreeMap<String, StoredObject>>>,
 }
+
+fn record_file_reference(
+    references: &mut BTreeMap<String, ObjectReference>,
+    reference: ObjectReference,
+) -> Result<(), RuntimeError> {
+    if let Some(previous) = references.get(reference.uri.as_str()) {
+        if previous.sha256 != reference.sha256 || previous.length != reference.length {
+            return Err(RuntimeError::Corrupt(format!(
+                "conflicting object reference: {}",
+                reference.uri
+            )));
+        }
+    } else {
+        references.insert(reference.uri.to_string(), reference);
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl<S: ObjectStore> ObjectStore for ReadCache<S> {
     async fn read(&self, key: &RelativeUri) -> Result<StoredObject, StorageError> {
@@ -649,6 +721,97 @@ mod tests {
             .await
             .unwrap();
     }
+    #[test]
+    fn repeated_file_uris_must_agree_on_hash_and_length() {
+        let original = ObjectReference {
+            uri: "data/one.parquet".parse().unwrap(),
+            sha256: Sha256::digest(b"one"),
+            length: Some(JsonU64(3)),
+            media_type: None,
+        };
+        let mut references = BTreeMap::new();
+        record_file_reference(&mut references, original.clone()).unwrap();
+        record_file_reference(&mut references, original.clone()).unwrap();
+        assert_eq!(references.len(), 1);
+        for conflicting in [
+            ObjectReference {
+                sha256: Sha256::digest(b"two"),
+                ..original.clone()
+            },
+            ObjectReference {
+                length: Some(JsonU64(4)),
+                ..original.clone()
+            },
+        ] {
+            assert!(matches!(
+                record_file_reference(&mut references, conflicting),
+                Err(RuntimeError::Corrupt(_))
+            ));
+        }
+        record_file_reference(
+            &mut references,
+            ObjectReference {
+                uri: "data/two.parquet".parse().unwrap(),
+                ..original
+            },
+        )
+        .unwrap();
+        assert_eq!(references.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn retained_verification_visits_and_hashes_each_snapshot_and_file_once() {
+        for count in [8_u64, 16, 32] {
+            let (store, table) = setup().await;
+            let source = tempfile::NamedTempFile::new().unwrap();
+            // Equal contents deliberately get distinct URIs: hashes are not identities.
+            std::fs::write(source.path(), b"same bytes").unwrap();
+            for index in 0..count {
+                table
+                    .append_files(&crate::AppendRequest::new(
+                        format!("append-{index}"),
+                        vec![crate::AppendFile {
+                            source_path: source.path().into(),
+                            fingerprint: crate::SourceFingerprint {
+                                sha256: Sha256::digest(b"same bytes"),
+                                length: 10,
+                            },
+                            format: crate::FileFormat::Parquet,
+                            record_count: 1,
+                            schema_id: 1,
+                            partition_spec_id: 0,
+                            sort_order_id: 0,
+                            partition_values: BTreeMap::new(),
+                            metrics: vec![],
+                            metadata: BTreeMap::new(),
+                        }],
+                    ))
+                    .await
+                    .unwrap();
+            }
+            DATA_HASHES.with(|c| c.set(0));
+            SNAPSHOT_VISITS.with(|c| c.set(0));
+            let before = store.read_count();
+            let report = table
+                .verify_with_report(VerificationScope::RetainedHistory)
+                .await
+                .unwrap();
+            assert_eq!(
+                DATA_HASHES.with(std::cell::Cell::get),
+                count,
+                "hash work at {count} snapshots"
+            );
+            assert_eq!(
+                SNAPSHOT_VISITS.with(std::cell::Cell::get),
+                count,
+                "snapshot visits at {count} snapshots"
+            );
+            assert_eq!(report.snapshots_checked, count);
+            assert_eq!(report.generations_checked, count + 1);
+            assert_eq!(store.read_count() - before, report.objects_checked);
+        }
+    }
+
     #[tokio::test]
     async fn same_version_generations_have_separate_anchor_and_deduplicated_verification() {
         let (store, table) = setup().await;

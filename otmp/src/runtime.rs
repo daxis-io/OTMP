@@ -584,6 +584,16 @@ impl<S: ObjectStore> Table<S> {
         raw_head: StoredObject,
         head: Head,
     ) -> Result<PinnedTable, RuntimeError> {
+        Self::validate_head_features(&head)?;
+        let commit_object = verified_read(&self.store, &head.semantic_commit).await?;
+        let commit = canonical_json::from_slice_canonical(&commit_object.bytes)?;
+        let generation_object = verified_read(&self.store, &head.metadata_generation).await?;
+        let generation = canonical_json::from_slice_canonical(&generation_object.bytes)?;
+        self.load_pin_objects(raw_head, head, commit, generation)
+            .await
+    }
+
+    fn validate_head_features(head: &Head) -> Result<(), RuntimeError> {
         let supported = BTreeSet::from([
             CORE_FEATURE,
             PARQUET_FEATURE,
@@ -593,9 +603,19 @@ impl<S: ObjectStore> Table<S> {
         head.validate(&supported)?;
         head.required_writer_features
             .require_supported(&supported)?;
+        Ok(())
+    }
 
-        let commit_object = verified_read(&self.store, &head.semantic_commit).await?;
-        let commit: SemanticCommit = canonical_json::from_slice_canonical(&commit_object.bytes)?;
+    // Both entry points supply content-verified, parsed objects. Keep all cross-object
+    // and relational validation here so historical reads cannot bypass it.
+    async fn load_pin_objects(
+        &self,
+        raw_head: StoredObject,
+        head: Head,
+        commit: SemanticCommit,
+        generation: Generation,
+    ) -> Result<PinnedTable, RuntimeError> {
+        Self::validate_head_features(&head)?;
         commit.validate_runtime_profile()?;
         if commit.table_id != head.table_id
             || commit.table_version != head.table_version
@@ -616,9 +636,6 @@ impl<S: ObjectStore> Table<S> {
             return Err(RuntimeError::Corrupt("semantic state hash mismatch".into()));
         }
 
-        let generation_object = verified_read(&self.store, &head.metadata_generation).await?;
-        let generation: Generation =
-            canonical_json::from_slice_canonical(&generation_object.bytes)?;
         generation.validate_runtime_profile()?;
         if generation.table_id != head.table_id
             || generation.table_version != head.table_version
@@ -1634,6 +1651,10 @@ async fn verified_read<S: ObjectStore>(
     reference: &ObjectReference,
 ) -> Result<StoredObject, RuntimeError> {
     let object = store.read(&reference.uri).await?;
+    #[cfg(test)]
+    if reference.media_type.is_none() {
+        history::DATA_HASHES.with(|count| count.set(count.get() + 1));
+    }
     if Sha256::digest(&object.bytes) != reference.sha256
         || reference
             .length

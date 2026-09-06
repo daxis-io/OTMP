@@ -24,10 +24,19 @@ the official release without compatibility or migration promises.
   coordinates, exact ref/snapshot/sequence selectors, and ancestry-derived files.
 - Current verification of all branch/tag tips and retained-history verification
   of explicit generations, semantic transitions, and historical user bytes.
-  URI-based read deduplication; no listing or orphan discovery.
-- A bounded S3-compatible single-put adapter and scripted HTTP tests for
-  conditional headers, stale CAS, concurrent writers, response loss, token
-  round-trip, missing-token readback, and body limits. Live provider evidence is
+  URI-based read deduplication; no listing or orphan discovery. Verification
+  enumerates each immutable snapshot's changes once and hashes each distinct user
+  object once, discarding its bytes afterward. Deterministic counters cover
+  histories of 8, 16, and 32 snapshots; relational transition validation still
+  processes the retained full images.
+- A bounded S3-compatible single-put adapter with a stateful local HTTP test
+  endpoint that consumes complete bodies and enforces conditional writes.
+  Scenarios cover actual HTTP 412 responses, stale CAS, two competing writers,
+  immutable create collisions with matching and mismatching bytes, token
+  round-trip, missing-ETag readback, and response loss after applying a write.
+  A runtime transaction test proves reconciliation without double publication.
+  Every HTTP scenario asserts zero list requests. Separate unit tests cover body
+  limits and unsupported conditional deletion. Live provider evidence remains
   separate and missing credentials produce `not_run`.
 
 [Transactions](TRANSACTIONS.md) defines the request matrix and failure behavior.

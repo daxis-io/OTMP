@@ -137,11 +137,24 @@ impl S3ObjectStore {
             .map(|object| object.version)
     }
 
+    fn head_version(
+        e_tag: Option<&str>,
+        version: Option<&str>,
+    ) -> Result<ObjectVersion, StorageError> {
+        if e_tag.is_none_or(|value| value.trim().is_empty()) {
+            return Err(StorageError::Unsupported(
+                "S3 conditional replacement requires an ETag".into(),
+            ));
+        }
+        Self::object_version(e_tag, version)
+    }
+
     async fn reconcile_head(&self, bytes: &[u8]) -> Result<ObjectVersion, StorageError> {
         let key: RelativeUri = HEAD_KEY.parse().expect("constant HEAD URI is safe");
         let object = self.read_with_meta(&key).await?;
         if object.bytes == bytes {
-            Ok(object.version)
+            let (e_tag, version) = Self::provider_version_owned(&object.version)?;
+            Self::head_version(e_tag.as_deref(), version.as_deref())
         } else {
             Err(StorageError::Io(
                 "conditional HEAD response lacked a version token and read-back was not authored by this attempt".into(),
@@ -171,7 +184,7 @@ impl S3ObjectStore {
             .await;
         match result {
             Ok(result) => {
-                match Self::object_version(result.e_tag.as_deref(), result.version.as_deref()) {
+                match Self::head_version(result.e_tag.as_deref(), result.version.as_deref()) {
                     Ok(new_version) => ConditionalWriteOutcome::Applied { new_version },
                     Err(_) => match self.reconcile_head(bytes).await {
                         Ok(new_version) => ConditionalWriteOutcome::Applied { new_version },

@@ -1,11 +1,17 @@
 use super::{
-    BTreeMap, BTreeSet, CanonicalValue, ConditionalWriteOutcome, GENERATION_MEDIA_TYPE, Generation,
-    Head, Id, JsonU64, LiveFile, ObjectReference, ObjectStore, ObjectVersion, PinnedTable, RefType,
-    RelativeUri, RuntimeError, SemanticCommit, Serialize, Sha256, StorageError, StoredObject,
-    Table, canonical_json, hash_from_blob, id_from_blob, image, nonnegative, string, transactions,
-    verified_read,
+    BTreeMap, BTreeSet, CanonicalValue, GENERATION_MEDIA_TYPE, Generation, Head, Id, JsonU64,
+    LiveFile, ObjectReference, ObjectStore, PinnedTable, RefType, RuntimeError, SemanticCommit,
+    Serialize, Sha256, StoredObject, Table, canonical_json, hash_from_blob, id_from_blob, image,
+    nonnegative, string, transactions, verified_read,
 };
 use rusqlite::{Connection, OptionalExtension};
+
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static DATA_HASHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(super) static VERIFIED_HASHES: std::cell::RefCell<BTreeMap<String, u64>> = const { std::cell::RefCell::new(BTreeMap::new()) };
+    static SNAPSHOT_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MetadataSelection {
@@ -318,10 +324,10 @@ impl<S: ObjectStore> Table<S> {
                 "invalid physical parent reference".into(),
             ));
         }
-        let object = verified_read(&self.store, reference).await?;
+        let object = self.read_metadata(reference).await?;
         let generation: Generation = canonical_json::from_slice_canonical(&object.bytes)?;
         validate_generation_edge(&child.generation, &generation, seen)?;
-        let commit_object = verified_read(&self.store, &generation.semantic_commit).await?;
+        let commit_object = self.read_metadata(&generation.semantic_commit).await?;
         let commit: SemanticCommit = canonical_json::from_slice_canonical(&commit_object.bytes)?;
         // This internal envelope only drives common validation; historical coordinates never expose a root revision.
         let head = Head {
@@ -333,12 +339,14 @@ impl<S: ObjectStore> Table<S> {
             required_writer_features: commit.required_writer_features_after_commit.clone(),
             ..child.head.clone()
         };
-        self.load_pin(
+        self.load_pin_objects(
             StoredObject {
                 bytes: child.raw_head.clone(),
                 version: child.head_version.clone(),
             },
             head,
+            commit,
+            generation,
         )
         .await
     }
@@ -356,8 +364,8 @@ impl<S: ObjectStore> Table<S> {
                     "invalid retained commit reference".into(),
                 ));
             }
-            let bytes = verified_read(&self.store, &r).await?.bytes;
-            let commit: SemanticCommit = canonical_json::from_slice_canonical(&bytes)?;
+            let object = self.read_metadata(&r).await?;
+            let commit: SemanticCommit = canonical_json::from_slice_canonical(&object.bytes)?;
             commit.validate_runtime_profile()?;
             if commit.table_id != state.head.table_id
                 || previous_version
@@ -433,11 +441,10 @@ impl<S: ObjectStore> Table<S> {
         &self,
         scope: VerificationScope,
     ) -> Result<VerificationReport, RuntimeError> {
-        let cache = ReadCache {
-            inner: self.store.clone(),
-            objects: std::sync::Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
-        };
-        let table = Table::new(cache);
+        let mut table = Self::new(self.store.clone());
+        table.metadata_cache = Some(std::sync::Arc::new(
+            tokio::sync::Mutex::new(BTreeMap::new()),
+        ));
         let mut state = table.pin().await?;
         let mut report = VerificationReport {
             scope,
@@ -446,45 +453,17 @@ impl<S: ObjectStore> Table<S> {
             generations_checked: 0,
             commits_checked: 0,
             snapshots_checked: 0,
-            objects_checked: 0,
-            bytes_checked: 0,
+            objects_checked: 1, // the single anchored HEAD read
+            bytes_checked: state.raw_head.len() as u64,
         };
         let mut seen = BTreeSet::from([state.generation.generation_id]);
         let mut commits = BTreeSet::new();
         let mut snapshots = BTreeSet::new();
+        let mut file_references = BTreeMap::new();
         loop {
             report.generations_checked += 1;
             commits.insert(state.commit.commit_id);
-            let connection = image::open_readonly(&state.image.path)?;
-            let query = if scope == VerificationScope::RetainedHistory {
-                "SELECT snapshot_id FROM otmp_snapshots"
-            } else {
-                "SELECT DISTINCT snapshot_id FROM otmp_refs WHERE snapshot_id IS NOT NULL"
-            };
-            let mut stmt = connection.prepare(query)?;
-            for row in stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))? {
-                let id = id_from_blob(row?)?;
-                for ancestor in ancestry(&connection, Some(id))? {
-                    snapshots.insert(ancestor);
-                }
-                for file in state
-                    .resolve_snapshot(SnapshotSelection::SnapshotId(id))?
-                    .files()?
-                {
-                    verified_read(
-                        &table.store,
-                        &ObjectReference {
-                            uri: file.uri,
-                            sha256: file.content_sha256.ok_or_else(|| {
-                                RuntimeError::Corrupt("missing content hash".into())
-                            })?,
-                            length: Some(JsonU64(file.file_size_bytes)),
-                            media_type: None,
-                        },
-                    )
-                    .await?;
-                }
-            }
+            collect_snapshot_files(&state, scope, &mut snapshots, &mut file_references)?;
             if scope == VerificationScope::Current {
                 break;
             }
@@ -498,15 +477,85 @@ impl<S: ObjectStore> Table<S> {
             image::validate_transition(&parent.image.path, &state.image.path, &state.commit)?;
             state = parent;
         }
-        let objects = table.store.objects.lock().await;
-        report.objects_checked = objects.len() as u64;
-        report.bytes_checked = objects.values().map(|o| o.bytes.len() as u64).sum();
+        // Metadata objects share validated bytes, while user bytes are discarded
+        // immediately. A URI appearing in both roles still uses one read/hash.
+        let cache = table.metadata_cache.as_ref().expect("verification cache");
+        for reference in file_references.values() {
+            if let Some(cached) = cache.lock().await.get(reference.uri.as_str()) {
+                cached.check(reference)?;
+            } else {
+                let object = verified_read(&self.store, reference).await?;
+                report.objects_checked += 1;
+                report.bytes_checked += object.bytes.len() as u64;
+            }
+        }
+        let objects = cache.lock().await;
+        report.objects_checked += objects.len() as u64;
+        report.bytes_checked += objects
+            .values()
+            .map(|o| o.object.bytes.len() as u64)
+            .sum::<u64>();
         report.commits_checked = commits.len() as u64;
         report.snapshots_checked = snapshots.len() as u64;
         report.completed = true;
         Ok(report)
     }
 }
+fn collect_snapshot_files(
+    state: &PinnedTable,
+    scope: VerificationScope,
+    snapshots: &mut BTreeSet<Id>,
+    file_references: &mut BTreeMap<String, ObjectReference>,
+) -> Result<(), RuntimeError> {
+    let connection = image::open_readonly(&state.image.path)?;
+    let query = if scope == VerificationScope::RetainedHistory {
+        "SELECT snapshot_id FROM otmp_snapshots"
+    } else {
+        "SELECT DISTINCT snapshot_id FROM otmp_refs WHERE snapshot_id IS NOT NULL"
+    };
+    let mut stmt = connection.prepare(query)?;
+    let mut pending = stmt
+        .query_map([], |r| r.get::<_, Vec<u8>>(0))?
+        .map(|row| id_from_blob(row?))
+        .collect::<Result<Vec<_>, RuntimeError>>()?;
+    while let Some(id) = pending.pop() {
+        // Snapshot rows and changes are immutable. Relational transition
+        // validation below checks that older images agree with this image.
+        if !snapshots.insert(id) {
+            continue;
+        }
+        #[cfg(test)]
+        SNAPSHOT_VISITS.with(|count| count.set(count.get() + 1));
+        if let Some(parent) = descriptor(&connection, id)?.parent_snapshot_id {
+            pending.push(parent);
+        }
+        let mut files = connection.prepare(
+                    "SELECT f.uri,f.content_sha256,f.file_size_bytes FROM otmp_files f JOIN otmp_snapshot_file_changes c USING(file_id) WHERE c.snapshot_id=?1 AND c.change_kind='add'"
+                )?;
+        for row in files.query_map([id.as_bytes().as_slice()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<Vec<u8>>>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })? {
+            let (uri, hash, length) = row?;
+            record_file_reference(
+                file_references,
+                ObjectReference {
+                    uri: uri.parse()?,
+                    sha256: hash_from_blob(
+                        hash.ok_or_else(|| RuntimeError::Corrupt("missing content hash".into()))?,
+                    )?,
+                    length: Some(JsonU64(nonnegative(length, "file length")?)),
+                    media_type: None,
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_generation_edge(
     child: &Generation,
     parent: &Generation,
@@ -526,61 +575,79 @@ fn validate_generation_edge(
     Ok(())
 }
 
-#[derive(Clone)]
-struct ReadCache<S> {
-    inner: S,
-    objects: std::sync::Arc<tokio::sync::Mutex<BTreeMap<String, StoredObject>>>,
+pub(super) type VerifiedMetadataCache = BTreeMap<String, VerifiedMetadata>;
+
+pub(super) struct VerifiedMetadata {
+    object: std::sync::Arc<StoredObject>,
+    sha256: Sha256,
 }
-#[async_trait::async_trait]
-impl<S: ObjectStore> ObjectStore for ReadCache<S> {
-    async fn read(&self, key: &RelativeUri) -> Result<StoredObject, StorageError> {
-        let mut objects = self.objects.lock().await;
-        if let Some(object) = objects.get(key.as_str()) {
-            return Ok(object.clone());
+impl VerifiedMetadata {
+    fn check(&self, reference: &ObjectReference) -> Result<(), RuntimeError> {
+        if self.sha256 != reference.sha256
+            || reference
+                .length
+                .is_some_and(|length| length.0 != self.object.bytes.len() as u64)
+        {
+            return Err(RuntimeError::Corrupt(format!(
+                "conflicting object reference: {}",
+                reference.uri
+            )));
         }
-        let object = self.inner.read(key).await?;
-        objects.insert(key.to_string(), object.clone());
+        Ok(())
+    }
+}
+impl<S: ObjectStore> Table<S> {
+    pub(super) async fn read_metadata(
+        &self,
+        reference: &ObjectReference,
+    ) -> Result<std::sync::Arc<StoredObject>, RuntimeError> {
+        let Some(cache) = &self.metadata_cache else {
+            return Ok(std::sync::Arc::new(
+                verified_read(&self.store, reference).await?,
+            ));
+        };
+        let mut objects = cache.lock().await;
+        if let Some(cached) = objects.get(reference.uri.as_str()) {
+            cached.check(reference)?;
+            return Ok(cached.object.clone());
+        }
+        let object = std::sync::Arc::new(verified_read(&self.store, reference).await?);
+        objects.insert(
+            reference.uri.to_string(),
+            VerifiedMetadata {
+                object: object.clone(),
+                sha256: reference.sha256,
+            },
+        );
         Ok(object)
     }
-    async fn create_from_reader(
-        &self,
-        _key: &RelativeUri,
-        _reader: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
-        _length: Option<u64>,
-    ) -> Result<crate::storage::CreatedObject, StorageError> {
-        Err(StorageError::Unsupported("read-only verification".into()))
-    }
-    async fn create_head(&self, _bytes: &[u8]) -> ConditionalWriteOutcome {
-        ConditionalWriteOutcome::Indeterminate {
-            source: StorageError::Unsupported("read-only verification".into()),
+}
+
+fn record_file_reference(
+    references: &mut BTreeMap<String, ObjectReference>,
+    reference: ObjectReference,
+) -> Result<(), RuntimeError> {
+    if let Some(previous) = references.get(reference.uri.as_str()) {
+        if previous.sha256 != reference.sha256 || previous.length != reference.length {
+            return Err(RuntimeError::Corrupt(format!(
+                "conflicting object reference: {}",
+                reference.uri
+            )));
         }
+    } else {
+        references.insert(reference.uri.to_string(), reference);
     }
-    async fn replace_head(
-        &self,
-        _version: &ObjectVersion,
-        _bytes: &[u8],
-    ) -> ConditionalWriteOutcome {
-        ConditionalWriteOutcome::Indeterminate {
-            source: StorageError::Unsupported("read-only verification".into()),
-        }
-    }
-    async fn delete_if_version(
-        &self,
-        _key: &RelativeUri,
-        _version: &ObjectVersion,
-    ) -> Result<bool, StorageError> {
-        Err(StorageError::Unsupported("read-only verification".into()))
-    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InMemoryObjectStore;
     use crate::runtime::{head_key, new_id, object_reference};
     use crate::{
         CommitMetadata, InitializeRequest, OperationRequest, Requirement, TransactionRequest,
     };
+    use crate::{ConditionalWriteOutcome, InMemoryObjectStore, StorageError};
     use otmp_protocol::object_hash;
 
     async fn setup() -> (InMemoryObjectStore, Table<InMemoryObjectStore>) {
@@ -650,21 +717,152 @@ mod tests {
             .unwrap();
     }
     #[tokio::test]
+    async fn metadata_cache_shares_bytes_and_checks_each_reference() {
+        let (store, mut table) = setup().await;
+        let head: Head = canonical_json::from_slice_canonical(
+            &store.read(&head_key().unwrap()).await.unwrap().bytes,
+        )
+        .unwrap();
+        table.metadata_cache = Some(std::sync::Arc::new(
+            tokio::sync::Mutex::new(BTreeMap::new()),
+        ));
+        let before = store.read_count();
+        let first = table.read_metadata(&head.semantic_commit).await.unwrap();
+        let second = table.read_metadata(&head.semantic_commit).await.unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        for reference in [
+            ObjectReference {
+                sha256: Sha256::digest(b"wrong"),
+                ..head.semantic_commit.clone()
+            },
+            ObjectReference {
+                length: Some(JsonU64(1)),
+                ..head.semantic_commit.clone()
+            },
+        ] {
+            assert!(matches!(
+                table.read_metadata(&reference).await,
+                Err(RuntimeError::Corrupt(_))
+            ));
+        }
+        assert_eq!(store.read_count() - before, 1);
+    }
+
+    #[test]
+    fn repeated_file_uris_must_agree_on_hash_and_length() {
+        let original = ObjectReference {
+            uri: "data/one.parquet".parse().unwrap(),
+            sha256: Sha256::digest(b"one"),
+            length: Some(JsonU64(3)),
+            media_type: None,
+        };
+        let mut references = BTreeMap::new();
+        record_file_reference(&mut references, original.clone()).unwrap();
+        record_file_reference(&mut references, original.clone()).unwrap();
+        assert_eq!(references.len(), 1);
+        for conflicting in [
+            ObjectReference {
+                sha256: Sha256::digest(b"two"),
+                ..original.clone()
+            },
+            ObjectReference {
+                length: Some(JsonU64(4)),
+                ..original.clone()
+            },
+        ] {
+            assert!(matches!(
+                record_file_reference(&mut references, conflicting),
+                Err(RuntimeError::Corrupt(_))
+            ));
+        }
+        record_file_reference(
+            &mut references,
+            ObjectReference {
+                uri: "data/two.parquet".parse().unwrap(),
+                ..original
+            },
+        )
+        .unwrap();
+        assert_eq!(references.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn retained_verification_visits_and_hashes_each_snapshot_and_file_once() {
+        for count in [8_u64, 16, 32] {
+            let (store, table) = setup().await;
+            let source = tempfile::NamedTempFile::new().unwrap();
+            // Equal contents deliberately get distinct URIs: hashes are not identities.
+            std::fs::write(source.path(), b"same bytes").unwrap();
+            for index in 0..count {
+                table
+                    .append_files(&crate::AppendRequest::new(
+                        format!("append-{index}"),
+                        vec![crate::AppendFile {
+                            source_path: source.path().into(),
+                            fingerprint: crate::SourceFingerprint {
+                                sha256: Sha256::digest(b"same bytes"),
+                                length: 10,
+                            },
+                            format: crate::FileFormat::Parquet,
+                            record_count: 1,
+                            schema_id: 1,
+                            partition_spec_id: 0,
+                            sort_order_id: 0,
+                            partition_values: BTreeMap::new(),
+                            metrics: vec![],
+                            metadata: BTreeMap::new(),
+                        }],
+                    ))
+                    .await
+                    .unwrap();
+            }
+            DATA_HASHES.with(|c| c.set(0));
+            SNAPSHOT_VISITS.with(|c| c.set(0));
+            let before = store.read_count();
+            let report = table
+                .verify_with_report(VerificationScope::RetainedHistory)
+                .await
+                .unwrap();
+            assert_eq!(
+                DATA_HASHES.with(std::cell::Cell::get),
+                count,
+                "hash work at {count} snapshots"
+            );
+            assert_eq!(
+                SNAPSHOT_VISITS.with(std::cell::Cell::get),
+                count,
+                "snapshot visits at {count} snapshots"
+            );
+            assert_eq!(report.snapshots_checked, count);
+            assert_eq!(report.generations_checked, count + 1);
+            assert_eq!(store.read_count() - before, report.objects_checked);
+        }
+    }
+
+    #[tokio::test]
     async fn same_version_generations_have_separate_anchor_and_deduplicated_verification() {
         let (store, table) = setup().await;
-        repack(&store, |_| {}).await;
+        for _ in 0..8 {
+            repack(&store, |_| {}).await;
+        }
         let selected = table
             .pin_metadata(MetadataSelection::TableVersion(0))
             .await
             .unwrap();
-        assert_eq!(selected.anchor().root_revision, 1);
+        assert_eq!(selected.anchor().root_revision, 8);
         assert_eq!(selected.coordinates().table_version, 0);
         let before = store.read_count();
+        VERIFIED_HASHES.with(|counts| counts.borrow_mut().clear());
         let report = table
             .verify_with_report(VerificationScope::RetainedHistory)
             .await
             .unwrap();
-        assert_eq!(report.generations_checked, 2);
+        VERIFIED_HASHES.with(|counts| {
+            for (uri, count) in counts.borrow().iter() {
+                assert_eq!(*count, 1, "repeated content verification for {uri}");
+            }
+        });
+        assert_eq!(report.generations_checked, 9);
         assert_eq!(report.commits_checked, 1);
         assert_eq!(store.read_count() - before, report.objects_checked);
     }

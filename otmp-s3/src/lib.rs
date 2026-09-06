@@ -120,8 +120,13 @@ impl S3ObjectStore {
             .get(&Self::path(key))
             .await
             .map_err(storage_error)?;
-        let version =
-            Self::object_version(result.meta.e_tag.as_deref(), result.meta.version.as_deref())?;
+        // Runtime reconciliation treats a successful HEAD read as a writable
+        // anchor. Version IDs alone are sufficient only for immutable objects.
+        let version = if key.as_str() == HEAD_KEY {
+            Self::head_version(result.meta.e_tag.as_deref(), result.meta.version.as_deref())?
+        } else {
+            Self::object_version(result.meta.e_tag.as_deref(), result.meta.version.as_deref())?
+        };
         let bytes = result.bytes().await.map_err(storage_error)?;
         Ok(StoredObject {
             bytes: bytes.to_vec(),
@@ -137,11 +142,24 @@ impl S3ObjectStore {
             .map(|object| object.version)
     }
 
+    fn head_version(
+        e_tag: Option<&str>,
+        version: Option<&str>,
+    ) -> Result<ObjectVersion, StorageError> {
+        if e_tag.is_none_or(|value| value.trim().is_empty()) {
+            return Err(StorageError::Unsupported(
+                "S3 conditional replacement requires an ETag".into(),
+            ));
+        }
+        Self::object_version(e_tag, version)
+    }
+
     async fn reconcile_head(&self, bytes: &[u8]) -> Result<ObjectVersion, StorageError> {
         let key: RelativeUri = HEAD_KEY.parse().expect("constant HEAD URI is safe");
         let object = self.read_with_meta(&key).await?;
         if object.bytes == bytes {
-            Ok(object.version)
+            let (e_tag, version) = Self::provider_version_owned(&object.version)?;
+            Self::head_version(e_tag.as_deref(), version.as_deref())
         } else {
             Err(StorageError::Io(
                 "conditional HEAD response lacked a version token and read-back was not authored by this attempt".into(),
@@ -171,7 +189,7 @@ impl S3ObjectStore {
             .await;
         match result {
             Ok(result) => {
-                match Self::object_version(result.e_tag.as_deref(), result.version.as_deref()) {
+                match Self::head_version(result.e_tag.as_deref(), result.version.as_deref()) {
                     Ok(new_version) => ConditionalWriteOutcome::Applied { new_version },
                     Err(_) => match self.reconcile_head(bytes).await {
                         Ok(new_version) => ConditionalWriteOutcome::Applied { new_version },

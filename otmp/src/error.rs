@@ -7,6 +7,12 @@ use crate::storage::StorageError;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    #[error("reader resource budget exhausted: {0}")]
+    ResourceExhausted(String),
+    #[error("authenticated metadata ranges are unavailable for this generation")]
+    AuthenticatedRangesUnavailable,
+    #[error("metadata reader operation was cancelled")]
+    Cancelled,
     #[error("transaction is invalid: {0}")]
     InvalidTransaction(String),
     #[error("semantic conflict: {0}")]
@@ -53,6 +59,9 @@ impl RuntimeError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::ResourceExhausted(_) => "OTMP_RESOURCE_EXHAUSTED",
+            Self::AuthenticatedRangesUnavailable => "OTMP_AUTHENTICATED_RANGES_UNAVAILABLE",
+            Self::Cancelled => "OTMP_CANCELLED",
             Self::InvalidTransaction(_) => "OTMP_INVALID_TRANSACTION",
             Self::SemanticConflict(_) => "OTMP_SEMANTIC_CONFLICT",
             Self::SnapshotNotFound => "OTMP_SNAPSHOT_NOT_FOUND",

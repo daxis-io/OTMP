@@ -557,7 +557,16 @@ def run_suite(args: argparse.Namespace) -> dict[str, Any]:
         },
     }
     write_json(out / "summary.json", summary)
+    require_valid_summary(summary)
     return summary
+
+
+def require_valid_summary(summary: dict[str, Any]) -> None:
+    """Fail automation after all raw evidence and summaries have been saved."""
+    results = [result for case in summary["provider"].values() for result in case.values()]
+    results.extend(summary["plan_files"].values())
+    if not summary["provenance_unchanged"] or any(result["samples"]["failed"] for result in results):
+        raise RuntimeError("qualification failed; inspect retained summary and raw evidence")
 
 
 def parser() -> argparse.ArgumentParser:

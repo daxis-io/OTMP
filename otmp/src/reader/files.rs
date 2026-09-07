@@ -9,6 +9,8 @@ use crate::{LiveFile, ObjectStore, RuntimeError};
 // ID order gives a stable seek in the pinned generation without changing membership.
 const BRANCH_FILES_SQL: &str = "SELECT f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,rf.added_snapshot_id,rf.file_sequence_number,f.created_snapshot_id,f.created_version,s.sequence_number,s.committed_table_version FROM otmp_ref_live_files rf INDEXED BY sqlite_autoindex_otmp_ref_live_files_1 LEFT JOIN otmp_files f ON f.file_id=rf.file_id LEFT JOIN otmp_snapshots s ON s.snapshot_id=f.created_snapshot_id WHERE rf.ref_name=?1 AND rf.file_id>?2 ORDER BY rf.file_id LIMIT ?3";
 
+const BRANCH_FIRST_SQL: &str = "SELECT f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,rf.added_snapshot_id,rf.file_sequence_number,f.created_snapshot_id,f.created_version,s.sequence_number,s.committed_table_version FROM otmp_ref_live_files rf INDEXED BY sqlite_autoindex_otmp_ref_live_files_1 LEFT JOIN otmp_files f ON f.file_id=rf.file_id LEFT JOIN otmp_snapshots s ON s.snapshot_id=f.created_snapshot_id WHERE rf.ref_name=?1 ORDER BY rf.file_id LIMIT ?2";
+
 const BYTES: usize = 1024 * 1024;
 
 pub(crate) async fn enumerate<S: ObjectStore>(
@@ -58,23 +60,21 @@ async fn branch<S: ObjectStore>(
         .as_ref()
         .ok_or_else(|| corrupt("historical file traversal is unavailable"))?;
     let file = match cursor.as_ref().map(|c| &c.state) {
-        Some(CursorState::Branch { file }) => *file,
-        None => otmp_protocol::Id::from_bytes([0; 16]),
+        Some(CursorState::Branch { file }) => Some(*file),
+        None => None,
         _ => return Err(corrupt("cursor mode differs from selected ref")),
     };
-    let rows = reader
-        .engine
-        .query(
-            BRANCH_FILES_SQL,
-            vec![
-                turso_core::Value::build_text(branch.clone()),
-                turso_core::Value::Blob(file.as_bytes().to_vec()),
-                integer(i64::try_from(limit).map_err(|_| corrupt("limit"))?),
-            ],
-            limit,
-            BYTES,
-        )
-        .await?;
+    let mut params = vec![turso_core::Value::build_text(branch.clone())];
+    let sql = match file {
+        Some(file) => {
+            params.push(turso_core::Value::Blob(file.as_bytes().to_vec()));
+            BRANCH_FILES_SQL
+        }
+        // No artificial lower bound: malformed IDs must reach validation too.
+        None => BRANCH_FIRST_SQL,
+    };
+    params.push(integer(i64::try_from(limit).map_err(|_| corrupt("limit"))?));
+    let rows = reader.engine.query(sql, params, limit, BYTES).await?;
     let mut files = Vec::with_capacity(rows.len());
     let mut reservations = vec![reservation];
     let mut next = None;
@@ -349,6 +349,28 @@ fn opt(v: &turso_core::Value) -> Result<Option<u64>, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn first_branch_batch_exposes_invalid_zero_id_membership() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!(
+                "../../../spec/OTMP-0.0.2-alpha-table-schema.sql"
+            ))
+            .unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=OFF;
+            INSERT INTO otmp_files(file_id,file_kind,uri,file_format,file_size_bytes,record_count,schema_id,partition_spec_id,partition_values_cbor,partition_hash,data_sequence_number,file_sequence_number,created_snapshot_id,created_version)
+            VALUES(zeroblob(16),'data','data/invalid.parquet','parquet',1,1,1,0,X'A0',zeroblob(32),0,1,zeroblob(16),1);
+            INSERT INTO otmp_ref_live_files VALUES ('main',zeroblob(16),zeroblob(16),0,1);").unwrap();
+        let mut statement = connection.prepare(super::BRANCH_FIRST_SQL).unwrap();
+        let mut rows = statement.query(rusqlite::params!["main", 256]).unwrap();
+        let row = rows
+            .next()
+            .unwrap()
+            .expect("malformed membership must reach descriptor validation");
+        let bytes: Vec<u8> = row.get(0).unwrap();
+        assert!(super::id(&turso_core::Value::Blob(bytes)).is_err());
+    }
+
     #[tokio::test]
     async fn branch_pagination_seeks_without_rescanning_or_sorting() {
         let table = crate::Table::new(crate::InMemoryObjectStore::default());

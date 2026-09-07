@@ -12,6 +12,19 @@ FAKE = pathlib.Path(__file__).with_name("fake_worker.py")
 
 
 class StatisticsTests(unittest.TestCase):
+    def test_invalid_evidence_fails_the_suite_gate(self):
+        valid = {"provenance_unchanged": True, "provider": {"case": {
+            "otmp": {"samples": {"failed": 0}}}}, "plan_files": {}}
+        run.require_valid_summary(valid)
+        for changed in (False, True):
+            summary = json.loads(json.dumps(valid))
+            if changed:
+                summary["provenance_unchanged"] = False
+            else:
+                summary["provider"]["case"]["otmp"]["samples"]["failed"] = 1
+            with self.assertRaises(RuntimeError):
+                run.require_valid_summary(summary)
+
     def test_nearest_rank_percentiles(self):
         self.assertEqual(run.distribution([9, 1, 5, 3]), {
             "count": 4,

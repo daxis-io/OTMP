@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 
 root = pathlib.Path(__file__).resolve().parent.parent
-binary = root / 'target/debug/otmp'
+binary = pathlib.Path(os.environ.get('CARGO_TARGET_DIR', root / 'target')) / 'debug/otmp'
 for kind in ('properties', 'refs'):
     for point in ('during_temporary_head_creation', 'after_immutable_uploads',
                   'after_final_head_rename'):

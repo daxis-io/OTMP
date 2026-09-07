@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cargo build --manifest-path "$repo_root/Cargo.toml" -p otmp-cli
-otmp_bin="$repo_root/target/debug/otmp"
+otmp_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/otmp"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/otmp-crash.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT
 

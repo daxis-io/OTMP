@@ -20,3 +20,12 @@ base checkpoint and deterministic immutable page packs/maps. Run
 `python3 conformance/cow.py --check` to regenerate artifact identities and compare
 every resolved image byte for byte with its retained full SQLite checkpoint.
 The Rust incremental tests also verify this package and its semantic history.
+
+## Indexed metadata fixture
+
+`tables/indexed` is a separate deterministic derivation of the retained
+incremental package. It preserves the same logical generations and checkpoint
+bytes while adding immutable checkpoint page-hash index objects. It exists for
+authenticated on-demand range-reader tests; the older `tables/incremental`
+fixture intentionally remains index-free for materialized-reader compatibility.
+`python3 conformance/cow.py --check` validates both packages.

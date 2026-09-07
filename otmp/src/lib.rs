@@ -1,5 +1,6 @@
 //! Catalog-free OTMP runtime with incremental writes and materialized readers.
 
+mod checkpoint_index;
 mod cow_writer;
 mod error;
 mod image;
@@ -16,7 +17,7 @@ pub use runtime::{
 };
 pub use storage::{
     ConditionalWriteOutcome, InMemoryObjectStore, InjectedConditional, LocalObjectStore,
-    ObjectStore, ObjectVersion, StorageError,
+    ObjectMetadata, ObjectStore, ObjectVersion, StorageError, StoredRange,
 };
 
 pub use runtime::{

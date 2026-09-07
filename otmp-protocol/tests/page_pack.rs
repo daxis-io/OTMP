@@ -1,4 +1,6 @@
-use otmp_protocol::{decode_pack_index, encode_page_pack};
+use otmp_protocol::{
+    decode_pack_header, decode_pack_index, decode_pack_index_parts, encode_page_pack,
+};
 use std::collections::BTreeMap;
 
 #[test]
@@ -50,4 +52,18 @@ fn pack_rejects_duplicate_pages_overlap_reserved_bytes_and_unknown_codec() {
         }
         assert!(decode_pack_index(&bytes).is_err(), "accepted {mutation}");
     }
+}
+
+#[test]
+fn pack_header_and_index_can_be_validated_without_payload_download() {
+    let bytes =
+        encode_page_pack(512, &BTreeMap::from([(1, vec![1; 512]), (2, vec![2; 512])])).unwrap();
+    let header = decode_pack_header(&bytes[..64], bytes.len() as u64).unwrap();
+    let index = decode_pack_index_parts(&bytes[..64], &bytes[64..192], bytes.len() as u64).unwrap();
+    assert_eq!(header.page_size, 512);
+    assert_eq!(index.entries.len(), 2);
+    assert!(
+        decode_pack_index_parts(&bytes[..64], &bytes[64..192], (bytes.len() - 1) as u64).is_err()
+    );
+    assert!(decode_pack_index_parts(&bytes[..64], &bytes[64..191], bytes.len() as u64).is_err());
 }

@@ -1,4 +1,5 @@
 use object_store::aws::AmazonS3Builder;
+use otmp::storage::MAXIMUM_RANGE_LENGTH;
 use otmp::{ConditionalWriteOutcome, ObjectStore, StorageError};
 use otmp_protocol::RelativeUri;
 use otmp_s3::S3ObjectStore;
@@ -58,6 +59,97 @@ async fn rejects_a_source_that_exceeds_its_declared_length_without_accepting_it(
 #[test]
 fn empty_provider_tokens_are_not_usable_versions() {
     assert!(S3ObjectStore::object_version(Some("  "), Some("")).is_err());
+}
+
+#[tokio::test]
+async fn authenticated_range_reads_are_exact_bounded_and_pinned() {
+    let store = S3ObjectStore::from_object_store(std::sync::Arc::new(
+        object_store::memory::InMemory::new(),
+    ));
+    let key: RelativeUri = "objects/range".parse().unwrap();
+    store.create_bytes(&key, b"0123456789").await.unwrap();
+    let metadata = store.stat(&key).await.unwrap();
+    let range = store.read_range(&key, 3..7, &metadata).await.unwrap();
+    assert_eq!(range.bytes, b"3456");
+    assert_eq!(range.range, 3..7);
+    assert!(matches!(
+        store.read_range(&key, 0..0, &metadata).await,
+        Err(StorageError::VerificationFailed(_))
+    ));
+    assert!(matches!(
+        store
+            .read_range(&key, 0..MAXIMUM_RANGE_LENGTH + 1, &metadata)
+            .await,
+        Err(StorageError::VerificationFailed(_))
+    ));
+}
+
+#[tokio::test]
+async fn http_range_read_sends_if_match_and_rejects_full_object_responses() {
+    let server = ScriptedS3::start().await;
+    let key: RelativeUri = "objects/http-range".parse().unwrap();
+    server
+        .store
+        .create_bytes(&key, b"0123456789")
+        .await
+        .unwrap();
+    let metadata = server.store.stat(&key).await.unwrap();
+    let range = server
+        .store
+        .read_range(&key, 2..6, &metadata)
+        .await
+        .unwrap();
+    assert_eq!(range.bytes, b"2345");
+    assert_eq!(server.state.lock().unwrap().range_requests, 1);
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn http_range_read_rejects_a_transport_that_ignores_range() {
+    let server = ScriptedS3::start().await;
+    let key: RelativeUri = "objects/ignored-range".parse().unwrap();
+    server
+        .store
+        .create_bytes(&key, b"0123456789")
+        .await
+        .unwrap();
+    let metadata = server.store.stat(&key).await.unwrap();
+    server.state.lock().unwrap().ignore_next_range = true;
+    let result = server.store.read_range(&key, 2..6, &metadata).await;
+    assert!(
+        result.is_err(),
+        "ignored Range must not produce a usable response: {result:?}"
+    );
+    server.finish().await;
+}
+
+#[tokio::test]
+async fn http_range_read_rejects_corrupt_response_contracts() {
+    for fault in [
+        RangeFault::Short,
+        RangeFault::Oversized,
+        RangeFault::WrongRange,
+        RangeFault::WrongVersion,
+        RangeFault::MissingVersion,
+    ] {
+        let server = ScriptedS3::start().await;
+        let key: RelativeUri = "objects/faulted-range".parse().unwrap();
+        server
+            .store
+            .create_bytes(&key, b"0123456789")
+            .await
+            .unwrap();
+        let metadata = server.store.stat(&key).await.unwrap();
+        server.state.lock().unwrap().range_fault = Some(fault);
+        assert!(
+            server
+                .store
+                .read_range(&key, 2..6, &metadata)
+                .await
+                .is_err()
+        );
+        server.finish().await;
+    }
 }
 
 #[tokio::test]
@@ -315,6 +407,14 @@ enum ResponseLoss {
     ReadableHead,
     HeadWithoutEtag,
 }
+#[derive(Clone, Copy)]
+enum RangeFault {
+    Short,
+    Oversized,
+    WrongRange,
+    WrongVersion,
+    MissingVersion,
+}
 #[derive(Default)]
 struct ServerState {
     objects: std::collections::BTreeMap<String, HttpObject>,
@@ -327,6 +427,9 @@ struct ServerState {
     omit_get_etag: bool,
     lose_next_head_response: Option<ResponseLoss>,
     lost_responses: u64,
+    range_requests: u64,
+    ignore_next_range: bool,
+    range_fault: Option<RangeFault>,
 }
 struct ScriptedS3 {
     store: S3ObjectStore,
@@ -440,14 +543,15 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> HttpRequest {
 }
 fn handle_request(state: &mut ServerState, request: HttpRequest) -> Option<Vec<u8>> {
     state.requests += 1;
-    if request.path.contains('?') || request.path.trim_end_matches('/') == "/bucket" {
+    if request.path.contains("list-type=") || request.path.trim_end_matches('/') == "/bucket" {
         state.list_requests += 1;
         return Some(response(400, None, b"unexpected listing"));
     }
-    assert!(request.path.starts_with("/bucket/"));
+    let object_path = request.path.split('?').next().unwrap();
+    assert!(object_path.starts_with("/bucket/"));
     match request.method.as_str() {
         "PUT" => {
-            let existing = state.objects.get(&request.path);
+            let existing = state.objects.get(object_path);
             let condition = match (
                 request.headers.get("if-none-match"),
                 request.headers.get("if-match"),
@@ -466,8 +570,8 @@ fn handle_request(state: &mut ServerState, request: HttpRequest) -> Option<Vec<u
                 etag: format!("etag-{}", state.revision),
                 version: format!("version-{}", state.revision),
             };
-            state.objects.insert(request.path.clone(), object.clone());
-            if request.path == "/bucket/_otmp/HEAD" {
+            state.objects.insert(object_path.to_owned(), object.clone());
+            if object_path == "/bucket/_otmp/HEAD" {
                 state.head_writes.push(object.bytes.clone());
                 if let Some(loss) = state.lose_next_head_response.take() {
                     state.lost_responses += 1;
@@ -477,12 +581,100 @@ fn handle_request(state: &mut ServerState, request: HttpRequest) -> Option<Vec<u
             }
             Some(response(200, Some((&object, state.omit_put_etag)), b""))
         }
-        "GET" => Some(match state.objects.get(&request.path) {
-            Some(object) => response(200, Some((object, state.omit_get_etag)), &object.bytes),
+        "HEAD" => Some(match state.objects.get(object_path) {
+            Some(object) => head_response(object, state.omit_get_etag),
+            None => response(404, None, b"<Error><Code>NoSuchKey</Code></Error>"),
+        }),
+        "GET" => Some(match state.objects.get(object_path) {
+            Some(object) => {
+                if let Some(range) = request.headers.get("range") {
+                    state.range_requests += 1;
+                    assert_eq!(request.headers.get("if-match"), Some(&object.etag));
+                    if std::mem::take(&mut state.ignore_next_range) {
+                        return Some(response(
+                            200,
+                            Some((object, state.omit_get_etag)),
+                            &object.bytes,
+                        ));
+                    }
+                    let values = range.strip_prefix("bytes=").unwrap();
+                    let (start, end) = values.split_once('-').unwrap();
+                    let start: usize = start.parse().unwrap();
+                    let end: usize = end.parse().unwrap();
+                    assert!(start <= end && end < object.bytes.len());
+                    range_response(
+                        object,
+                        state.omit_get_etag,
+                        start,
+                        end + 1,
+                        state.range_fault.take(),
+                    )
+                } else {
+                    response(200, Some((object, state.omit_get_etag)), &object.bytes)
+                }
+            }
             None => response(404, None, b"<Error><Code>NoSuchKey</Code></Error>"),
         }),
         other => panic!("unexpected S3 method: {other}"),
     }
+}
+fn head_response(object: &HttpObject, omit_etag: bool) -> Vec<u8> {
+    let mut header = format!(
+        "HTTP/1.1 200 Scripted\r\nContent-Length: {}\r\nConnection: close\r\n",
+        object.bytes.len()
+    );
+    write!(header, "x-amz-version-id: {}\r\n", object.version).unwrap();
+    if !omit_etag {
+        write!(header, "ETag: {}\r\n", object.etag).unwrap();
+    }
+    format!("{header}\r\n").into_bytes()
+}
+fn range_response(
+    object: &HttpObject,
+    omit_etag: bool,
+    start: usize,
+    end: usize,
+    fault: Option<RangeFault>,
+) -> Vec<u8> {
+    let (reported_start, reported_end) = if matches!(fault, Some(RangeFault::WrongRange)) {
+        (start + 1, end + 1)
+    } else {
+        (start, end)
+    };
+    let mut body = object.bytes[start..end].to_vec();
+    if matches!(fault, Some(RangeFault::Short)) {
+        body.pop();
+    }
+    if matches!(fault, Some(RangeFault::Oversized)) {
+        body.push(0);
+    }
+    let mut header = format!(
+        "HTTP/1.1 206 Scripted\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n",
+        body.len(),
+        reported_start,
+        reported_end - 1,
+        object.bytes.len()
+    );
+    if !matches!(fault, Some(RangeFault::MissingVersion)) {
+        let version = if matches!(fault, Some(RangeFault::WrongVersion)) {
+            "different-version"
+        } else {
+            &object.version
+        };
+        let etag = if matches!(fault, Some(RangeFault::WrongVersion)) {
+            "different-etag"
+        } else {
+            &object.etag
+        };
+        write!(header, "x-amz-version-id: {version}\r\n").unwrap();
+        if !omit_etag {
+            write!(header, "ETag: {etag}\r\n").unwrap();
+        }
+    }
+    header.push_str("\r\n");
+    let mut response = header.into_bytes();
+    response.extend_from_slice(&body);
+    response
 }
 fn response(status: u16, object: Option<(&HttpObject, bool)>, body: &[u8]) -> Vec<u8> {
     let mut header = format!(

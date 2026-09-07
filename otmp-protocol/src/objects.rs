@@ -781,6 +781,44 @@ pub struct Checkpoint {
     pub length: JsonU64,
 }
 
+/// Authenticates bounded checkpoint reads without downloading the complete image.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointPageIndex {
+    pub checkpoint_sha256: Sha256,
+    pub checkpoint_length: JsonU64,
+    pub page_size: u32,
+    pub page_count: JsonU64,
+    pub root: crate::PageMapRoot,
+}
+
+impl CheckpointPageIndex {
+    pub fn validate(&self, checkpoint: &Checkpoint, page_size: u32) -> Result<(), ProtocolError> {
+        let expected_length = self
+            .page_count
+            .0
+            .checked_mul(u64::from(self.page_size))
+            .ok_or_else(|| {
+                ProtocolError::InvalidObject("checkpoint page-index length overflow".into())
+            })?;
+        if self.checkpoint_sha256 != checkpoint.sha256
+            || self.checkpoint_length != checkpoint.length
+            || self.page_size != page_size
+            || self.page_size == 0
+            || self.page_count.0 == 0
+            || expected_length != checkpoint.length.0
+            || self.root.length.0 == 0
+            || self.root.length.0 > crate::MAX_CHECKPOINT_INDEX_BYTES as u64
+            || self.root.height > 64
+        {
+            return Err(ProtocolError::InvalidObject(
+                "checkpoint page-index does not bind checkpoint geometry".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataImage {
@@ -789,6 +827,8 @@ pub struct MetadataImage {
     pub page_count: JsonU64,
     pub checkpoint: Checkpoint,
     pub page_map: Option<crate::PageMapRoot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_page_index: Option<CheckpointPageIndex>,
     pub image_root_sha256: Sha256,
 }
 
@@ -824,6 +864,12 @@ impl Generation {
             return Err(ProtocolError::InvalidObject(
                 "generation is outside the runtime metadata-image profile".into(),
             ));
+        }
+        if let Some(index) = &self.metadata_image.checkpoint_page_index {
+            index.validate(
+                &self.metadata_image.checkpoint,
+                self.metadata_image.page_size,
+            )?;
         }
         Ok(())
     }

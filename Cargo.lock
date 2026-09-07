@@ -1651,6 +1651,7 @@ name = "otmp-s3"
 version = "0.0.2-alpha.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "object_store",
  "otmp",
  "otmp-protocol",

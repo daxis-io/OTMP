@@ -11,7 +11,10 @@ use otmp_protocol::{RelativeUri, Sha256};
 use sha2::{Digest, Sha256 as Sha256Hasher};
 use thiserror::Error;
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+/// The largest request accepted by the authenticated range interface.
+pub const MAXIMUM_RANGE_LENGTH: u64 = 64 * 1024 * 1024;
 
 static HEAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -44,6 +47,62 @@ impl ObjectVersion {
 pub struct StoredObject {
     pub bytes: Vec<u8>,
     pub version: ObjectVersion,
+}
+
+/// Runtime metadata that pins a bounded read to one object revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectMetadata {
+    pub length: u64,
+    pub version: ObjectVersion,
+}
+
+/// An exact bounded object response and the metadata used to authenticate it.
+#[derive(Clone, Debug)]
+pub struct StoredRange {
+    pub bytes: Vec<u8>,
+    pub range: std::ops::Range<u64>,
+    pub metadata: ObjectMetadata,
+}
+
+impl StoredRange {
+    /// Checks that a provider returned precisely the requested bytes from the
+    /// object revision selected by the caller.
+    pub fn validate(
+        &self,
+        expected: &ObjectMetadata,
+        range: &std::ops::Range<u64>,
+    ) -> Result<(), StorageError> {
+        validate_range_request(expected, range)?;
+        if &self.metadata != expected
+            || &self.range != range
+            || self.bytes.len() as u64 != range.end - range.start
+        {
+            return Err(StorageError::VerificationFailed(
+                "range response did not match the requested object revision".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Validates a range before an adapter performs I/O.
+pub fn validate_range_request(
+    metadata: &ObjectMetadata,
+    range: &std::ops::Range<u64>,
+) -> Result<(), StorageError> {
+    let length = range
+        .end
+        .checked_sub(range.start)
+        .ok_or_else(|| StorageError::VerificationFailed("range end precedes its start".into()))?;
+    if length == 0 || length > MAXIMUM_RANGE_LENGTH || range.end > metadata.length {
+        return Err(StorageError::VerificationFailed(
+            "range is empty, oversized, or outside the object".into(),
+        ));
+    }
+    usize::try_from(length).map_err(|_| {
+        StorageError::VerificationFailed("range cannot fit this platform's memory model".into())
+    })?;
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -116,6 +175,25 @@ pub enum ConditionalWriteOutcome {
 pub trait ObjectStore: Clone + Send + Sync + 'static {
     async fn read(&self, key: &RelativeUri) -> Result<StoredObject, StorageError>;
 
+    async fn stat(&self, _key: &RelativeUri) -> Result<ObjectMetadata, StorageError> {
+        Err(StorageError::Unsupported(
+            "object metadata is not implemented by this storage adapter".into(),
+        ))
+    }
+
+    /// Reads one bounded byte range. Implementations must not fall back to a
+    /// full-object read when their transport does not support ranges.
+    async fn read_range(
+        &self,
+        _key: &RelativeUri,
+        _range: std::ops::Range<u64>,
+        _expected: &ObjectMetadata,
+    ) -> Result<StoredRange, StorageError> {
+        Err(StorageError::Unsupported(
+            "bounded range reads are not implemented by this storage adapter".into(),
+        ))
+    }
+
     async fn create_from_reader(
         &self,
         key: &RelativeUri,
@@ -183,6 +261,43 @@ impl LocalObjectStore {
         self.root.join(key.as_str())
     }
 
+    // This token is deliberately separate from the SHA-256 conditional-head
+    // token: range reads need a cheap local identity and never hash a whole
+    // object merely to service a page request.
+    fn metadata_for(metadata: &std::fs::Metadata) -> Result<ObjectMetadata, StorageError> {
+        let modified = metadata
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| StorageError::Io(error.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(ObjectMetadata {
+                length: metadata.len(),
+                version: ObjectVersion::from_opaque(format!(
+                    "otmp-local-range-v1:{}:{}:{}:{}:{}:{}:{}",
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.len(),
+                    modified.as_secs(),
+                    modified.subsec_nanos(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec()
+                )),
+            })
+        }
+        #[cfg(not(unix))]
+        Ok(ObjectMetadata {
+            length: metadata.len(),
+            version: ObjectVersion::from_opaque(format!(
+                "otmp-local-range-v1:{}:{}:{}",
+                metadata.len(),
+                modified.as_secs(),
+                modified.subsec_nanos()
+            )),
+        })
+    }
+
     fn head_key() -> RelativeUri {
         "_otmp/HEAD".parse().expect("constant HEAD URI is safe")
     }
@@ -240,6 +355,62 @@ impl ObjectStore for LocalObjectStore {
         Ok(StoredObject {
             version: ObjectVersion::from_sha256(Sha256::digest(&bytes)),
             bytes,
+        })
+    }
+
+    async fn stat(&self, key: &RelativeUri) -> Result<ObjectMetadata, StorageError> {
+        tokio::fs::metadata(self.path(key))
+            .await
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => StorageError::NotFound(key.to_string()),
+                _ => error.into(),
+            })
+            .and_then(|metadata| Self::metadata_for(&metadata))
+    }
+
+    async fn read_range(
+        &self,
+        key: &RelativeUri,
+        range: std::ops::Range<u64>,
+        expected: &ObjectMetadata,
+    ) -> Result<StoredRange, StorageError> {
+        validate_range_request(expected, &range)?;
+        let path = self.path(key);
+        let before = tokio::fs::metadata(&path)
+            .await
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => StorageError::NotFound(key.to_string()),
+                _ => error.into(),
+            })?;
+        if Self::metadata_for(&before)? != *expected {
+            return Err(StorageError::VerificationFailed(
+                "local object version changed before range read".into(),
+            ));
+        }
+        let length = usize::try_from(range.end - range.start).map_err(|_| {
+            StorageError::VerificationFailed("range cannot fit this platform's memory model".into())
+        })?;
+        let mut file = tokio::fs::File::open(&path).await?;
+        if Self::metadata_for(&file.metadata().await?)? != *expected {
+            return Err(StorageError::VerificationFailed(
+                "local object changed while opening range".into(),
+            ));
+        }
+        file.seek(std::io::SeekFrom::Start(range.start)).await?;
+        let mut bytes = vec![0; length];
+        file.read_exact(&mut bytes).await?;
+        let after = tokio::fs::metadata(path).await?;
+        if Self::metadata_for(&after)? != *expected
+            || Self::metadata_for(&file.metadata().await?)? != *expected
+        {
+            return Err(StorageError::VerificationFailed(
+                "local object version changed during range read".into(),
+            ));
+        }
+        Ok(StoredRange {
+            bytes,
+            range,
+            metadata: expected.clone(),
         })
     }
 
@@ -376,10 +547,17 @@ pub struct InMemoryObjectStore {
 
 #[derive(Debug, Default)]
 struct MemoryState {
-    objects: BTreeMap<String, Vec<u8>>,
+    objects: BTreeMap<String, MemoryObject>,
+    next_revision: u64,
     conditional_outcomes: VecDeque<InjectedConditional>,
     reads: u64,
     listings: u64,
+}
+
+#[derive(Debug)]
+struct MemoryObject {
+    bytes: Vec<u8>,
+    revision: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -400,11 +578,12 @@ impl InMemoryObjectStore {
 
     /// Replaces bytes without observing immutability, solely for corruption tests.
     pub fn replace_object_for_test(&self, key: &RelativeUri, bytes: Vec<u8>) {
-        self.inner
-            .lock()
-            .expect("memory store lock poisoned")
+        let mut state = self.inner.lock().expect("memory store lock poisoned");
+        state.next_revision += 1;
+        let revision = state.next_revision;
+        state
             .objects
-            .insert(key.to_string(), bytes);
+            .insert(key.to_string(), MemoryObject { bytes, revision });
     }
 
     #[must_use]
@@ -430,7 +609,7 @@ impl InMemoryObjectStore {
         let current = state
             .objects
             .get("_otmp/HEAD")
-            .map(|value| ObjectVersion::from_sha256(Sha256::digest(value)));
+            .map(|value| ObjectVersion::from_sha256(Sha256::digest(&value.bytes)));
         if matches!(injected, Some(InjectedConditional::IndeterminateBefore)) {
             return ConditionalWriteOutcome::Indeterminate {
                 source: StorageError::Injected("before conditional write".into()),
@@ -446,7 +625,15 @@ impl InMemoryObjectStore {
                 current_version: current,
             };
         }
-        state.objects.insert("_otmp/HEAD".into(), bytes.to_vec());
+        state.next_revision += 1;
+        let revision = state.next_revision;
+        state.objects.insert(
+            "_otmp/HEAD".into(),
+            MemoryObject {
+                bytes: bytes.to_vec(),
+                revision,
+            },
+        );
         let new_version = ObjectVersion::from_sha256(Sha256::digest(bytes));
         if matches!(injected, Some(InjectedConditional::IndeterminateAfter)) {
             ConditionalWriteOutcome::Indeterminate {
@@ -466,11 +653,63 @@ impl ObjectStore for InMemoryObjectStore {
         let bytes = state
             .objects
             .get(key.as_str())
-            .cloned()
+            .map(|object| object.bytes.clone())
             .ok_or_else(|| StorageError::NotFound(key.to_string()))?;
         Ok(StoredObject {
             version: ObjectVersion::from_sha256(Sha256::digest(&bytes)),
             bytes,
+        })
+    }
+
+    async fn stat(&self, key: &RelativeUri) -> Result<ObjectMetadata, StorageError> {
+        let state = self.inner.lock().expect("memory store lock poisoned");
+        let object = state
+            .objects
+            .get(key.as_str())
+            .ok_or_else(|| StorageError::NotFound(key.to_string()))?;
+        Ok(ObjectMetadata {
+            length: object.bytes.len() as u64,
+            version: ObjectVersion::from_opaque(format!(
+                "otmp-memory-range-v1:{}",
+                object.revision
+            )),
+        })
+    }
+
+    async fn read_range(
+        &self,
+        key: &RelativeUri,
+        range: std::ops::Range<u64>,
+        expected: &ObjectMetadata,
+    ) -> Result<StoredRange, StorageError> {
+        validate_range_request(expected, &range)?;
+        let state = self.inner.lock().expect("memory store lock poisoned");
+        let object = state
+            .objects
+            .get(key.as_str())
+            .ok_or_else(|| StorageError::NotFound(key.to_string()))?;
+        let actual = ObjectMetadata {
+            length: object.bytes.len() as u64,
+            version: ObjectVersion::from_opaque(format!(
+                "otmp-memory-range-v1:{}",
+                object.revision
+            )),
+        };
+        if actual != *expected {
+            return Err(StorageError::VerificationFailed(
+                "in-memory object version changed before range read".into(),
+            ));
+        }
+        let start = usize::try_from(range.start).map_err(|_| {
+            StorageError::VerificationFailed("range cannot fit this platform's memory model".into())
+        })?;
+        let end = usize::try_from(range.end).map_err(|_| {
+            StorageError::VerificationFailed("range cannot fit this platform's memory model".into())
+        })?;
+        Ok(StoredRange {
+            bytes: object.bytes[start..end].to_vec(),
+            range,
+            metadata: actual,
         })
     }
 
@@ -493,9 +732,17 @@ impl ObjectStore for InMemoryObjectStore {
         }
         let hash = Sha256::digest(&bytes);
         let mut state = self.inner.lock().expect("memory store lock poisoned");
+        if state.objects.contains_key(key.as_str()) {
+            return Err(StorageError::ImmutableConflict(key.to_string()));
+        }
+        state.next_revision += 1;
+        let revision = state.next_revision;
         match state.objects.entry(key.to_string()) {
             btree_map::Entry::Vacant(entry) => {
-                entry.insert(bytes.clone());
+                entry.insert(MemoryObject {
+                    bytes: bytes.clone(),
+                    revision,
+                });
             }
             btree_map::Entry::Occupied(_) => {
                 return Err(StorageError::ImmutableConflict(key.to_string()));
@@ -526,10 +773,9 @@ impl ObjectStore for InMemoryObjectStore {
         version: &ObjectVersion,
     ) -> Result<bool, StorageError> {
         let mut state = self.inner.lock().expect("memory store lock poisoned");
-        let matches = state
-            .objects
-            .get(key.as_str())
-            .is_some_and(|bytes| ObjectVersion::from_sha256(Sha256::digest(bytes)) == *version);
+        let matches = state.objects.get(key.as_str()).is_some_and(|object| {
+            ObjectVersion::from_sha256(Sha256::digest(&object.bytes)) == *version
+        });
         if matches {
             state.objects.remove(key.as_str());
         }

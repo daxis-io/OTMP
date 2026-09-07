@@ -472,6 +472,17 @@ impl<S: ObjectStore> Table<S> {
         let checkpoint_id = new_id();
         let checkpoint_uri: RelativeUri =
             format!("_otmp/checkpoints/0/{checkpoint_id}.sqlite3").parse()?;
+        let checkpoint_reference = otmp_protocol::Checkpoint {
+            table_version: JsonU64(0),
+            uri: checkpoint_uri.clone(),
+            sha256: checkpoint_hash,
+            length: JsonU64(checkpoint.bytes.len() as u64),
+        };
+        let (checkpoint_page_index, checkpoint_index_artifacts) = crate::checkpoint_index::build(
+            &checkpoint_reference,
+            image::PAGE_SIZE,
+            &checkpoint.bytes,
+        )?;
         let generation_id = new_id();
         let commit_reference = object_reference(
             commit_uri.clone(),
@@ -493,13 +504,9 @@ impl<S: ObjectStore> Table<S> {
                 codec: SQLITE_COW_FEATURE.into(),
                 page_size: image::PAGE_SIZE,
                 page_count: JsonU64(checkpoint.page_count),
-                checkpoint: otmp_protocol::Checkpoint {
-                    table_version: JsonU64(0),
-                    uri: checkpoint_uri.clone(),
-                    sha256: checkpoint_hash,
-                    length: JsonU64(checkpoint.bytes.len() as u64),
-                },
+                checkpoint: checkpoint_reference,
                 page_map: None,
+                checkpoint_page_index: Some(checkpoint_page_index),
                 image_root_sha256: image_root_hash(
                     table_id,
                     0,
@@ -537,6 +544,9 @@ impl<S: ObjectStore> Table<S> {
 
         put_immutable(&self.store, &commit_uri, &commit_bytes).await?;
         put_immutable(&self.store, &checkpoint_uri, &checkpoint.bytes).await?;
+        for artifact in &checkpoint_index_artifacts {
+            put_immutable(&self.store, &artifact.uri, &artifact.bytes).await?;
+        }
         put_immutable(&self.store, &generation_uri, &generation_bytes).await?;
         let mut reconciliations = 0;
         loop {
@@ -1238,29 +1248,41 @@ fn finish_candidate<R>(
         &checkpoint.changed_pages,
         checkpoint.page_count,
     )?;
-    let (base_checkpoint, page_map, image_artifacts) = if incremental.root.is_none()
+    let (base_checkpoint, page_map, checkpoint_page_index, image_artifacts) = if incremental
+        .root
+        .is_none()
         || incremental.reachable_bytes >= checkpoint.bytes.len() as u64
     {
         let hash = object_hash(&checkpoint.bytes);
         let uri: RelativeUri =
             format!("_otmp/checkpoints/{table_version}/{}.sqlite3", new_id()).parse()?;
+        let base_checkpoint = otmp_protocol::Checkpoint {
+            table_version: JsonU64(table_version),
+            uri: uri.clone(),
+            sha256: hash,
+            length: JsonU64(checkpoint.bytes.len() as u64),
+        };
+        let (checkpoint_page_index, mut artifacts) =
+            crate::checkpoint_index::build(&base_checkpoint, image::PAGE_SIZE, &checkpoint.bytes)?;
+        artifacts.push(crate::physical::Artifact {
+            uri,
+            bytes: std::mem::take(&mut checkpoint.bytes),
+        });
         (
-            otmp_protocol::Checkpoint {
-                table_version: JsonU64(table_version),
-                uri: uri.clone(),
-                sha256: hash,
-                length: JsonU64(checkpoint.bytes.len() as u64),
-            },
+            base_checkpoint,
             None,
-            vec![crate::physical::Artifact {
-                uri,
-                bytes: std::mem::take(&mut checkpoint.bytes),
-            }],
+            Some(checkpoint_page_index),
+            artifacts,
         )
     } else {
         (
             parent.generation.metadata_image.checkpoint.clone(),
             incremental.root,
+            parent
+                .generation
+                .metadata_image
+                .checkpoint_page_index
+                .clone(),
             incremental.artifacts,
         )
     };
@@ -1296,6 +1318,7 @@ fn finish_candidate<R>(
             page_count: JsonU64(checkpoint.page_count),
             checkpoint: base_checkpoint,
             page_map,
+            checkpoint_page_index,
             image_root_sha256: image_root,
         },
         scan_projection: None,

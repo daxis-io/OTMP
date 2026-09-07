@@ -17,6 +17,14 @@ pub struct PackIndex {
     pub entries: Vec<PackIndexEntry>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackHeader {
+    pub page_size: u32,
+    pub entry_count: u32,
+    pub index_offset: u64,
+    pub payload_offset: u64,
+}
+
 fn invalid(message: &str) -> ProtocolError {
     ProtocolError::InvalidObject(message.into())
 }
@@ -33,55 +41,79 @@ fn number<const N: usize>(bytes: &[u8], start: usize) -> Result<[u8; N], Protoco
         .map_err(|_| invalid("truncated pack"))
 }
 
-pub fn decode_pack_index(bytes: &[u8]) -> Result<PackIndex, ProtocolError> {
-    if bytes.len() < 64
-        || &bytes[..8] != b"OTMPPGPK"
-        || bytes[8..16] != [0, 1, 0, 0, 0, 0, 0, 0]
-        || bytes[40..64].iter().any(|b| *b != 0)
+pub fn decode_pack_header(header: &[u8], full_length: u64) -> Result<PackHeader, ProtocolError> {
+    if header.len() != 64
+        || &header[..8] != b"OTMPPGPK"
+        || header[8..16] != [0, 1, 0, 0, 0, 0, 0, 0]
+        || header[40..64].iter().any(|b| *b != 0)
     {
         return Err(invalid("invalid page-pack header"));
     }
-    let page_size = u32::from_be_bytes(number(bytes, 16)?);
+    let page_size = u32::from_be_bytes(number(header, 16)?);
     if !(512..=65536).contains(&page_size) || !page_size.is_power_of_two() {
         return Err(invalid("invalid pack page size"));
     }
-    let count = u32::from_be_bytes(number(bytes, 20)?) as usize;
-    let index = usize::try_from(u64::from_be_bytes(number(bytes, 24)?))
-        .map_err(|_| invalid("pack index overflow"))?;
-    let payload = usize::try_from(u64::from_be_bytes(number(bytes, 32)?))
-        .map_err(|_| invalid("pack payload overflow"))?;
-    if count == 0
-        || index < 64
-        || payload > bytes.len()
-        || count > bytes.len() / 64
-        || index
-            .checked_add(count * 64)
-            .is_none_or(|end| end > payload)
+    let entry_count = u32::from_be_bytes(number(header, 20)?);
+    let index_offset = u64::from_be_bytes(number(header, 24)?);
+    let payload_offset = u64::from_be_bytes(number(header, 32)?);
+    let index_end = index_offset
+        .checked_add(
+            u64::from(entry_count)
+                .checked_mul(64)
+                .ok_or_else(|| invalid("pack index overflow"))?,
+        )
+        .ok_or_else(|| invalid("pack index overflow"))?;
+    if entry_count == 0
+        || index_offset < 64
+        || index_end > payload_offset
+        || payload_offset > full_length
     {
         return Err(invalid("invalid pack index bounds"));
+    }
+    Ok(PackHeader {
+        page_size,
+        entry_count,
+        index_offset,
+        payload_offset,
+    })
+}
+
+pub fn decode_pack_index_parts(
+    header: &[u8],
+    index_bytes: &[u8],
+    full_length: u64,
+) -> Result<PackIndex, ProtocolError> {
+    let header = decode_pack_header(header, full_length)?;
+    let count = header.entry_count as usize;
+    if index_bytes.len()
+        != count
+            .checked_mul(64)
+            .ok_or_else(|| invalid("pack index overflow"))?
+    {
+        return Err(invalid("truncated pack index"));
     }
     let mut entries = Vec::with_capacity(count);
     let mut ranges = Vec::with_capacity(count);
     let mut previous = 0;
     for i in 0..count {
-        let start = index + i * 64;
-        let page_number = u64::from_be_bytes(number(bytes, start)?);
-        let offset = u64::from_be_bytes(number(bytes, start + 8)?);
-        let stored_length = u32::from_be_bytes(number(bytes, start + 16)?);
-        let raw_length = u32::from_be_bytes(number(bytes, start + 20)?);
-        let codec = match bytes[start + 24] {
+        let start = i * 64;
+        let page_number = u64::from_be_bytes(number(index_bytes, start)?);
+        let offset = u64::from_be_bytes(number(index_bytes, start + 8)?);
+        let stored_length = u32::from_be_bytes(number(index_bytes, start + 16)?);
+        let raw_length = u32::from_be_bytes(number(index_bytes, start + 20)?);
+        let codec = match index_bytes[start + 24] {
             0 => PageCodec::None,
             1 => PageCodec::Zstd,
             _ => return Err(invalid("unsupported pack codec")),
         };
         if page_number <= previous
-            || bytes[start + 25..start + 32].iter().any(|b| *b != 0)
-            || raw_length != page_size
+            || index_bytes[start + 25..start + 32].iter().any(|b| *b != 0)
+            || raw_length != header.page_size
             || stored_length == 0
-            || offset < payload as u64
+            || offset < header.payload_offset
             || offset
                 .checked_add(u64::from(stored_length))
-                .is_none_or(|end| end > bytes.len() as u64)
+                .is_none_or(|end| end > full_length)
             || codec == PageCodec::None && stored_length != raw_length
         {
             return Err(invalid("invalid pack entry"));
@@ -94,14 +126,35 @@ pub fn decode_pack_index(bytes: &[u8]) -> Result<PackIndex, ProtocolError> {
             stored_length,
             raw_length,
             codec,
-            page_sha256: Sha256::from_bytes(number(bytes, start + 32)?),
+            page_sha256: Sha256::from_bytes(number(index_bytes, start + 32)?),
         });
     }
     ranges.sort_unstable();
     if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
         return Err(invalid("overlapping pack payloads"));
     }
-    Ok(PackIndex { page_size, entries })
+    Ok(PackIndex {
+        page_size: header.page_size,
+        entries,
+    })
+}
+
+pub fn decode_pack_index(bytes: &[u8]) -> Result<PackIndex, ProtocolError> {
+    let header = decode_pack_header(
+        bytes.get(..64).ok_or_else(|| invalid("truncated pack"))?,
+        bytes.len() as u64,
+    )?;
+    let start = usize::try_from(header.index_offset).map_err(|_| invalid("pack index overflow"))?;
+    let end = start
+        .checked_add(header.entry_count as usize * 64)
+        .ok_or_else(|| invalid("pack index overflow"))?;
+    decode_pack_index_parts(
+        &bytes[..64],
+        bytes
+            .get(start..end)
+            .ok_or_else(|| invalid("truncated pack index"))?,
+        bytes.len() as u64,
+    )
 }
 
 pub fn encode_page_pack(

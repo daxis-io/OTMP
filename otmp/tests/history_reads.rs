@@ -37,6 +37,6 @@ async fn historical_pin_reads_each_parent_object_once() {
             .pin_metadata(MetadataSelection::TableVersion(0))
             .await
             .unwrap();
-        assert_eq!(store.read_count() - before, 4 + 3 * (index + 1));
+        assert_eq!(store.read_count() - before, 4 + 4 * (index + 1));
     }
 }

@@ -1,3 +1,4 @@
+use crate::sql_writer::Writer;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,7 +9,7 @@ use otmp_protocol::{
     encode_partition_tuple, encode_typed_scalar, partition_hash,
 };
 use rusqlite::config::DbConfig;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::{FileFormat, RuntimeError};
 
@@ -22,11 +23,57 @@ pub(crate) struct CheckpointImage {
     pub path: PathBuf,
     pub bytes: Vec<u8>,
     pub page_count: u64,
+    pub changed_pages: BTreeMap<u64, Vec<u8>>,
 }
 
 pub(crate) struct MaterializedImage {
     _directory: tempfile::TempDir,
     pub path: PathBuf,
+}
+
+fn finish_turso(
+    writer: crate::cow_writer::CandidateWriter,
+) -> Result<CheckpointImage, RuntimeError> {
+    let frozen = writer.finish()?;
+    let bytes = frozen.materialize();
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("metadata.sqlite3");
+    fs::write(&path, &bytes)?;
+    Ok(CheckpointImage {
+        _directory: directory,
+        path,
+        page_count: (bytes.len() / PAGE_SIZE as usize) as u64,
+        bytes,
+        changed_pages: frozen.changed,
+    })
+}
+
+pub(crate) fn turso_genesis(input: &GenesisImage<'_>) -> Result<CheckpointImage, RuntimeError> {
+    input.schema.validate()?;
+    let writer =
+        crate::cow_writer::CandidateWriter::new(std::sync::Arc::from([]), Some(SCHEMA_SQL))?;
+    mutate_genesis(&writer.sql(), input)?;
+    finish_turso(writer)
+}
+
+pub(crate) fn turso_append(
+    parent: std::sync::Arc<[u8]>,
+    input: &AppendImage<'_>,
+) -> Result<CheckpointImage, RuntimeError> {
+    let writer = crate::cow_writer::CandidateWriter::new(parent, None)?;
+    mutate_append(&writer.sql(), input)?;
+    finish_turso(writer)
+}
+
+pub(crate) fn turso_metadata(
+    parent: std::sync::Arc<[u8]>,
+    commit: &SemanticCommit,
+    uri: &otmp_protocol::RelativeUri,
+    operations: &[crate::OperationRequest],
+) -> Result<CheckpointImage, RuntimeError> {
+    let writer = crate::cow_writer::CandidateWriter::new(parent, None)?;
+    mutate_metadata(&writer.sql(), commit, uri, operations)?;
+    finish_turso(writer)
 }
 
 pub(crate) fn open_readonly(path: &Path) -> Result<Connection, RuntimeError> {
@@ -114,18 +161,26 @@ pub(crate) fn create_genesis(input: &GenesisImage<'_>) -> Result<CheckpointImage
     ))?;
     connection.execute_batch(SCHEMA_SQL)?;
     let transaction = connection.transaction()?;
-    insert_schema(&transaction, input.schema, 0)?;
+    mutate_genesis(&Writer::Sqlite(&transaction), input)?;
+    transaction.commit()?;
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    drop(connection);
+    finish_checkpoint(directory, path)
+}
+
+fn mutate_genesis(transaction: &Writer<'_>, input: &GenesisImage<'_>) -> Result<(), RuntimeError> {
+    insert_schema(transaction, input.schema, 0)?;
     transaction.execute(
         "INSERT INTO otmp_partition_specs(partition_spec_id, created_version) VALUES(0, 0)",
-        [],
+        &[],
     )?;
     transaction.execute(
         "INSERT INTO otmp_sort_orders(sort_order_id, created_version) VALUES(0, 0)",
-        [],
+        &[],
     )?;
     transaction.execute(
         "INSERT INTO otmp_refs(ref_name, ref_type, snapshot_id, created_version, updated_version) VALUES('main', 'branch', NULL, 0, 0)",
-        [],
+        &[],
     )?;
     for feature in [
         "otmp.core.v2",
@@ -135,7 +190,7 @@ pub(crate) fn create_genesis(input: &GenesisImage<'_>) -> Result<CheckpointImage
     ] {
         transaction.execute(
             "INSERT INTO otmp_features(feature_name, requirement, enabled_version) VALUES(?1, 'both', 0)",
-            [feature],
+            params![feature],
         )?;
     }
     transaction.execute(
@@ -173,10 +228,7 @@ pub(crate) fn create_genesis(input: &GenesisImage<'_>) -> Result<CheckpointImage
             input.metadata_json,
         ],
     )?;
-    transaction.commit()?;
-    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-    drop(connection);
-    finish_checkpoint(directory, path)
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -190,9 +242,18 @@ pub(crate) fn apply_append(
     let mut connection = Connection::open(&path)?;
     connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE;")?;
     let transaction = connection.transaction()?;
+    mutate_append(&Writer::Sqlite(&transaction), input)?;
+    transaction.commit()?;
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    drop(connection);
+    finish_checkpoint(directory, path)
+}
+
+#[allow(clippy::too_many_lines)] // One ordered semantic append shared by both engines.
+fn mutate_append(transaction: &Writer<'_>, input: &AppendImage<'_>) -> Result<(), RuntimeError> {
     let parent_version: i64 = transaction.query_row(
         "SELECT table_version FROM otmp_meta WHERE singleton=1",
-        [],
+        &[],
         |row| row.get(0),
     )?;
     if parent_version
@@ -210,7 +271,7 @@ pub(crate) fn apply_append(
             input.snapshot_id.as_bytes().as_slice(),
             input.parent_snapshot_id.map(|id| id.as_bytes().to_vec()),
             sqlite_i64(input.sequence_number, "sequence number")?,
-            current_schema(&transaction)?,
+            current_schema(transaction)?,
             sqlite_i64(input.table_version, "table version")?,
             input.created_at_ms,
             canonical_string(input.summary)?,
@@ -330,10 +391,7 @@ pub(crate) fn apply_append(
             sqlite_i64(input.sequence_number, "sequence number")?,
         ],
     )?;
-    transaction.commit()?;
-    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-    drop(connection);
-    finish_checkpoint(directory, path)
+    Ok(())
 }
 
 pub(crate) fn materialize(bytes: &[u8]) -> Result<MaterializedImage, RuntimeError> {
@@ -1557,13 +1615,14 @@ fn finish_checkpoint(
         _directory: directory,
         path,
         bytes,
+        changed_pages: BTreeMap::new(),
         page_count: u64::try_from(page_count)
             .map_err(|_| RuntimeError::Corrupt("invalid page count".into()))?,
     })
 }
 
 pub(crate) fn insert_schema(
-    transaction: &Transaction<'_>,
+    transaction: &Writer<'_>,
     schema: &Schema,
     version: u64,
 ) -> Result<(), RuntimeError> {
@@ -1593,7 +1652,7 @@ pub(crate) fn insert_schema(
 }
 
 fn insert_fields(
-    transaction: &Transaction<'_>,
+    transaction: &Writer<'_>,
     schema_id: u32,
     parent: Option<u32>,
     fields: &[Field],
@@ -1646,10 +1705,10 @@ fn insert_fields(
     Ok(())
 }
 
-fn current_schema(transaction: &Transaction<'_>) -> Result<i64, rusqlite::Error> {
+fn current_schema(transaction: &Writer<'_>) -> Result<i64, RuntimeError> {
     transaction.query_row(
         "SELECT current_schema_id FROM otmp_meta WHERE singleton=1",
-        [],
+        &[],
         |row| row.get(0),
     )
 }
@@ -2185,7 +2244,19 @@ pub(crate) fn apply_metadata(
     let mut connection = Connection::open(&path)?;
     connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE;")?;
     let tx = connection.transaction()?;
-    crate::runtime::transactions::apply_operations(&tx, operations, commit.table_version.0)?;
+    mutate_metadata(&Writer::Sqlite(&tx), commit, uri, operations)?;
+    tx.commit()?;
+    drop(connection);
+    finish_checkpoint(directory, path)
+}
+
+fn mutate_metadata(
+    tx: &Writer<'_>,
+    commit: &SemanticCommit,
+    uri: &otmp_protocol::RelativeUri,
+    operations: &[crate::OperationRequest],
+) -> Result<(), RuntimeError> {
+    crate::runtime::transactions::apply_operations(tx, operations, commit.table_version.0)?;
     let hash = otmp_protocol::object_hash(&canonical_json::to_vec(commit)?);
     let version = sqlite_i64(commit.table_version.0, "version")?;
     let intent = &commit.intents[0];
@@ -2202,9 +2273,7 @@ pub(crate) fn apply_metadata(
         ],
     )?;
     tx.execute("UPDATE otmp_meta SET table_version=?1,semantic_state_sha256=?2,last_commit_id=?3,last_commit_sha256=?4", params![version,commit.semantic_state_sha256.as_bytes().as_slice(),commit.commit_id.as_bytes().as_slice(),hash.as_bytes().as_slice()])?;
-    tx.commit()?;
-    drop(connection);
-    finish_checkpoint(directory, path)
+    Ok(())
 }
 
 pub(crate) fn validate_transition(

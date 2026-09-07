@@ -9,12 +9,11 @@ pub use transactions::{
 };
 
 use otmp_protocol::{
-    CHECKPOINT_MEDIA_TYPE, COMMIT_MEDIA_TYPE, CORE_FEATURE, CanonicalValue, FeatureSet,
-    GENERATION_MEDIA_TYPE, Generation, Head, Id, IntentRecord, JsonI64, JsonU64, LogicalType,
-    MetadataImage, ObjectReference, PARQUET_FEATURE, ProtocolError, RelativeUri,
-    SQLITE_COW_FEATURE, Schema, SemanticCommit, Sha256, TypedScalar, canonical_json,
-    encode_partition_tuple, encode_typed_scalar, genesis_state_hash, image_root_hash, intent_hash,
-    next_state_hash, object_hash, partition_hash,
+    COMMIT_MEDIA_TYPE, CORE_FEATURE, CanonicalValue, FeatureSet, GENERATION_MEDIA_TYPE, Generation,
+    Head, Id, IntentRecord, JsonI64, JsonU64, LogicalType, MetadataImage, ObjectReference,
+    PARQUET_FEATURE, ProtocolError, RelativeUri, SQLITE_COW_FEATURE, Schema, SemanticCommit,
+    Sha256, TypedScalar, canonical_json, encode_partition_tuple, encode_typed_scalar,
+    genesis_state_hash, image_root_hash, intent_hash, next_state_hash, object_hash, partition_hash,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use uuid::Uuid;
@@ -289,7 +288,9 @@ pub struct PinnedTable {
     commit: SemanticCommit,
     generation: Generation,
     current_main: Option<Id>,
-    checkpoint: std::sync::Arc<StoredObject>,
+    _checkpoint: std::sync::Arc<StoredObject>,
+    page_tree: Option<std::sync::Arc<crate::physical::Tree>>,
+    resolved: std::sync::Arc<[u8]>,
     image: MaterializedImage,
 }
 
@@ -452,7 +453,7 @@ impl<S: ObjectStore> Table<S> {
         let operation_json = canonical_text(&commit.operations)?;
         let metadata_json = canonical_text(&commit.metadata)?;
         let features_json = canonical_text(&features)?;
-        let checkpoint = image::create_genesis(&GenesisImage {
+        let checkpoint = image::turso_genesis(&GenesisImage {
             table_id,
             schema: &request.schema,
             created_at_ms,
@@ -655,28 +656,8 @@ impl<S: ObjectStore> Table<S> {
                 "generation does not match HEAD".into(),
             ));
         }
-        let checkpoint_ref = ObjectReference {
-            uri: generation.metadata_image.checkpoint.uri.clone(),
-            sha256: generation.metadata_image.checkpoint.sha256,
-            length: Some(generation.metadata_image.checkpoint.length),
-            media_type: Some(CHECKPOINT_MEDIA_TYPE.into()),
-        };
-        let checkpoint = self.read_metadata(&checkpoint_ref).await?;
-        if checkpoint.bytes.len() % image::PAGE_SIZE as usize != 0
-            || (checkpoint.bytes.len() / image::PAGE_SIZE as usize) as u64
-                != generation.metadata_image.page_count.0
-            || image_root_hash(
-                head.table_id,
-                head.table_version.0,
-                image::PAGE_SIZE,
-                generation.metadata_image.page_count.0,
-                generation.metadata_image.checkpoint.sha256,
-                None,
-            ) != generation.metadata_image.image_root_sha256
-        {
-            return Err(RuntimeError::Corrupt("metadata image root mismatch".into()));
-        }
-        let image = image::materialize(&checkpoint.bytes)?;
+        let physical = self.resolve_generation(&generation).await?;
+        let image = image::materialize(&physical.bytes)?;
         let reader_features_json = canonical_text(&head.required_reader_features)?;
         let writer_features_json = canonical_text(&head.required_writer_features)?;
         image::validate(
@@ -705,7 +686,9 @@ impl<S: ObjectStore> Table<S> {
             head,
             commit,
             generation,
-            checkpoint,
+            resolved: physical.bytes,
+            _checkpoint: physical.checkpoint,
+            page_tree: physical.tree,
             image,
         })
     }
@@ -900,12 +883,9 @@ impl<S: ObjectStore> Table<S> {
                 }
             }
             put_immutable(&self.store, &candidate.commit_uri, &candidate.commit_bytes).await?;
-            put_immutable(
-                &self.store,
-                &candidate.checkpoint_uri,
-                &candidate.checkpoint_bytes,
-            )
-            .await?;
+            for artifact in &candidate.image_artifacts {
+                put_immutable(&self.store, &artifact.uri, &artifact.bytes).await?;
+            }
             put_immutable(
                 &self.store,
                 &candidate.generation_uri,
@@ -990,8 +970,7 @@ struct Candidate<R = AppendResult> {
     semantic_state: Sha256,
     commit_uri: RelativeUri,
     commit_bytes: Vec<u8>,
-    checkpoint_uri: RelativeUri,
-    checkpoint_bytes: Vec<u8>,
+    image_artifacts: Vec<crate::physical::Artifact>,
     generation_uri: RelativeUri,
     generation_bytes: Vec<u8>,
     head_bytes: Vec<u8>,
@@ -1193,8 +1172,8 @@ fn build_candidate(
             })
         })
         .collect::<Result<Vec<_>, RuntimeError>>()?;
-    let checkpoint = image::apply_append(
-        &parent.checkpoint.bytes,
+    let checkpoint = image::turso_append(
+        parent.resolved.clone(),
         &AppendImage {
             table_version,
             created_at_ms,
@@ -1232,7 +1211,7 @@ fn finish_candidate<R>(
     commit: &SemanticCommit,
     commit_uri: RelativeUri,
     commit_bytes: Vec<u8>,
-    checkpoint: image::CheckpointImage,
+    mut checkpoint: image::CheckpointImage,
     result: R,
 ) -> Result<Candidate<R>, RuntimeError> {
     commit.validate_runtime_profile()?;
@@ -1240,10 +1219,6 @@ fn finish_candidate<R>(
     let commit_id = commit.commit_id;
     let created_at_ms = commit.created_at_ms.0;
     let commit_hash = object_hash(&commit_bytes);
-    let checkpoint_hash = object_hash(&checkpoint.bytes);
-    let checkpoint_id = new_id();
-    let checkpoint_uri: RelativeUri =
-        format!("_otmp/checkpoints/{table_version}/{checkpoint_id}.sqlite3").parse()?;
     image::validate(
         &checkpoint.path,
         &ExpectedImage {
@@ -1258,6 +1233,45 @@ fn finish_candidate<R>(
             previous_semantic_state: commit.previous_semantic_state_sha256,
         },
     )?;
+    let incremental = crate::physical::persist(
+        parent.page_tree.as_ref(),
+        &checkpoint.changed_pages,
+        checkpoint.page_count,
+    )?;
+    let (base_checkpoint, page_map, image_artifacts) = if incremental.root.is_none()
+        || incremental.reachable_bytes >= checkpoint.bytes.len() as u64
+    {
+        let hash = object_hash(&checkpoint.bytes);
+        let uri: RelativeUri =
+            format!("_otmp/checkpoints/{table_version}/{}.sqlite3", new_id()).parse()?;
+        (
+            otmp_protocol::Checkpoint {
+                table_version: JsonU64(table_version),
+                uri: uri.clone(),
+                sha256: hash,
+                length: JsonU64(checkpoint.bytes.len() as u64),
+            },
+            None,
+            vec![crate::physical::Artifact {
+                uri,
+                bytes: std::mem::take(&mut checkpoint.bytes),
+            }],
+        )
+    } else {
+        (
+            parent.generation.metadata_image.checkpoint.clone(),
+            incremental.root,
+            incremental.artifacts,
+        )
+    };
+    let image_root = image_root_hash(
+        parent.head.table_id,
+        table_version,
+        image::PAGE_SIZE,
+        checkpoint.page_count,
+        base_checkpoint.sha256,
+        page_map.as_ref().map(|root| root.sha256),
+    );
     let generation_id = new_id();
     let generation_uri: RelativeUri =
         format!("_otmp/generations/{table_version}/{generation_id}.json").parse()?;
@@ -1280,21 +1294,9 @@ fn finish_candidate<R>(
             codec: SQLITE_COW_FEATURE.into(),
             page_size: image::PAGE_SIZE,
             page_count: JsonU64(checkpoint.page_count),
-            checkpoint: otmp_protocol::Checkpoint {
-                table_version: JsonU64(table_version),
-                uri: checkpoint_uri.clone(),
-                sha256: checkpoint_hash,
-                length: JsonU64(checkpoint.bytes.len() as u64),
-            },
-            page_map: None,
-            image_root_sha256: image_root_hash(
-                parent.head.table_id,
-                table_version,
-                image::PAGE_SIZE,
-                checkpoint.page_count,
-                checkpoint_hash,
-                None,
-            ),
+            checkpoint: base_checkpoint,
+            page_map,
+            image_root_sha256: image_root,
         },
         scan_projection: None,
         metadata: BTreeMap::new(),
@@ -1335,8 +1337,7 @@ fn finish_candidate<R>(
         semantic_state: hash_from_blob(committed_state)?,
         commit_uri,
         commit_bytes,
-        checkpoint_uri,
-        checkpoint_bytes: checkpoint.bytes,
+        image_artifacts,
         generation_uri,
         generation_bytes,
         head_bytes: canonical_json::to_vec(&head)?,

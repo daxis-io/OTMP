@@ -16,3 +16,5 @@ subprocess.run(['cargo', 'test', '-p', 'otmp', '--lib',
                 'canonical_packages_regenerate_from_retained_commits'], cwd=root, check=True)
 subprocess.run(['cargo', 'test', '-p', 'otmp-protocol', '--test',
                 'conformance_fixtures'], cwd=root, check=True)
+
+subprocess.run(['python3', 'conformance/cow.py', '--check'], cwd=root, check=True)

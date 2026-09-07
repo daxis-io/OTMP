@@ -51,11 +51,8 @@ do
     exit 1
   fi
 
-  checkpoint_path="$(find "$table/_otmp/checkpoints/$expected_version" -type f -name '*.sqlite3' -print -quit)"
-  if [[ -z "$checkpoint_path" ]]; then
-    echo "failpoint $failpoint has no published checkpoint for version $expected_version" >&2
-    exit 1
-  fi
+  checkpoint_path="$case_root/resolved.sqlite3"
+  python3 "$repo_root/conformance/cow.py" --resolve "$table" --output "$checkpoint_path"
   integrity="$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("PRAGMA integrity_check").fetchone()[0])' "$checkpoint_path")"
   if [[ "$integrity" != "ok" ]]; then
     echo "failpoint $failpoint checkpoint failed upstream sqlite3 integrity_check: $integrity" >&2

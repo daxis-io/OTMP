@@ -1,3 +1,5 @@
+#[path = "support/resolved.rs"]
+mod resolved;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -6,8 +8,7 @@ use otmp::{
     SnapshotMetadata, SourceFingerprint, Table,
 };
 use otmp_protocol::{
-    CanonicalValue, Field, Generation, Head, LogicalType, Schema, SemanticCommit, Sha256,
-    canonical_json,
+    CanonicalValue, Field, Head, LogicalType, Schema, SemanticCommit, Sha256, canonical_json,
 };
 
 fn schema() -> Schema {
@@ -125,14 +126,14 @@ async fn published_commit_and_checkpoint(
         .await
         .unwrap();
     let commit = canonical_json::from_slice_canonical(&commit_bytes).unwrap();
-    let generation_bytes = tokio::fs::read(table_root.join(head.metadata_generation.uri.as_str()))
-        .await
-        .unwrap();
-    let generation: Generation = canonical_json::from_slice_canonical(&generation_bytes).unwrap();
-    let connection = rusqlite::Connection::open(
-        table_root.join(generation.metadata_image.checkpoint.uri.as_str()),
+    let path = table_root.join("resolved-test.sqlite3");
+    tokio::fs::write(
+        &path,
+        resolved::current(&LocalObjectStore::new(table_root).unwrap()).await,
     )
+    .await
     .unwrap();
+    let connection = rusqlite::Connection::open(path).unwrap();
     (commit, connection)
 }
 

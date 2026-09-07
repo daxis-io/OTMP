@@ -788,7 +788,7 @@ pub struct MetadataImage {
     pub page_size: u32,
     pub page_count: JsonU64,
     pub checkpoint: Checkpoint,
-    pub page_map: Option<CanonicalValue>,
+    pub page_map: Option<crate::PageMapRoot>,
     pub image_root_sha256: Sha256,
 }
 
@@ -816,12 +816,13 @@ impl Generation {
             || self.format_version != 1
             || self.metadata_image.codec != "otmp.metadata.sqlite3-cow.v1"
             || self.metadata_image.page_size != 4096
-            || self.metadata_image.page_map.is_some()
             || self.scan_projection.is_some()
-            || self.metadata_image.checkpoint.table_version != self.table_version
+            || self.metadata_image.checkpoint.table_version > self.table_version
+            || self.metadata_image.page_map.is_none()
+                && self.metadata_image.checkpoint.table_version != self.table_version
         {
             return Err(ProtocolError::InvalidObject(
-                "generation is outside the local/full-image profile".into(),
+                "generation is outside the runtime metadata-image profile".into(),
             ));
         }
         Ok(())

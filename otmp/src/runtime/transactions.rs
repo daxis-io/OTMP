@@ -4,7 +4,8 @@ use super::{
     SemanticCommit, Serialize, Sha256, Table, canonical_json, canonical_text, commit_body,
     finish_candidate, id_from_blob, image, intent_hash, new_id, next_state_hash, now_ms,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use crate::sql_writer::Writer;
+use rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -365,8 +366,8 @@ impl<'a> PreparedTransaction<'a> {
         let commit_bytes = canonical_json::to_vec(&commit)?;
         let commit_uri: RelativeUri =
             format!("_otmp/commits/{table_version}/{commit_id}.json").parse()?;
-        let checkpoint = image::apply_metadata(
-            &self.base.checkpoint.bytes,
+        let checkpoint = image::turso_metadata(
+            self.base.resolved.clone(),
             &commit,
             &commit_uri,
             &self.request.operations,
@@ -389,7 +390,7 @@ fn validate_ref_name<'a>(name: &'a str, refs: &mut BTreeSet<&'a str>) -> Result<
 }
 
 pub(crate) fn apply_operations(
-    tx: &Transaction<'_>,
+    tx: &Writer<'_>,
     operations: &[OperationRequest],
     version: u64,
 ) -> Result<(), RuntimeError> {
@@ -403,7 +404,10 @@ pub(crate) fn apply_operations(
                     tx.execute("INSERT INTO otmp_properties VALUES(?1,?2,?3) ON CONFLICT(property_key) DO UPDATE SET value_json=excluded.value_json, updated_version=excluded.updated_version", params![key, canonical_text(value)?, version])?;
                 }
                 for key in removals {
-                    tx.execute("DELETE FROM otmp_properties WHERE property_key=?1", [key])?;
+                    tx.execute(
+                        "DELETE FROM otmp_properties WHERE property_key=?1",
+                        params![key],
+                    )?;
                 }
             }
             OperationRequest::CreateRef {
@@ -427,8 +431,11 @@ pub(crate) fn apply_operations(
                 materialize_branch(tx, name, Some(*snapshot_id))?;
             }
             OperationRequest::DropRef { name, .. } => {
-                tx.execute("DELETE FROM otmp_ref_live_files WHERE ref_name=?1", [name])?;
-                tx.execute("DELETE FROM otmp_refs WHERE ref_name=?1", [name])?;
+                tx.execute(
+                    "DELETE FROM otmp_ref_live_files WHERE ref_name=?1",
+                    params![name],
+                )?;
+                tx.execute("DELETE FROM otmp_refs WHERE ref_name=?1", params![name])?;
             }
             OperationRequest::AddSchema { schema, .. } => image::insert_schema(
                 tx,
@@ -436,22 +443,31 @@ pub(crate) fn apply_operations(
                 u64::try_from(version).map_err(|_| invalid("negative version"))?,
             )?,
             OperationRequest::SetCurrentSchema { schema_id, .. } => {
-                image::read_schema(tx, *schema_id).map_err(|_| {
-                    invalid("selected schema must already exist in operation order")
-                })?;
-                tx.execute("UPDATE otmp_meta SET current_schema_id=?1", [schema_id])?;
+                tx.query_row(
+                    "SELECT schema_id FROM otmp_schemas WHERE schema_id=?1",
+                    params![schema_id],
+                    |row| row.get::<i64>(0),
+                )
+                .map_err(|_| invalid("selected schema must already exist in operation order"))?;
+                tx.execute(
+                    "UPDATE otmp_meta SET current_schema_id=?1",
+                    params![schema_id],
+                )?;
             }
         }
     }
     Ok(())
 }
 fn materialize_branch(
-    tx: &Transaction<'_>,
+    tx: &Writer<'_>,
     name: &str,
     snapshot: Option<Id>,
 ) -> Result<(), RuntimeError> {
-    tx.execute("DELETE FROM otmp_ref_live_files WHERE ref_name=?1", [name])?;
-    for id in super::history::ancestry(tx, snapshot)? {
+    tx.execute(
+        "DELETE FROM otmp_ref_live_files WHERE ref_name=?1",
+        params![name],
+    )?;
+    for id in tx.ancestry(snapshot)? {
         tx.execute("INSERT INTO otmp_ref_live_files SELECT ?1,c.file_id,c.snapshot_id,s.sequence_number,s.sequence_number FROM otmp_snapshot_file_changes c JOIN otmp_snapshots s USING(snapshot_id) WHERE c.snapshot_id=?2 AND c.change_kind='add'", params![name, id.as_bytes().as_slice()])?;
     }
     Ok(())

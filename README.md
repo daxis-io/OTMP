@@ -1,6 +1,6 @@
 # OTMP 0.0.2-alpha
 
-This repository is an experimental Rust catalog-optional local/full-image implementation of the Open Table Metadata Protocol (OTMP).
+This repository is an experimental Rust catalog-optional implementation with incremental metadata writes and materialized readers of the Open Table Metadata Protocol (OTMP).
 
 
 ## Workspace
@@ -38,6 +38,7 @@ success is JSON on stdout; failures are structured JSON on stderr.
 
 - [Specification](spec/OTMP-0.0.2-alpha.md)
 - [Qualification and reproduction](docs/QUALIFICATION.md)
+- [Incremental metadata architecture](docs/INCREMENTAL-METADATA.md)
 - [Catalog integration](docs/CATALOG-INTEGRATION.md)
 - [Conformance fixtures](conformance/README.md)
 - [Transactions and historical reads](docs/TRANSACTIONS.md)

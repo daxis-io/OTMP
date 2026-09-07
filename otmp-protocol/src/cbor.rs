@@ -1,5 +1,9 @@
 use std::collections::BTreeMap;
 
+#[path = "page_map.rs"]
+mod page_map;
+pub use page_map::*;
+
 use crate::{ProtocolError, TypedScalar, UuidValue};
 
 #[must_use]

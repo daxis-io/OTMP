@@ -1,12 +1,19 @@
-# Local/full-image qualification
+# Materialized-reader and incremental-writer qualification
 
 OTMP is an experimental catalog-optional runtime. The evidence below applies to
-the local/full-image implementation and deterministic S3 adapter contract. It is
+the materialized-reader/incremental-writer implementation and deterministic S3 adapter contract. It is
 not full protocol conformance, live AWS/R2 qualification, or production readiness.
 The draft keeps its `0.0.2-alpha` identifiers and can regenerate fixtures before
 the official release without compatibility or migration promises.
 
 ## Demonstrated capabilities
+
+- Turso candidates for genesis and all existing transaction operations, with
+  initialization-through-close page capture and SQLite replay/validation.
+- Immutable uncompressed packs, bounded zstd reads, deterministic typed page maps,
+  persistent path copying, EOF pruning, and transaction-integrated checkpoint
+  fallback. [Architecture and measured costs](INCREMENTAL-METADATA.md) records
+  the dependency qualification and evidence boundaries.
 
 - Self-contained initialization with schema 1, null main, version/revision/sequence
   zero, full SQLite checkpoints, and `otmp.refs.v1` advertised at genesis.
@@ -63,6 +70,7 @@ cargo nextest run --workspace --all-features
 cargo test --workspace --doc
 cargo test -p otmp-s3 --example provider_evidence
 python3 conformance/regenerate.py --check
+cargo test -p otmp --test incremental
 cargo test -p otmp --test static_tables
 cargo check -p otmp-protocol --target wasm32-unknown-unknown
 bash tests/run-subprocess.sh
@@ -78,7 +86,7 @@ manual/nightly and never use secrets in default PR CI.
 
 ## Crash evidence and visibility
 
-Publication orders immutable semantic commit, checkpoint, and generation before
+Publication orders immutable semantic commit, image artifacts, and generation before
 conditional HEAD replacement. The local adapter flushes files/directories,
 compares HEAD under a lock, writes a same-directory temporary HEAD, and renames
 atomically. Candidates remain invisible until publication; abandoned immutable
@@ -95,7 +103,7 @@ not proof for machine power loss, every filesystem/device, or Windows semantics.
 
 Excluded: production guarantees, complete Core Reader/Direct Writer conformance,
 physical Parquet validation, deletes/rewrites, partition/sort evolution, feature
-upgrades, GC, listing, page maps/packs, remote VFS, projection, catalog coordination,
+upgrades, GC, listing, remote VFS, projection, catalog coordination,
 deployment, and release compatibility. Live AWS and R2 behavior requires actual
 provider artifacts. Deterministic success or credential-missing runs cannot be
 promoted into provider-qualified status.
@@ -103,3 +111,5 @@ promoted into provider-qualified status.
 Storage CAS tokens remain private runtime state. They never become portable
 protocol object identities or public metadata coordinates. Unreachable staged
 and immutable objects may require later lifecycle cleanup; no GC is implemented.
+
+The [2026-09-06 local COW qualification record](qualification/2026-09-06-turso-cow.md) records the implementation checks, measurements, and engine findings.

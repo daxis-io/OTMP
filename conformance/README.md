@@ -12,3 +12,11 @@ Parquet.
 
 Run `python3 conformance/regenerate.py --check`, the protocol fixture and static
 table tests, and `git diff --exit-code`. No external setup is required.
+
+## Incremental metadata fixture
+
+`tables/incremental` retains versions 0–2 from the transaction package with one
+base checkpoint and deterministic immutable page packs/maps. Run
+`python3 conformance/cow.py --check` to regenerate artifact identities and compare
+every resolved image byte for byte with its retained full SQLite checkpoint.
+The Rust incremental tests also verify this package and its semantic history.

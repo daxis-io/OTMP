@@ -286,6 +286,19 @@ impl<S: ObjectStore> Table<S> {
         &self,
         selection: MetadataSelection,
     ) -> Result<PinnedMetadata, RuntimeError> {
+        let mut table = Self::new(self.store.clone());
+        table.metadata_cache = self.metadata_cache.clone().or_else(|| {
+            Some(std::sync::Arc::new(
+                tokio::sync::Mutex::new(BTreeMap::new()),
+            ))
+        });
+        table.select_metadata(selection).await
+    }
+
+    async fn select_metadata(
+        &self,
+        selection: MetadataSelection,
+    ) -> Result<PinnedMetadata, RuntimeError> {
         let mut state = self.pin().await?;
         let anchor = state.anchor();
         if let MetadataSelection::TableVersion(version) = selection {
@@ -597,7 +610,7 @@ impl VerifiedMetadata {
     }
 }
 impl<S: ObjectStore> Table<S> {
-    pub(super) async fn read_metadata(
+    pub(crate) async fn read_metadata(
         &self,
         reference: &ObjectReference,
     ) -> Result<std::sync::Arc<StoredObject>, RuntimeError> {

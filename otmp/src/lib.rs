@@ -1,8 +1,11 @@
-//! Catalog-free local/full-image OTMP runtime.
+//! Catalog-free OTMP runtime with incremental writes and materialized readers.
 
+mod cow_writer;
 mod error;
 mod image;
+mod physical;
 mod runtime;
+mod sql_writer;
 pub mod storage;
 
 pub use error::RuntimeError;

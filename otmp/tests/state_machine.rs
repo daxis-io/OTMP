@@ -1,3 +1,5 @@
+#[path = "support/resolved.rs"]
+mod resolved;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -9,8 +11,8 @@ use otmp::{
     SnapshotMetadata, SourceFingerprint, StorageError, Table, TransactionRetryPolicy,
 };
 use otmp_protocol::{
-    CanonicalValue, Field, Generation, Head, LogicalType, RelativeUri, Schema, SemanticCommit,
-    Sha256, canonical_json,
+    CanonicalValue, Field, Head, LogicalType, RelativeUri, Schema, SemanticCommit, Sha256,
+    canonical_json,
 };
 use tokio::io::AsyncRead;
 
@@ -316,7 +318,7 @@ impl ObjectStore for FailingArtifactStore {
 
 #[tokio::test]
 async fn partial_immutable_artifact_uploads_remain_invisible() {
-    for fail_on in 1..=3 {
+    for fail_on in 1..=4 {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("data.parquet");
         tokio::fs::write(&path, b"a").await.unwrap();
@@ -439,19 +441,7 @@ async fn assert_rebased_metadata(
         snapshot.get("metadata"),
         Some(&CanonicalValue::Object(expected_snapshot_metadata))
     );
-    let generation: Generation = canonical_json::from_slice_canonical(
-        &store
-            .read(&head.metadata_generation.uri)
-            .await
-            .unwrap()
-            .bytes,
-    )
-    .unwrap();
-    let checkpoint = store
-        .read(&generation.metadata_image.checkpoint.uri)
-        .await
-        .unwrap();
-    tokio::fs::write(checkpoint_path, checkpoint.bytes)
+    tokio::fs::write(checkpoint_path, resolved::current(store).await)
         .await
         .unwrap();
     let connection = rusqlite::Connection::open(checkpoint_path).unwrap();

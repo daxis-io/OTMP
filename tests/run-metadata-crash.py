@@ -36,7 +36,10 @@ for kind in ('properties', 'refs'):
             expected = 1 if point == 'after_final_head_rename' else 0
             assert int(head['table_version']) == expected
             generation = json.loads((table / head['metadata_generation']['uri']).read_bytes())
-            with sqlite3.connect(table / generation['metadata_image']['checkpoint']['uri']) as db:
+            resolved = scratch / 'resolved.sqlite3'
+            subprocess.run(['python3', root / 'conformance/cow.py', '--resolve', table, '--output', resolved], check=True)
+            with sqlite3.connect(resolved) as db:
+                assert db.execute('SELECT table_version FROM otmp_meta').fetchone()[0] == expected
                 assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
                 assert db.execute('SELECT last_sequence_number FROM otmp_meta').fetchone()[0] == 0
                 assert db.execute('SELECT count(*) FROM otmp_snapshots').fetchone()[0] == 0

@@ -23,6 +23,8 @@ pub enum RuntimeError {
     Storage(#[from] StorageError),
     #[error("SQLite failure: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("Turso engine failure: {0}")]
+    Turso(String),
     #[error("I/O failure: {0}")]
     Io(#[from] std::io::Error),
     #[error("table already exists")]
@@ -59,6 +61,7 @@ impl RuntimeError {
             Self::Protocol(error) => error.code(),
             Self::Storage(error) => error.code(),
             Self::Sqlite(_) => "OTMP_SQLITE_ERROR",
+            Self::Turso(_) => "OTMP_TURSO_ERROR",
             Self::Io(_) => "OTMP_IO_ERROR",
             Self::AlreadyExists => "OTMP_ALREADY_EXISTS",
             Self::IdempotencyConflict => "OTMP_IDEMPOTENCY_CONFLICT",
@@ -90,5 +93,11 @@ impl RuntimeError {
             retryable: self.retryable(),
             details: BTreeMap::new(),
         }
+    }
+}
+
+impl From<turso_core::LimboError> for RuntimeError {
+    fn from(error: turso_core::LimboError) -> Self {
+        Self::Turso(error.to_string())
     }
 }

@@ -737,6 +737,7 @@ application/vnd.otmp.generation+json
     "page_map": {
       "uri": "_otmp/page-maps/ab/....cbor",
       "sha256": "sha256:...",
+      "length": "2048",
       "height": 2
     },
     "image_root_sha256": "sha256:..."
@@ -1031,7 +1032,19 @@ Required media type:
 application/vnd.otmp.page-map+cbor
 ```
 
-Every node is independently immutable and content-hashed.
+Every node is independently immutable and content-hashed. The generation's
+page-map root reference MUST contain `uri`, `sha256`, `length`, and `height`.
+`length` uses the JSON unsigned-integer string profile. A leaf has height zero;
+an internal node's `level` equals its height above leaves, and every child has
+level one less than its parent.
+
+The node's CBOR wire representation uses text field names and URI/codec/type
+values, native unsigned integers for every numeric field (including lengths),
+and raw 32-byte byte strings for every `sha256` and `page_sha256`. It MUST follow
+RFC 8949 Section 4.2.1 core deterministic encoding: shortest integer/length forms,
+definite lengths, and bytewise lexical ordering of encoded map keys. Duplicate,
+unknown, or noncanonical fields MUST be rejected. The shapes below are diagnostic
+notation; hash strings shown there represent raw bytes on the CBOR wire.
 
 ### 14.3 Internal node
 
@@ -2731,29 +2744,27 @@ Its generation uses a complete checkpoint and `page_map: null`. It computes
 `image_root_sha256` with the normative Section 14.7 formula, including 32 zero
 bytes for the absent page-map root. The image-root hash is not the checkpoint hash.
 
-### 32.3.1 Gate 1 Rust local/full-image profile (non-normative)
+### 32.3.1 Rust materialized-reader profile (non-normative)
 
-The implementation in the accompanying Rust proof of concept targets a narrower
-qualification slice than the Core Reader or Direct Writer profiles. Gate 1 covers
-self-contained genesis, pinned catalog-free reads, byte-verified table-relative
-staging, one non-empty atomic Parquet-descriptor append batch to `main`, stable
-idempotent retry results, conditional-publication reconciliation, and append-safe
-semantic rebase using complete SQLite checkpoints and a null page map.
+The accompanying Rust implementation supports catalog-free genesis, atomic
+append, properties, named refs, additive optional schemas, historical selection,
+stable idempotency, and conditional-publication reconciliation. Candidates run in
+embedded Turso with private WAL and page capture. SQLite remains the materialized
+reader, integrity/foreign-key validator, and semantic replay oracle.
 
-The Gate 1 implementation accepts exactly one `initialize_table` operation at
-genesis and exactly one append-only `commit_snapshot` operation thereafter. It
-rejects every other core or extension operation. On pin, it verifies that the
-supported semantic operation agrees with the relational snapshot row, target
-ref, normalized summary, file-change set, immutable file descriptors,
-partition encodings and hashes, live-file projection, and file metrics.
-It also verifies the Gate 1 history shape: no genesis snapshot, one contiguous
-append snapshot per positive table version, one `main` branch, unbroken parent
-ancestry, and a sequence allocator equal to the current snapshot sequence.
+Genesis uses a full checkpoint. Subsequent transactions use uncompressed page
+packs and persistent page maps, or a complete checkpoint when uniquely reachable
+override packs and nodes reach the candidate's full-image byte length. The
+reader supports both `none` and bounded `zstd` pages. This does not introduce an
+extra semantic version or a background checkpoint API. The retained full-image
+fixtures remain a separate, reproducible SQLite replay oracle.
 
-Gate 1 does not claim cloud correctness, Parquet semantic validation, page maps,
-remote VFS support, delete files, scan projections, garbage collection, managed
-coordination, complete Core Reader or Direct Writer conformance, or production
-readiness.
+Qualification does not claim live provider correctness, Parquet semantic
+validation, remote VFS support, delete files, scan projections, garbage
+collection, catalog coordination, complete Core Reader/Direct Writer conformance,
+or production readiness. See `docs/QUALIFICATION.md` and
+`docs/INCREMENTAL-METADATA.md` for commands, measured behavior, and remaining
+materialization/validation costs.
 
 ### 32.4 Checkpoint writer
 

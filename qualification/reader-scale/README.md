@@ -3,8 +3,14 @@
 This directory contains a small, standard-library-only runner for the native
 `reader_scale` example. It measures file-count growth, large current commits,
 repeat latency distributions, and deterministic request-delay behavior. It does
-not compile the example, prepare fixtures automatically, flush the operating
-system cache, or launch a predefined large matrix.
+not compile the example, prepare fixtures automatically, or flush the operating
+system cache. `matrix.py` and `cache_matrix.py` provide the documented experiment
+drivers.
+
+The [September 7 qualification report](evidence/2026-09-07/report.md) records
+1,130 samples across 65 configurations, the observed limits, source identities,
+and the next optimization priorities. Compressed distributions and a raw-evidence
+hash index accompany the report.
 
 ## Build before measuring
 

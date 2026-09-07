@@ -36,7 +36,7 @@ SELECT count(*) AS n, sum(id) AS total FROM t WHERE id >= 14000
 | Metadata cache hits | 131 | 18 | 0 |
 | Files considered / pruned | 0 / 0 | 16 / 14 | — |
 | Parquet bytes transferred | 0 | 1,956 | 18,580 |
-| Parquet range requests | 0 | 10 | 2 |
+| Parquet requests, including object metadata checks | 0 | 10 | 2 |
 | Files opened for data ranges | 0 | 0 | 2 |
 | Footer cache hits during execution | — | — | 2 |
 | Phase latency | 79 ms | 33 ms | 4 ms |
@@ -52,8 +52,8 @@ The shared metadata budget peaked at 22,923,438 bytes (21.86 MiB) against its
 64 MiB limit, including engine working reservations and active structural
 references. Retained scan descriptors reserved 3,736 bytes in DataFusion's
 memory pool against the 64 MiB per-scan budget. The footer cache peaked at
-129,066 bytes against its 64 MiB limit. Turso's separate page cache used its
-configured 4 MiB limit. Budget exhaustion and reservation release also have
+129,066 bytes against its 64 MiB limit. Turso's separate page cache was
+configured to 4 MiB. Budget exhaustion and reservation release also have
 deterministic tests; the workload alone is not the exhaustion test.
 
 Darwin `/usr/bin/time -l` measured a subprocess peak RSS of **82,067,456 bytes

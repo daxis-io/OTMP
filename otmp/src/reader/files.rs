@@ -4,6 +4,11 @@ use crate::reader::metadata::{
 };
 use crate::{LiveFile, ObjectStore, RuntimeError};
 
+// The draft schema fixes this primary-key index. Turso 0.7.2 otherwise chooses
+// the sequence index and scans/sorts the branch again for every batch. The file
+// ID order gives a stable seek in the pinned generation without changing membership.
+const BRANCH_FILES_SQL: &str = "SELECT f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,rf.added_snapshot_id,rf.file_sequence_number,f.created_snapshot_id,f.created_version,s.sequence_number,s.committed_table_version FROM otmp_ref_live_files rf INDEXED BY sqlite_autoindex_otmp_ref_live_files_1 LEFT JOIN otmp_files f ON f.file_id=rf.file_id LEFT JOIN otmp_snapshots s ON s.snapshot_id=f.created_snapshot_id WHERE rf.ref_name=?1 AND rf.file_id>?2 ORDER BY rf.file_id LIMIT ?3";
+
 const BYTES: usize = 1024 * 1024;
 
 pub(crate) async fn enumerate<S: ObjectStore>(
@@ -42,12 +47,24 @@ pub(crate) async fn enumerate<S: ObjectStore>(
         .branch
         .as_ref()
         .ok_or_else(|| corrupt("historical file traversal is unavailable"))?;
-    let (sequence, file) = match cursor.as_ref().map(|c| &c.state) {
-        Some(CursorState::Branch { sequence, file }) => (*sequence, *file),
-        None => (0, otmp_protocol::Id::from_bytes([0; 16])),
+    let file = match cursor.as_ref().map(|c| &c.state) {
+        Some(CursorState::Branch { file }) => *file,
+        None => otmp_protocol::Id::from_bytes([0; 16]),
         _ => return Err(corrupt("cursor mode differs from selected ref")),
     };
-    let rows = reader.engine.query("SELECT f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,rf.added_snapshot_id,rf.file_sequence_number,f.created_snapshot_id,f.created_version,s.sequence_number,s.committed_table_version FROM otmp_ref_live_files rf LEFT JOIN otmp_files f ON f.file_id=rf.file_id LEFT JOIN otmp_snapshots s ON s.snapshot_id=f.created_snapshot_id WHERE rf.ref_name=?1 AND (rf.file_sequence_number>?2 OR (rf.file_sequence_number=?2 AND rf.file_id>?3)) ORDER BY rf.file_sequence_number,rf.file_id LIMIT ?4", vec![turso_core::Value::build_text(branch.clone()), integer(i64::try_from(sequence).map_err(|_| corrupt("sequence"))?), turso_core::Value::Blob(file.as_bytes().to_vec()), integer(i64::try_from(limit).map_err(|_| corrupt("limit"))?)], limit, BYTES).await?;
+    let rows = reader
+        .engine
+        .query(
+            BRANCH_FILES_SQL,
+            vec![
+                turso_core::Value::build_text(branch.clone()),
+                turso_core::Value::Blob(file.as_bytes().to_vec()),
+                integer(i64::try_from(limit).map_err(|_| corrupt("limit"))?),
+            ],
+            limit,
+            BYTES,
+        )
+        .await?;
     let mut files = Vec::with_capacity(rows.len());
     let mut reservations = vec![reservation];
     let mut next = None;
@@ -75,10 +92,7 @@ pub(crate) async fn enumerate<S: ObjectStore>(
         }
         next = Some(FileCursor {
             pin: reader.pin_id,
-            state: CursorState::Branch {
-                sequence,
-                file: file_id,
-            },
+            state: CursorState::Branch { file: file_id },
         });
         let live = LiveFile {
             file_id,
@@ -275,5 +289,56 @@ fn opt(v: &turso_core::Value) -> Result<Option<u64>, RuntimeError> {
         Ok(None)
     } else {
         uint(v).map(Some)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn branch_pagination_seeks_without_rescanning_or_sorting() {
+        let table = crate::Table::new(crate::InMemoryObjectStore::default());
+        let schema =
+            serde_json::from_slice(include_bytes!("../../../conformance/sources/schema.json"))
+                .unwrap();
+        table
+            .initialize(crate::InitializeRequest::new(schema))
+            .await
+            .unwrap();
+        let reader = table
+            .open_metadata_reader(
+                crate::MetadataSelection::Current,
+                crate::SnapshotSelection::Ref("main".into()),
+                crate::ReaderOptions::default(),
+            )
+            .await
+            .unwrap();
+        let plan = reader
+            .engine
+            .query(
+                &format!("EXPLAIN QUERY PLAN {}", super::BRANCH_FILES_SQL),
+                vec![
+                    turso_core::Value::build_text("main"),
+                    turso_core::Value::Blob(vec![0; 16]),
+                    super::integer(256),
+                ],
+                16,
+                4096,
+            )
+            .await
+            .unwrap();
+        let details: Vec<_> = plan
+            .iter()
+            .map(|row| super::text(&row[3]).unwrap())
+            .collect();
+        assert!(
+            details
+                .iter()
+                .any(|line| line.contains("ref_name=? AND file_id>?")),
+            "pagination must seek after the previous file: {details:?}"
+        );
+        assert!(
+            !details.iter().any(|line| line.contains("SORT")),
+            "pagination must stream its index order: {details:?}"
+        );
     }
 }

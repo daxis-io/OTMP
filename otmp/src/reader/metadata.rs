@@ -20,7 +20,6 @@ pub struct FileCursor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CursorState {
     Branch {
-        sequence: u64,
         file: Id,
     },
     Snapshot {

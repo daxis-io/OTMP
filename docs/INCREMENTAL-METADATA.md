@@ -53,6 +53,15 @@ splitting at the midpoint. Updates copy affected paths, reuse unchanged nodes,
 and prune mappings beyond EOF. Mappings that happen to match the base checkpoint
 remain until a subsequent checkpoint replaces the map.
 
+Each newly published complete checkpoint also has an optional authenticated page
+index. Its root binds the checkpoint SHA-256 and length, page geometry, page
+count, and a content-addressed deterministic-CBOR tree. Leaves at height zero
+contain up to 128 contiguous raw page hashes; internal nodes contain up to 128
+contiguous child intervals. Nodes are capped at 1 MiB. Incremental generations
+reuse the base checkpoint's index unchanged. Older index-free generations remain
+valid for materialized reads, but cannot serve authenticated bounded checkpoint
+ranges.
+
 Current pins, historical pins, verification, and candidate reconstruction share
 one generation materializer. It checks checkpoint identity independently, then
 checks tree height, ordering and subtree bounds, explicit coverage beyond the
@@ -60,6 +69,9 @@ checkpoint, pack references, and the image-root hash. The final header page coun
 must agree with the exact materialized length. Historical selection and retained
 verification cache immutable objects by URI and check each repeated reference's
 declared length and hash. Verification totals include nodes and packs.
+When a checkpoint index is present, exhaustive materialization also traverses
+every index node and checks every checkpoint page hash; this is exhaustive
+verification, not the bounded on-demand reader path.
 
 ## Publication and checkpointing
 
@@ -75,6 +87,8 @@ of uniquely reachable override packs plus map nodes would equal or exceed the
 candidate's complete image size, the same transaction publishes that validated
 image as a new checkpoint with a null map. This adds no semantic version or root
 revision beyond the transaction. There is no background checkpoint API or GC.
+Index objects are written with the checkpoint before the generation makes their
+root reachable.
 
 ## Evidence and remaining costs
 
@@ -92,11 +106,12 @@ cargo test -p otmp --lib small_candidate_borrows_parent -- --nocapture
 cargo test -p otmp --test incremental small_transaction -- --nocapture
 ```
 
-Those are copy-discovery and publication improvements. Pinning still reads and
-materializes a complete logical image, and candidate validation still writes and
-checks a complete file. Historical semantic replay also retains its full-image
-cost. No remote VFS, incremental validation, provider latency, memory ceiling,
-production throughput, or live S3/R2 result is claimed by these measurements.
+Those are copy-discovery and publication improvements. Existing materialized
+pins and writer-parent validation still read and check complete images.
+Historical semantic replay retains its full-image cost. The separate
+[authenticated reader](DATAFUSION-READER.md) opens indexed generations through
+verified page ranges and retains its own local measurement evidence; these COW
+upload measurements do not establish provider latency or live AWS/R2 results.
 
 `conformance/tables/incremental` retains versions 0–2 using deterministic pack/map
 identities. `conformance/cow.py --check` independently reconstructs byte-identical

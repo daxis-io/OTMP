@@ -1,11 +1,11 @@
 # OTMP 0.0.2-alpha
 
-This repository is an experimental Rust catalog-optional implementation with incremental metadata writes and materialized readers of the Open Table Metadata Protocol (OTMP).
+This repository is an experimental Rust catalog-optional implementation of the Open Table Metadata Protocol (OTMP), with incremental metadata writes, authenticated metadata range reads, and a native DataFusion Parquet reader. Materialized SQLite readers remain the exhaustive validation oracle.
 
 
 ## Workspace
 
-The workspace contains four crates:
+The workspace contains five crates:
 
 - `otmp-protocol`: portable protocol values, canonical codecs, validation, and
   domain-separated hashes;
@@ -13,6 +13,8 @@ The workspace contains four crates:
   seam, staging, and publication state machine;
 - `otmp-cli`: a local-directory command adapter;
 - `otmp-s3`: a bounded conditional-put adapter and separate provider-evidence harness.
+- `otmp-datafusion`: a DataFusion 55.0.0 table provider pinned to an authenticated
+  metadata generation, with typed file pruning and native Parquet execution.
 
 `conformance/` contains language-neutral codec/hash fixtures and self-contained
 table packages. `tests/` contains the subprocess crash-evidence harness and is
@@ -39,6 +41,7 @@ success is JSON on stdout; failures are structured JSON on stderr.
 - [Specification](spec/OTMP-0.0.2-alpha.md)
 - [Qualification and reproduction](docs/QUALIFICATION.md)
 - [Incremental metadata architecture](docs/INCREMENTAL-METADATA.md)
+- [DataFusion reader and bounded metadata access](docs/DATAFUSION-READER.md)
 - [Catalog integration](docs/CATALOG-INTEGRATION.md)
 - [Conformance fixtures](conformance/README.md)
 - [Transactions and historical reads](docs/TRANSACTIONS.md)

@@ -1,12 +1,19 @@
-# Materialized-reader and incremental-writer qualification
+# Reader and incremental-writer qualification
 
 OTMP is an experimental catalog-optional runtime. The evidence below applies to
-the materialized-reader/incremental-writer implementation and deterministic S3 adapter contract. It is
+the materialized and authenticated readers, incremental writer, and deterministic S3 adapter contract. It is
 not full protocol conformance, live AWS/R2 qualification, or production readiness.
 The draft keeps its `0.0.2-alpha` identifiers and can regenerate fixtures before
 the official release without compatibility or migration promises.
 
 ## Demonstrated capabilities
+
+- An independent DataFusion 55.0.0 provider with SQL and native Parquet scans,
+  stable schema IDs, nested fields/defaults, retained metadata generations,
+  keyset batches, conservative typed pruning, and bounded metadata/footer/plan
+  allocations. [Reader contract](DATAFUSION-READER.md) explains authentication
+  versus exhaustive verification. [Local measurements](qualification/2026-09-07-reader-local-performance.md)
+  separate cold registration, planning, and Parquet execution.
 
 - Turso candidates for genesis and all existing transaction operations, with
   initialization-through-close page capture and SQLite replay/validation.
@@ -14,6 +21,10 @@ the official release without compatibility or migration promises.
   persistent path copying, EOF pruning, and transaction-integrated checkpoint
   fallback. [Architecture and measured costs](INCREMENTAL-METADATA.md) records
   the dependency qualification and evidence boundaries.
+- Authenticated checkpoint-page indexes for complete checkpoints: deterministic
+  128-way CBOR trees bind every raw checkpoint page hash to checkpoint identity.
+  Index-free retained fixtures still support materialized reads; authenticated
+  bounded range reads report them unavailable.
 
 - Self-contained initialization with schema 1, null main, version/revision/sequence
   zero, full SQLite checkpoints, and `otmp.refs.v1` advertised at genesis.
@@ -102,9 +113,9 @@ not proof for machine power loss, every filesystem/device, or Windows semantics.
 ## Exclusions and evidence boundaries
 
 Excluded: production guarantees, complete Core Reader/Direct Writer conformance,
-physical Parquet validation, deletes/rewrites, partition/sort evolution, feature
-upgrades, GC, listing, remote VFS, projection, catalog coordination,
-deployment, and release compatibility. Live AWS and R2 behavior requires actual
+exhaustive Parquet integrity auditing, deletes/rewrites, partition/sort evolution,
+feature upgrades, GC, listing, SQL writes, catalog coordination, deployment, and
+release compatibility. Live AWS and R2 behavior requires actual
 provider artifacts. Deterministic success or credential-missing runs cannot be
 promoted into provider-qualified status.
 

@@ -262,6 +262,8 @@ struct Worker {
 #[derive(Clone)]
 pub(crate) struct Engine {
     worker: Arc<Mutex<Worker>>,
+    #[cfg(test)]
+    queries: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Engine {
@@ -343,7 +345,14 @@ impl Engine {
         drop(guard);
         Ok(Self {
             worker: Arc::new(Mutex::new(opened?)),
+            #[cfg(test)]
+            queries: Arc::default(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn query_count(&self) -> usize {
+        self.queries.load(Ordering::Relaxed)
     }
 
     pub(crate) async fn query(
@@ -353,7 +362,19 @@ impl Engine {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<Vec<Vec<turso_core::Value>>, RuntimeError> {
-        if max_rows == 0 || max_bytes == 0 {
+        self.query_with_row_limit(sql, params, max_rows, max_bytes, max_bytes)
+            .await
+    }
+
+    pub(crate) async fn query_with_row_limit(
+        &self,
+        sql: &str,
+        params: Vec<turso_core::Value>,
+        max_rows: usize,
+        max_bytes: usize,
+        max_row_bytes: usize,
+    ) -> Result<Vec<Vec<turso_core::Value>>, RuntimeError> {
+        if max_rows == 0 || max_bytes == 0 || max_row_bytes == 0 {
             return Err(RuntimeError::ResourceExhausted(
                 "query row and byte budgets must be non-zero".into(),
             ));
@@ -363,6 +384,8 @@ impl Engine {
                 "reader engine accepts only SELECT, WITH, EXPLAIN, and PRAGMA queries".into(),
             ));
         }
+        #[cfg(test)]
+        self.queries.fetch_add(1, Ordering::Relaxed);
         let worker = self.worker.clone();
         let sql = sql.to_owned();
         let cancellation = Arc::new(Cancellation::default());
@@ -412,6 +435,12 @@ impl Engine {
                         value_bytes(value).saturating_add(std::mem::size_of::<turso_core::Value>())
                     })
                     .sum::<usize>();
+                if row_bytes > max_row_bytes {
+                    callback_failure = Some(RuntimeError::ResourceExhausted(
+                        "metadata query row byte budget exhausted".into(),
+                    ));
+                    return Err(LimboError::TooBig);
+                }
                 let Some(next) = used.checked_add(row_bytes) else {
                     callback_failure = Some(RuntimeError::ResourceExhausted(
                         "metadata query byte budget overflowed".into(),
@@ -591,6 +620,21 @@ mod tests {
         assert!(
             matches!(result, Err(RuntimeError::Corrupt(message)) if message == "injected page transport failure")
         );
+    }
+
+    #[tokio::test]
+    async fn batch_row_bound_is_independent_of_total_bytes() {
+        let engine = Engine::open(source(fixture()), DEFAULT_PAGE_CACHE_BYTES)
+            .await
+            .unwrap();
+        let result = engine
+            .query_with_row_limit("SELECT 'oversized'", vec![], 16, 4096, 1)
+            .await;
+        assert!(
+            matches!(result, Err(RuntimeError::ResourceExhausted(_))),
+            "{result:?}"
+        );
+        assert!(engine.query("SELECT 1", vec![], 1, 64).await.is_ok());
     }
 
     #[tokio::test]

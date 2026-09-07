@@ -107,14 +107,13 @@ pub(crate) async fn enumerate<S: ObjectStore>(
             },
             sequence_number: sequence,
         };
-        let (metrics, metric_reservations) = metrics(reader, file_id, fields).await?;
-        reservations.extend(metric_reservations);
         files.push(ReaderFile {
             file: live,
             schema_id: u32::try_from(uint(&row[7])?).map_err(|_| corrupt("schema ID"))?,
-            metrics,
+            metrics: Vec::new(),
         });
     }
+    metrics(reader, &mut files, fields, &mut reservations).await?;
     Ok(FileBatch {
         files,
         next_cursor: next,
@@ -187,12 +186,10 @@ async fn historical<S: ObjectStore>(
             },
             sequence_number: uint(&r[7])?,
         };
-        let (metrics, metric_reservations) = metrics(reader, file_id, fields).await?;
-        reservations.extend(metric_reservations);
         files.push(ReaderFile {
             file: live,
             schema_id: u32::try_from(uint(&r[8])?).map_err(|_| corrupt("schema ID"))?,
-            metrics,
+            metrics: Vec::new(),
         });
     }
     let next = if files.len() == limit {
@@ -222,68 +219,110 @@ async fn historical<S: ObjectStore>(
     } else {
         None
     };
+    metrics(reader, &mut files, fields, &mut reservations).await?;
     Ok(FileBatch {
         files,
         next_cursor: next,
         _reservations: reservations,
     })
 }
+// A metric was previously limited to 64 KiB per query. Keep that row bound,
+// including the extra file-ID column, while grouping at most sixteen files.
+// This bounds a raw batch near 1 MiB even for unusually large scalar statistics.
+const METRIC_QUERY_FILES: usize = 16;
+const METRIC_ROW_BYTES: usize = 64 * 1024 + 16 + std::mem::size_of::<turso_core::Value>();
+
 async fn metrics<S: ObjectStore>(
     reader: &MetadataReader<S>,
-    file: otmp_protocol::Id,
+    files: &mut [ReaderFile],
     fields: &[u32],
-) -> Result<
-    (
-        Vec<crate::FileMetric>,
-        Vec<crate::reader::cache::Reservation>,
-    ),
-    RuntimeError,
-> {
-    let transient = reader.context.reserve_bytes(BYTES)?;
-    let mut out = Vec::new();
-    let mut retained = Vec::new();
-    for field in fields {
-        let rows=reader.engine.query("SELECT field_id,column_size_bytes,value_count,null_count,nan_count,distinct_count,lower_bound_cbor,upper_bound_cbor,metadata_json FROM otmp_file_metrics WHERE file_id=?1 AND field_id=?2",vec![turso_core::Value::Blob(file.as_bytes().to_vec()),integer(i64::from(*field))],1,64 * 1024).await?;
-        if let [r] = rows.as_slice() {
-            if r.len() != 9 {
-                return Err(corrupt("invalid metric row"));
+    retained: &mut Vec<crate::reader::cache::Reservation>,
+) -> Result<(), RuntimeError> {
+    if fields.is_empty() || files.is_empty() {
+        return Ok(());
+    }
+    let _transient = reader
+        .context
+        .reserve_bytes(METRIC_QUERY_FILES * METRIC_ROW_BYTES)?;
+    for files in files.chunks_mut(METRIC_QUERY_FILES) {
+        let placeholders = (2..=files.len() + 1)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT file_id,field_id,column_size_bytes,value_count,null_count,nan_count,distinct_count,lower_bound_cbor,upper_bound_cbor,metadata_json FROM otmp_file_metrics INDEXED BY sqlite_autoindex_otmp_file_metrics_1 WHERE field_id=?1 AND file_id IN ({placeholders})"
+        );
+        for field in fields {
+            let mut params = vec![integer(i64::from(*field))];
+            params.extend(
+                files
+                    .iter()
+                    .map(|file| turso_core::Value::Blob(file.file.file_id.as_bytes().to_vec())),
+            );
+            let rows = reader
+                .engine
+                .query_with_row_limit(
+                    &sql,
+                    params,
+                    files.len(),
+                    files.len() * METRIC_ROW_BYTES,
+                    METRIC_ROW_BYTES,
+                )
+                .await?;
+            for row in rows {
+                if row.len() != 10 {
+                    return Err(corrupt("invalid metric row"));
+                }
+                let file_id = id(&row[0])?;
+                let file = files
+                    .iter_mut()
+                    .find(|file| file.file.file_id == file_id)
+                    .ok_or_else(|| corrupt("metric belongs to an unrequested file"))?;
+                let metric = decode_metric(&row[1..])?;
+                if metric.field_id != *field
+                    || file.metrics.iter().any(|value| value.field_id == *field)
+                {
+                    return Err(corrupt("duplicate or unrequested metric field"));
+                }
+                let charge = otmp_protocol::canonical_json::to_vec(&metric)?
+                    .len()
+                    .saturating_mul(4)
+                    .saturating_add(256);
+                retained.push(reader.context.reserve_bytes(charge)?);
+                file.metrics.push(metric);
             }
-            let metric = crate::FileMetric {
-                field_id: u32::try_from(uint(&r[0])?).map_err(|_| corrupt("metric field"))?,
-                column_size_bytes: opt(&r[1])?,
-                value_count: opt(&r[2])?,
-                null_count: opt(&r[3])?,
-                nan_count: opt(&r[4])?,
-                distinct_count: opt(&r[5])?,
-                lower_bound: if matches!(r[6], turso_core::Value::Null) {
-                    None
-                } else {
-                    Some(otmp_protocol::decode_typed_scalar(
-                        crate::reader::metadata::blob(&r[6])?,
-                    )?)
-                },
-                upper_bound: if matches!(r[7], turso_core::Value::Null) {
-                    None
-                } else {
-                    Some(otmp_protocol::decode_typed_scalar(
-                        crate::reader::metadata::blob(&r[7])?,
-                    )?)
-                },
-                metadata: otmp_protocol::canonical_json::from_slice_canonical(
-                    text(&r[8])?.as_bytes(),
-                )?,
-            };
-            let charge = otmp_protocol::canonical_json::to_vec(&metric)?
-                .len()
-                .saturating_mul(4)
-                .saturating_add(256);
-            retained.push(reader.context.reserve_bytes(charge)?);
-            out.push(metric);
         }
     }
-    drop(transient);
-    Ok((out, retained))
+    Ok(())
 }
+
+fn decode_metric(r: &[turso_core::Value]) -> Result<crate::FileMetric, RuntimeError> {
+    let metric = crate::FileMetric {
+        field_id: u32::try_from(uint(&r[0])?).map_err(|_| corrupt("metric field"))?,
+        column_size_bytes: opt(&r[1])?,
+        value_count: opt(&r[2])?,
+        null_count: opt(&r[3])?,
+        nan_count: opt(&r[4])?,
+        distinct_count: opt(&r[5])?,
+        lower_bound: if matches!(r[6], turso_core::Value::Null) {
+            None
+        } else {
+            Some(otmp_protocol::decode_typed_scalar(
+                crate::reader::metadata::blob(&r[6])?,
+            )?)
+        },
+        upper_bound: if matches!(r[7], turso_core::Value::Null) {
+            None
+        } else {
+            Some(otmp_protocol::decode_typed_scalar(
+                crate::reader::metadata::blob(&r[7])?,
+            )?)
+        },
+        metadata: otmp_protocol::canonical_json::from_slice_canonical(text(&r[8])?.as_bytes())?,
+    };
+    Ok(metric)
+}
+
 fn opt(v: &turso_core::Value) -> Result<Option<u64>, RuntimeError> {
     if matches!(v, turso_core::Value::Null) {
         Ok(None)
@@ -339,6 +378,90 @@ mod tests {
         assert!(
             !details.iter().any(|line| line.contains("SORT")),
             "pagination must stream its index order: {details:?}"
+        );
+    }
+    #[tokio::test]
+    async fn metric_reads_are_batched_and_preserve_sparse_file_associations() {
+        use std::collections::BTreeMap;
+        let table = crate::Table::new(crate::InMemoryObjectStore::default());
+        let schema =
+            serde_json::from_slice(include_bytes!("../../../conformance/sources/schema.json"))
+                .unwrap();
+        table
+            .initialize(crate::InitializeRequest::new(schema))
+            .await
+            .unwrap();
+        let source = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(source.path(), b"metric fixture").unwrap();
+        let metrics: Vec<Vec<crate::FileMetric>> = (0..33)
+            .map(|i| {
+                if i % 3 == 0 {
+                    vec![]
+                } else {
+                    vec![crate::FileMetric {
+                        field_id: 1,
+                        column_size_bytes: Some(8),
+                        value_count: Some(1),
+                        null_count: Some(0),
+                        nan_count: None,
+                        distinct_count: Some(1),
+                        lower_bound: Some(otmp_protocol::TypedScalar::Int64(i)),
+                        upper_bound: Some(otmp_protocol::TypedScalar::Int64(i)),
+                        metadata: BTreeMap::new(),
+                    }]
+                }
+            })
+            .collect();
+        let files = metrics
+            .iter()
+            .enumerate()
+            .map(|(i, metrics)| crate::AppendFile {
+                source_path: source.path().into(),
+                fingerprint: crate::SourceFingerprint {
+                    sha256: otmp_protocol::Sha256::digest(b"metric fixture"),
+                    length: 14,
+                },
+                format: crate::FileFormat::Parquet,
+                record_count: 1,
+                schema_id: 1,
+                partition_spec_id: 0,
+                sort_order_id: 0,
+                partition_values: BTreeMap::new(),
+                metrics: metrics.clone(),
+                metadata: BTreeMap::from([(
+                    "ordinal".into(),
+                    otmp_protocol::CanonicalValue::Integer(i as i128),
+                )]),
+            })
+            .collect();
+        let result = table
+            .append_files(&crate::AppendRequest::new("metrics", files))
+            .await
+            .unwrap();
+        let expected: BTreeMap<_, _> = result
+            .files
+            .iter()
+            .zip(metrics)
+            .map(|(file, metrics)| (file.file_id, metrics))
+            .collect();
+        let reader = table
+            .open_metadata_reader(
+                crate::MetadataSelection::Current,
+                crate::SnapshotSelection::Ref("main".into()),
+                crate::ReaderOptions::default(),
+            )
+            .await
+            .unwrap();
+        let before = reader.engine.query_count();
+        let batch = reader.files(None, &[1], 256).await.unwrap();
+        assert_eq!(batch.files.len(), 33);
+        for file in &batch.files {
+            assert_eq!(file.metrics, expected[&file.file.file_id]);
+        }
+        let queries = reader.engine.query_count() - before;
+        assert!(
+            queries <= 4,
+            "one membership query plus at most three bounded metric queries, got {queries}"
         );
     }
 }

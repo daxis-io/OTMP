@@ -10,6 +10,7 @@ pub struct RunConfig {
     pub passes: usize,
     pub delay_ms: u64,
     pub metadata_inflight: usize,
+    pub engine_page_cache_bytes: usize,
     pub metadata_budget: usize,
     pub planning_budget: usize,
     pub record_budget: usize,
@@ -24,6 +25,7 @@ impl Default for RunConfig {
             passes: 1,
             delay_ms: 0,
             metadata_inflight: 8,
+            engine_page_cache_bytes: 4 * 1024 * 1024,
             metadata_budget: 64 * 1024 * 1024,
             planning_budget: 64 * 1024 * 1024,
             record_budget: 1024 * 1024,
@@ -68,6 +70,7 @@ pub async fn run(root: &Path, config: RunConfig) -> Result<Value, Error> {
     let options = ReaderOptions {
         cache_budget_bytes: config.metadata_budget,
         maximum_record_bytes: config.record_budget,
+        engine_page_cache_bytes: config.engine_page_cache_bytes,
         max_inflight_reads: config.metadata_inflight,
         ..ReaderOptions::default()
     };

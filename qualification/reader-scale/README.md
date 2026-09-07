@@ -255,3 +255,26 @@ joins that thread against a deadline. This avoids the polling sleeps used by
 Python's timeout-based process wait. `process_exit_ms` records process exit;
 `capture_complete_ms` (also `wall_ms`) includes output-pipe completion.
 `result_to_process_exit_ms` and `capture_after_exit_ms` expose the two gaps.
+
+## Isolate engine page-cache pressure
+
+After the main matrix, compare 4, 16, and 32 MiB engine page caches on the same
+16,384-file fixture. This option is separate from the 64 MiB shared metadata
+cache. Each process plans and executes twice through one retained provider.
+The driver interleaves capacities in balanced rotation blocks (seed 7), with
+20 processes per capacity and six or seven appearances in each position. It
+exhaustively verifies the fixture first and checks binary and fixture identities
+around every sample:
+
+```sh
+python3 qualification/reader-scale/cache_matrix.py \
+  --binary "$READER_SCALE" \
+  --root /private/tmp/otmp-reader-scale-evidence/fixtures/growth-16384 \
+  --out /private/tmp/otmp-reader-scale-cache-evidence
+```
+
+This is a separate 60-sample experiment, so the complete qualification has
+1,130 samples across 65 configurations. `engine_page_cache_bytes` is also
+accepted in an ordinary `reader_scale run` configuration; its default remains
+4 MiB. Preserve the original measured binary before rebuilding it for this
+additional harness option. The report records both source and binary identities.

@@ -188,6 +188,18 @@ def _valid_result(value: Any) -> bool:
     )
 
 
+def _start_process_waiter(process: Any, start: float) -> tuple[threading.Thread, dict[str, Any]]:
+    state: dict[str, Any] = {}
+
+    def wait() -> None:
+        state["exit_code"] = process.wait()
+        state["process_exit_ms"] = (time.monotonic() - start) * 1000
+
+    waiter = threading.Thread(target=wait, daemon=True)
+    waiter.start()
+    return waiter, state
+
+
 def capture_sample(
     binary: pathlib.Path,
     root: pathlib.Path,
@@ -220,6 +232,7 @@ def capture_sample(
     )
     stdout_thread.start()
     stderr_thread.start()
+    waiter_thread, waiter_state = _start_process_waiter(process, start)
     timed_out = False
     deadline = start + timeout_seconds
 
@@ -229,18 +242,20 @@ def capture_sample(
         except ProcessLookupError:
             pass
 
-    try:
-        exit_code = process.wait(timeout=max(0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
+    waiter_thread.join(timeout=max(0, deadline - time.monotonic()))
+    cleanup_deadline = deadline
+    if waiter_thread.is_alive():
         timed_out = True
         kill_process_group()
-        exit_code = process.wait()
+        cleanup_deadline = time.monotonic() + 1.0
+        waiter_thread.join(timeout=max(0, cleanup_deadline - time.monotonic()))
     for thread in (stdout_thread, stderr_thread):
-        thread.join(timeout=max(0, deadline - time.monotonic()))
+        thread.join(timeout=max(0, cleanup_deadline - time.monotonic()))
     if stdout_thread.is_alive() or stderr_thread.is_alive():
         timed_out = True
         kill_process_group()
         cleanup_deadline = time.monotonic() + 1.0
+        waiter_thread.join(timeout=max(0, cleanup_deadline - time.monotonic()))
         for thread in (stdout_thread, stderr_thread):
             thread.join(timeout=max(0, cleanup_deadline - time.monotonic()))
     if not stdout_thread.is_alive():
@@ -248,6 +263,9 @@ def capture_sample(
     if not stderr_thread.is_alive():
         process.stderr.close()
     end = time.monotonic()
+    exit_code = waiter_state.get("exit_code")
+    process_exit_ms = waiter_state.get("process_exit_ms")
+    capture_complete_ms = (end - start) * 1000
     stdout = b"".join(stdout_chunks).decode("utf-8", errors="replace")
     stderr = b"".join(stderr_chunks).decode("utf-8", errors="replace")
     (sample_dir / "stdout.txt").write_text(stdout)
@@ -277,9 +295,17 @@ def capture_sample(
         "exit_code": exit_code,
         "timed_out": timed_out,
         "timeout_seconds": timeout_seconds,
-        "wall_ms": (end - start) * 1000,
+        "wall_ms": capture_complete_ms,
+        "process_exit_ms": process_exit_ms,
+        "capture_complete_ms": capture_complete_ms,
+        "capture_after_exit_ms": (
+            capture_complete_ms - process_exit_ms if process_exit_ms is not None else None
+        ),
         "result_arrival_ms": arrival[0] if arrival else None,
-        "teardown_gap_ms": ((end - start) * 1000 - arrival[0]) if arrival else None,
+        "result_to_process_exit_ms": (
+            process_exit_ms - arrival[0] if arrival and process_exit_ms is not None else None
+        ),
+        "teardown_gap_ms": (capture_complete_ms - arrival[0]) if arrival else None,
         "rss": {
             "bytes": rss_bytes,
             "method": rss_method,
@@ -414,6 +440,22 @@ def build_summary(sample_dirs: Iterable[pathlib.Path]) -> dict[str, Any]:
     wall = [record["wall_ms"] for record in process_successes]
     arrival = [record["result_arrival_ms"] for record in process_successes if record["result_arrival_ms"] is not None]
     gap = [record["teardown_gap_ms"] for record in process_successes if record["teardown_gap_ms"] is not None]
+    process_exit = [
+        record["process_exit_ms"]
+        for record in process_successes
+        if record["process_exit_ms"] is not None
+    ]
+    capture_complete = [record["capture_complete_ms"] for record in process_successes]
+    capture_after_exit = [
+        record["capture_after_exit_ms"]
+        for record in process_successes
+        if record["capture_after_exit_ms"] is not None
+    ]
+    result_to_process_exit = [
+        record["result_to_process_exit_ms"]
+        for record in process_successes
+        if record["result_to_process_exit_ms"] is not None
+    ]
     rss = [record["rss"]["bytes"] for record in process_successes if record["rss"]["bytes"] is not None]
     failure_rss = [
         record["rss"]["bytes"]
@@ -425,7 +467,11 @@ def build_summary(sample_dirs: Iterable[pathlib.Path]) -> dict[str, Any]:
         "samples": {"total": total, "successful": len(successes), "failed": len(failures)},
         "latency_ms": {
             "wall": distribution(wall),
+            "process_exit": distribution(process_exit),
+            "capture_complete": distribution(capture_complete),
+            "capture_after_exit": distribution(capture_after_exit),
             "result_arrival": distribution(arrival),
+            "result_to_process_exit": distribution(result_to_process_exit),
             "teardown_gap": distribution(gap),
             "phase": success_phase["latency"],
         },

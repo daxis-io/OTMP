@@ -4,6 +4,7 @@ import pathlib
 import stat
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -46,7 +47,7 @@ class RunnerTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def execute(self, modes, timeout=2):
+    def execute(self, modes, timeout=5):
         config = self.base / "config.json"
         config.write_text(json.dumps({"test_mode": modes[0]}))
         out = self.base / "evidence"
@@ -141,7 +142,11 @@ class RunnerTests(unittest.TestCase):
         process = json.loads((out / "sample-0001" / "process.json").read_text())
         self.assertGreater(process["teardown_gap_ms"], 150)
         self.assertLess(process["result_arrival_ms"], process["wall_ms"])
+        self.assertLess(process["result_arrival_ms"], process["process_exit_ms"])
+        self.assertLessEqual(process["process_exit_ms"], process["capture_complete_ms"])
         self.assertEqual(summary["latency_ms"]["teardown_gap"]["count"], 1)
+        self.assertEqual(summary["latency_ms"]["process_exit"]["count"], 1)
+        self.assertEqual(summary["latency_ms"]["capture_after_exit"]["count"], 1)
         if process["rss"]["method"] == "unavailable":
             self.assertTrue(process["rss"]["missing"])
 
@@ -155,6 +160,27 @@ class RunnerTests(unittest.TestCase):
 
 
 class TimeParsingTests(unittest.TestCase):
+    def test_process_waiter_uses_blocking_wait_without_timeout_polling(self):
+        class PollBiasedProcess:
+            def __init__(self):
+                self.calls = []
+
+            def wait(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                if args or kwargs:
+                    raise AssertionError("timeout polling changes measured completion")
+                time.sleep(0.01)
+                return 7
+
+        process = PollBiasedProcess()
+        started = time.monotonic()
+        waiter, state = run._start_process_waiter(process, started)
+        waiter.join(1)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(process.calls, [((), {})])
+        self.assertEqual(state["exit_code"], 7)
+        self.assertGreaterEqual(state["process_exit_ms"], 10)
+
     def test_darwin_and_linux_rss(self):
         self.assertEqual(run.parse_rss(" 12345  maximum resident set size\n", "darwin"), 12345)
         self.assertEqual(

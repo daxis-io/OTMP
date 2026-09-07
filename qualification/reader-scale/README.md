@@ -188,7 +188,7 @@ that unlike workloads form one meaningful distribution.
 
 ## Reproduce the qualification matrix
 
-`matrix.py` defines 23 fixtures and 60 cases totaling 1,030 fresh-process
+`matrix.py` defines 23 fixtures and 62 cases totaling 1,070 fresh-process
 samples. Inspect the complete recipe before allocating disk or starting work:
 
 ```sh
@@ -242,3 +242,16 @@ secondary invariant violations from an expected reader resource error. Provider
 inspection); the planning phase timer includes DataFusion planning as well.
 Failed scan construction may not update the provider timer, so use the separate
 failure phase timer for those cases.
+
+The two largest growth fixtures also run with `execute: false`. Comparing their
+process RSS with executed broad scans separates memory already reached during
+planning from additional execution memory. RSS includes the allocator and all
+engine overhead; pool reservations account for the charged descriptors, not all
+process allocations. Exhaustive pre-verification reads fixture objects and can
+warm the OS cache; “cold” here always refers to new reader caches.
+
+Process completion uses a dedicated blocking wait thread; timeout enforcement
+joins that thread against a deadline. This avoids the polling sleeps used by
+Python's timeout-based process wait. `process_exit_ms` records process exit;
+`capture_complete_ms` (also `wall_ms`) includes output-pipe completion.
+`result_to_process_exit_ms` and `capture_after_exit_ms` expose the two gaps.

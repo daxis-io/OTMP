@@ -27,6 +27,8 @@ def recipes():
         case(f"{fixture}-all", fixture, {})
         case(f"{fixture}-unpruned", fixture, dict(survivors=2, pruning=False))
         case(f"{fixture}-retained", fixture, dict(survivors=2, passes=2))
+    for n in (4096, 16384):
+        case(f"growth-{n}-planning-only", f"growth-{n}", dict(execute=False))
     for n in (16, 256, 1024):
         for delay in (1, 10):
             for inflight in (1, 8):

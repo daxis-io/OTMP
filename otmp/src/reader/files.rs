@@ -43,6 +43,16 @@ pub(crate) async fn enumerate<S: ObjectStore>(
     if reader.branch.is_none() {
         return historical(reader, cursor, fields, limit, reservation).await;
     }
+    branch(reader, cursor, fields, limit, reservation).await
+}
+
+async fn branch<S: ObjectStore>(
+    reader: &MetadataReader<S>,
+    cursor: Option<FileCursor>,
+    fields: &[u32],
+    limit: usize,
+    reservation: crate::reader::cache::Reservation,
+) -> Result<FileBatch, RuntimeError> {
     let branch = reader
         .branch
         .as_ref()
@@ -232,6 +242,18 @@ async fn historical<S: ObjectStore>(
 const METRIC_QUERY_FILES: usize = 16;
 const METRIC_ROW_BYTES: usize = 64 * 1024 + 16 + std::mem::size_of::<turso_core::Value>();
 
+fn metric_sql(count: usize) -> String {
+    let placeholders = (2..=count + 1)
+        .map(|index| format!("(?{index})"))
+        .collect::<Vec<_>>()
+        .join(",");
+    // IN lists currently become full index scans in Turso 0.7.2. A bounded
+    // VALUES relation on the left of CROSS JOIN preserves indexed point probes.
+    format!(
+        "WITH requested(file_id) AS (VALUES {placeholders}) SELECT m.file_id,m.field_id,m.column_size_bytes,m.value_count,m.null_count,m.nan_count,m.distinct_count,m.lower_bound_cbor,m.upper_bound_cbor,m.metadata_json FROM requested r CROSS JOIN otmp_file_metrics m INDEXED BY sqlite_autoindex_otmp_file_metrics_1 WHERE m.file_id=r.file_id AND m.field_id=?1"
+    )
+}
+
 async fn metrics<S: ObjectStore>(
     reader: &MetadataReader<S>,
     files: &mut [ReaderFile],
@@ -245,13 +267,7 @@ async fn metrics<S: ObjectStore>(
         .context
         .reserve_bytes(METRIC_QUERY_FILES * METRIC_ROW_BYTES)?;
     for files in files.chunks_mut(METRIC_QUERY_FILES) {
-        let placeholders = (2..=files.len() + 1)
-            .map(|index| format!("?{index}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT file_id,field_id,column_size_bytes,value_count,null_count,nan_count,distinct_count,lower_bound_cbor,upper_bound_cbor,metadata_json FROM otmp_file_metrics INDEXED BY sqlite_autoindex_otmp_file_metrics_1 WHERE field_id=?1 AND file_id IN ({placeholders})"
-        );
+        let sql = metric_sql(files.len());
         for field in fields {
             let mut params = vec![integer(i64::from(*field))];
             params.extend(
@@ -381,6 +397,10 @@ mod tests {
         );
     }
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one sparse multi-batch fixture verifies indexed access, association and bounded query count"
+    )]
     async fn metric_reads_are_batched_and_preserve_sparse_file_associations() {
         use std::collections::BTreeMap;
         let table = crate::Table::new(crate::InMemoryObjectStore::default());
@@ -452,6 +472,30 @@ mod tests {
             )
             .await
             .unwrap();
+        let plan = reader
+            .engine
+            .query(
+                &format!("EXPLAIN QUERY PLAN {}", super::metric_sql(2)),
+                vec![
+                    super::integer(1),
+                    turso_core::Value::Blob(vec![1; 16]),
+                    turso_core::Value::Blob(vec![2; 16]),
+                ],
+                16,
+                4096,
+            )
+            .await
+            .unwrap();
+        let details: Vec<_> = plan
+            .iter()
+            .map(|row| super::text(&row[3]).unwrap())
+            .collect();
+        assert!(
+            details
+                .iter()
+                .any(|line| line.contains("(file_id=? AND field_id=?)")),
+            "metrics must seek by both keys: {details:?}"
+        );
         let before = reader.engine.query_count();
         let batch = reader.files(None, &[1], 256).await.unwrap();
         assert_eq!(batch.files.len(), 33);

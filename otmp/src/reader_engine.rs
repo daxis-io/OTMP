@@ -435,7 +435,7 @@ impl Engine {
                         value_bytes(value).saturating_add(std::mem::size_of::<turso_core::Value>())
                     })
                     .sum::<usize>();
-                if row_bytes > max_row_bytes {
+                if row_bytes > max_row_bytes && max_row_bytes < max_bytes {
                     callback_failure = Some(RuntimeError::ResourceExhausted(
                         "metadata query row byte budget exhausted".into(),
                     ));

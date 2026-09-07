@@ -27,6 +27,11 @@
     "reader_scale-83d3e6a": "f6f9dc13e75b1f578f15dc3f66aa76d6facd273fde9e328b0df34544360507cf"
   },
   "build_profile": "release",
+  "ci_validation": {
+    "bytes": 13390,
+    "path": "ci-validation.txt",
+    "sha256": "24a789483faf9f49fa83a749aaa2bbc2067d07d69be7fca068222b1859b07852"
+  },
   "cpu": "Apple M4 Max",
   "datafusion": "55.0.0",
   "derived_fixture_root": "/private/tmp/otmp-reader-planning-evidence/comparison-fixtures",
@@ -47,7 +52,9 @@
   "schema_version": 1,
   "source_commit": "83d3e6ad475c51cca0cce5a45eff6878b36d1c8a",
   "validation": {
-    "ci": "Final evidence commit is qualified separately by the pull request checks.",
+    "ci": "Pending publication; final-commit remote CI has not run.",
+    "comparator_rust_tests_passed": 4,
+    "comparator_strict_clippy_exit_code": 0,
     "comparison_provenance_unchanged": true,
     "full_read_attempts": 0,
     "independent_review": "Approved after two P2 findings were fixed; review-resolution.md in raw-samples.json.gz",

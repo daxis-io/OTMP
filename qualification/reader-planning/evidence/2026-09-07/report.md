@@ -198,14 +198,16 @@ does not remove that remote-request floor.
 ## Verification and evidence
 
 The final runtime source is 83d3e6ad475c51cca0cce5a45eff6878b36d1c8a. The later
-publication commit only adds the evidence and CI/README wiring. All 227 workspace
+publication commits only add the evidence and CI/README wiring. All 227 workspace
 tests passed, including deterministic S3 range-contract tests. Strict workspace
 Clippy, documentation tests, conformance regeneration, protocol WASM check,
 example tests, comparator Rust tests, Python harness tests, six native CLI smoke
 samples and cargo-deny passed locally. The first sandboxed local-HTTP test and
 advisory-lock attempts were blocked by environment permissions; their logs and
-successful permitted reruns are retained. Linux crash qualification and the six
-repository CI jobs are checked against the final PR commit separately.
+successful permitted reruns are retained. Linux crash qualification and all six
+remote CI jobs remain pending publication. The separate comparator workspace
+now has explicit locked Rust tests and strict Clippy in the CI workflow; both
+commands also passed locally ([command evidence](ci-validation.txt)).
 
 Independent review found a first-page sentinel that could skip a malformed
 zero ID and a comparison runner that could exit successfully after failed

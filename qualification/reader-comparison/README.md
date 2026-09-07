@@ -130,5 +130,8 @@ Fixture generation is part of provenance, not a timed benchmark phase. The
 Iceberg fixture has one manifest containing all current data files, while OTMP
 uses its authenticated relational metadata image. Compare observed latency and
 growth under these stated layouts; do not claim that one layout predicts every
-production Delta or Iceberg catalog. Delta is excluded because current stock
-delta-rs provider releases do not share DataFusion 55 and Arrow 59 with OTMP.
+production Delta or Iceberg catalog. Delta is excluded because the inspected stock delta-rs providers do not
+share DataFusion 55 and Arrow 59 with OTMP.
+
+The [2026-09-07 measured report](../reader-planning/evidence/2026-09-07/report.md) includes source pins, p50/p95,
+request counts, memory, raw captures and the remaining Iceberg performance gap.

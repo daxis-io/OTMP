@@ -1,4 +1,4 @@
-use super::cache::{Cache, CachedBytes, Identity};
+use super::cache::{Cache, CachedBytes, Identity, PageKey};
 use super::{ReaderOptions, ReaderStatistics};
 use crate::storage::ObjectMetadata;
 use crate::{ObjectStore, RuntimeError};
@@ -204,6 +204,18 @@ impl<S: ObjectStore> ReadContext<S> {
         }
         Ok(bytes)
     }
+    /// Reuse a retained immutable revision; uncached ranges still carry its
+    /// conditional version token and every reference is checked on lookup.
+    async fn immutable_metadata(
+        &self,
+        reference: &PageObjectReference,
+    ) -> Result<ObjectMetadata, RuntimeError> {
+        if let Some(metadata) = self.inner.cache.metadata_for(reference)? {
+            return Ok(metadata);
+        }
+        self.stat(&reference.uri).await
+    }
+
     async fn tree_node(
         &self,
         reference: &PageObjectReference,
@@ -211,7 +223,7 @@ impl<S: ObjectStore> ReadContext<S> {
         if reference.length.0 == 0 || reference.length.0 > 1024 * 1024 {
             return Err(corrupt("invalid authenticated tree node size"));
         }
-        let metadata = self.stat(&reference.uri).await?;
+        let metadata = self.immutable_metadata(reference).await?;
         self.node(reference, &metadata).await
     }
     pub(crate) async fn image(
@@ -249,6 +261,7 @@ impl<S: ObjectStore> ReadContext<S> {
         Ok(AuthenticatedImage {
             context: self.clone(),
             generation: Arc::new(generation.clone()),
+            fingerprint: generation_fingerprint(generation, &checkpoint)?,
             checkpoint,
             base_only: false,
         })
@@ -260,7 +273,36 @@ pub(crate) struct AuthenticatedImage<S> {
     context: ReadContext<S>,
     generation: Arc<Generation>,
     checkpoint: ObjectMetadata,
+    fingerprint: Sha256,
     base_only: bool,
+}
+
+/// Internal cache identity, not a protocol object digest. Streaming the complete
+/// deterministic Generation serialization binds every reference and declared
+/// length without allocating another copy of its metadata envelope. The pinned
+/// checkpoint revision also separates reopened views of a changed storage object.
+fn generation_fingerprint(
+    generation: &Generation,
+    checkpoint: &ObjectMetadata,
+) -> Result<Sha256, RuntimeError> {
+    use sha2::Digest;
+    struct HashWriter(sha2::Sha256);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter(sha2::Sha256::new());
+    writer.0.update(b"otmp.reader.authenticated-page.v1\0");
+    serde_json::to_writer(&mut writer, generation)
+        .map_err(|error| corrupt(&format!("generation fingerprint: {error}")))?;
+    writer.0.update(b"\0checkpoint-revision\0");
+    writer.0.update(checkpoint.version.as_opaque().as_bytes());
+    Ok(Sha256::from_bytes(writer.0.finalize().into()))
 }
 
 impl<S: ObjectStore> AuthenticatedImage<S> {
@@ -400,6 +442,17 @@ impl<S: ObjectStore> AuthenticatedImage<S> {
         if page == 0 || page > self.length() / 4096 || output.len() > 4096 {
             return Err(corrupt("metadata page request outside image"));
         }
+        let key = PageKey {
+            generation: self.fingerprint,
+            checkpoint: self.base_only,
+            page,
+        };
+        if let Some(bytes) = self.context.inner.cache.get_page(key)? {
+            output.copy_from_slice(&bytes.as_ref().as_ref()[..output.len()]);
+            self.context.inner.hits.fetch_add(1, Ordering::Relaxed);
+            self.context.inner.pages.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
         let page_bytes;
         let window;
         let data: &[u8];
@@ -408,7 +461,7 @@ impl<S: ObjectStore> AuthenticatedImage<S> {
             if entry.raw_length != 4096 {
                 return Err(corrupt("incorrect mapped page size"));
             }
-            let metadata = self.context.stat(&entry.pack.uri).await?;
+            let metadata = self.context.immutable_metadata(&entry.pack).await?;
             let header = self.context.range(&entry.pack, &metadata, 0..64).await?;
             let parsed = decode_pack_header(header.as_ref().as_ref(), entry.pack.length.0)?;
             if parsed.page_size != 4096 {
@@ -501,6 +554,13 @@ impl<S: ObjectStore> AuthenticatedImage<S> {
         {
             return Err(corrupt("logical SQLite header mismatch"));
         }
+        // Retain only after all authoritative path and page checks succeeded.
+        // This allocation shares the raw-range budget and its eviction policy.
+        let reservation = self.context.inner.cache.reserve(4096 + 256)?;
+        self.context
+            .inner
+            .cache
+            .insert_page(key, data.to_vec(), reservation)?;
         output.copy_from_slice(&data[..output.len()]);
         self.context.inner.pages.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -719,6 +779,140 @@ mod tests {
             image.copy_page(number, &mut page).await.unwrap();
             let start = (usize::try_from(number).unwrap() - 1) * 4096;
             assert_eq!(&page, &oracle.bytes[start..start + 4096]);
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_immutable_nodes_reuse_versions_and_check_every_reference() {
+        let (store, _, generation) = incremental().await;
+        let context = ReadContext::new(store, ReaderOptions::default()).unwrap();
+        let reference = generation
+            .metadata_image
+            .checkpoint_page_index
+            .unwrap()
+            .root
+            .reference();
+        let first = context.tree_node(&reference).await.unwrap();
+        let before = context.statistics();
+        let again = context.tree_node(&reference).await.unwrap();
+        assert_eq!(first.as_ref().as_ref(), again.as_ref().as_ref());
+        assert_eq!(
+            context.statistics().requests,
+            before.requests,
+            "an immutable cached node already pins its revision"
+        );
+        let mut changed = reference.clone();
+        changed.length.0 += 1;
+        assert!(context.tree_node(&changed).await.is_err());
+        changed = reference;
+        changed.sha256 = Sha256::digest(b"different");
+        assert!(context.tree_node(&changed).await.is_err());
+        assert_eq!(
+            context.statistics().requests,
+            before.requests,
+            "conflicting references fail before any re-stat"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticated_page_reuse_avoids_storage_requests_across_images() {
+        let (store, table, generation) = incremental().await;
+        let oracle = table.resolve_generation(&generation).await.unwrap();
+        let context = ReadContext::new(store, ReaderOptions::default()).unwrap();
+        let image = context.image(&generation).await.unwrap();
+        let mut output = [0; 4096];
+        image.copy_page(1, &mut output).await.unwrap();
+        assert_eq!(&output, &oracle.bytes[..4096]);
+        let before_reopen = context.statistics();
+        let reopened = context.image(&generation).await.unwrap();
+        let before = context.statistics();
+        assert_eq!(
+            before.requests,
+            before_reopen.requests + 1,
+            "reopening pins the checkpoint revision with one stat"
+        );
+        assert_eq!(before.bytes, before_reopen.bytes);
+        reopened.copy_page(1, &mut output).await.unwrap();
+        let after = context.statistics();
+        assert_eq!(
+            after.requests, before.requests,
+            "authenticated page reuse must not repeat remote authentication reads"
+        );
+        assert_eq!(after.bytes, before.bytes);
+        assert_eq!(after.pages, before.pages + 1);
+        assert_eq!(&output, &oracle.bytes[..4096]);
+        assert!(after.peak_cache_bytes <= ReaderOptions::default().cache_budget_bytes);
+    }
+
+    #[tokio::test]
+    async fn page_reuse_keeps_checkpoint_and_logical_views_separate() {
+        let (store, table, generation) = incremental().await;
+        let logical = table.resolve_generation(&generation).await.unwrap();
+        let checkpoint = store
+            .read(&generation.metadata_image.checkpoint.uri)
+            .await
+            .unwrap();
+        let index = logical
+            .bytes
+            .chunks_exact(4096)
+            .zip(checkpoint.bytes.chunks_exact(4096))
+            .position(|(logical, checkpoint)| logical != checkpoint)
+            .expect("incremental override");
+        let page = index as u64 + 1;
+        let offset = index * 4096;
+        let context = ReadContext::new(store, ReaderOptions::default()).unwrap();
+        let image = context.image(&generation).await.unwrap();
+        let mut output = [0; 4096];
+        for _ in 0..2 {
+            image.copy_page(page, &mut output).await.unwrap();
+            assert_eq!(&output, &logical.bytes[offset..offset + 4096]);
+            image
+                .checkpoint_view()
+                .copy_page(page, &mut output)
+                .await
+                .unwrap();
+            assert_eq!(&output, &checkpoint.bytes[offset..offset + 4096]);
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_page_cannot_hide_changed_authenticated_references() {
+        let (store, _, generation) = incremental().await;
+        let context = ReadContext::new(store, ReaderOptions::default()).unwrap();
+        let image = context.image(&generation).await.unwrap();
+        let mut output = [0; 4096];
+        image.copy_page(1, &mut output).await.unwrap();
+        image
+            .checkpoint_view()
+            .copy_page(1, &mut output)
+            .await
+            .unwrap();
+        for checkpoint in [false, true] {
+            let mut changed = generation.clone();
+            if checkpoint {
+                changed
+                    .metadata_image
+                    .checkpoint_page_index
+                    .as_mut()
+                    .unwrap()
+                    .root
+                    .length
+                    .0 += 1;
+            } else {
+                changed.metadata_image.page_map.as_mut().unwrap().length.0 += 1;
+            }
+            // The old image-root digest omits these declared lengths.
+            assert_eq!(
+                changed.metadata_image.image_root_sha256,
+                generation.metadata_image.image_root_sha256
+            );
+            let changed = context.image(&changed).await.unwrap();
+            let changed = if checkpoint {
+                changed.checkpoint_view()
+            } else {
+                changed
+            };
+            assert!(changed.copy_page(1, &mut output).await.is_err());
         }
     }
 

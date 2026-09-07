@@ -638,6 +638,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metric_shaped_rows_preserve_the_exact_per_record_byte_limit() {
+        let engine = Engine::open(source(fixture()), DEFAULT_PAGE_CACHE_BYTES)
+            .await
+            .unwrap();
+        let row_limit = 64 * 1024 + 16 + std::mem::size_of::<turso_core::Value>();
+        // File ID, field ID, five optional counts, two bounds, and JSON metadata.
+        let sql = "SELECT ?1, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?2";
+        let fixed = 16 + 8 + 10 * std::mem::size_of::<turso_core::Value>();
+        for extra in [0, 1] {
+            let padding = "x".repeat(row_limit - fixed + extra);
+            let result = engine
+                .query_with_row_limit(
+                    sql,
+                    vec![
+                        turso_core::Value::Blob(vec![0; 16]),
+                        turso_core::Value::build_text(padding),
+                    ],
+                    16,
+                    row_limit * 16,
+                    row_limit,
+                )
+                .await;
+            if extra == 0 {
+                assert_eq!(result.unwrap().len(), 1);
+            } else {
+                assert!(matches!(result, Err(RuntimeError::ResourceExhausted(_))));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn result_collection_enforces_row_and_byte_budgets() {
         let engine = Engine::open(source(fixture()), DEFAULT_PAGE_CACHE_BYTES)
             .await

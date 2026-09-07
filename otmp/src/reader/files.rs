@@ -404,9 +404,15 @@ mod tests {
     async fn metric_reads_are_batched_and_preserve_sparse_file_associations() {
         use std::collections::BTreeMap;
         let table = crate::Table::new(crate::InMemoryObjectStore::default());
-        let schema =
-            serde_json::from_slice(include_bytes!("../../../conformance/sources/schema.json"))
-                .unwrap();
+        let schema = serde_json::from_value(serde_json::json!({
+            "schema_id": 1,
+            "fields": [
+                {"field_id": 1, "name": "id", "required": true, "type": {"type": "int64"}},
+                {"field_id": 2, "name": "other", "required": false, "type": {"type": "int64"}}
+            ],
+            "identifier_field_ids": [1]
+        }))
+        .unwrap();
         table
             .initialize(crate::InitializeRequest::new(schema))
             .await
@@ -415,21 +421,20 @@ mod tests {
         std::fs::write(source.path(), b"metric fixture").unwrap();
         let metrics: Vec<Vec<crate::FileMetric>> = (0..33)
             .map(|i| {
-                if i % 3 == 0 {
-                    vec![]
-                } else {
-                    vec![crate::FileMetric {
-                        field_id: 1,
+                (1..=2)
+                    .filter(|field| (i + field) % 3 != 0)
+                    .map(|field| crate::FileMetric {
+                        field_id: u32::try_from(field).unwrap(),
                         column_size_bytes: Some(8),
                         value_count: Some(1),
                         null_count: Some(0),
                         nan_count: None,
                         distinct_count: Some(1),
-                        lower_bound: Some(otmp_protocol::TypedScalar::Int64(i)),
-                        upper_bound: Some(otmp_protocol::TypedScalar::Int64(i)),
+                        lower_bound: Some(otmp_protocol::TypedScalar::Int64(i * 10 + field)),
+                        upper_bound: Some(otmp_protocol::TypedScalar::Int64(i * 10 + field)),
                         metadata: BTreeMap::new(),
-                    }]
-                }
+                    })
+                    .collect()
             })
             .collect();
         let files = metrics
@@ -497,15 +502,15 @@ mod tests {
             "metrics must seek by both keys: {details:?}"
         );
         let before = reader.engine.query_count();
-        let batch = reader.files(None, &[1], 256).await.unwrap();
+        let batch = reader.files(None, &[1, 2], 256).await.unwrap();
         assert_eq!(batch.files.len(), 33);
         for file in &batch.files {
             assert_eq!(file.metrics, expected[&file.file.file_id]);
         }
         let queries = reader.engine.query_count() - before;
         assert!(
-            queries <= 4,
-            "one membership query plus at most three bounded metric queries, got {queries}"
+            queries <= 7,
+            "one membership query plus at most six bounded metric queries, got {queries}"
         );
     }
 }

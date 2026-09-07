@@ -41,3 +41,37 @@ oracle tests verify membership remains the same despite changing traversal order
 No format change, new metric index, weakened authentication, materialized
 registration, automatic refresh, or larger default cache is required for the
 first two changes. Keep large-current-commit availability findings separate.
+
+## Measured intermediate changes
+
+Three fresh processes over the frozen 16,384-file fixture gave warm selective
+medians of 3,789.73 ms for the archived baseline and 557.49 ms after indexed
+membership pagination. The first bounded metric batch used an IN list; Turso
+scanned the metric index and regressed to 5,193.32 ms. That failed experiment is
+retained. A small VALUES relation joined to the existing two-column metric
+primary key produces point lookups and reduced the median to 275.09 ms.
+
+The next measured bottleneck is repeated authenticated page resolution: the
+warm scan still makes 3,485 metadata requests for 900 page loads despite zero
+payload transfer. Authenticated pages now share the existing FIFO cache and
+memory budget. Admission follows every existing path, range, decompression,
+page-hash and SQLite-header check. Typed keys separate logical and checkpoint
+views and bind page coordinates to a streaming fingerprint of the complete
+Generation serialization plus the pinned checkpoint revision. This internal
+fingerprint is not a protocol object digest. It avoids allocating another
+canonical generation envelope. The public defaults and on-demand behavior stay
+at their documented values.
+
+The comparison uses Apache Iceberg Rust 28ede505ebc3a274d4840624e5c85eae480a77ae
+with the same DataFusion 55.0.0 graph and identical Parquet bytes. The initially
+selected d82481f revision actually used DataFusion 54.1; its failed build is
+preserved and excluded. Iceberg defers manifest/file-task work into execution,
+so physical-planning time alone is not comparable: report direct file-task
+planning and planning through the first aggregate result separately.
+
+The page-cache diagnostic reduced warm 16k planning to 138.92 ms and zero
+metadata requests. Cold planning still performed 6,018 metadata stat calls.
+Tree-node and pack resolution therefore also reuse the version token of a
+retained raw-range identity, after exact URI/hash/declared-length validation.
+Uncached ranges remain conditional on that token. Image-open checkpoint stats
+and mutable HEAD reads retain their original behavior.

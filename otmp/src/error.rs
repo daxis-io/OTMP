@@ -7,6 +7,8 @@ use crate::storage::StorageError;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    #[error(transparent)]
+    SharedCause(std::sync::Arc<RuntimeError>),
     #[error("reader resource budget exhausted: {0}")]
     ResourceExhausted(String),
     #[error("authenticated metadata ranges are unavailable for this generation")]
@@ -57,8 +59,9 @@ pub enum RuntimeError {
 
 impl RuntimeError {
     #[must_use]
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
+            Self::SharedCause(error) => error.code(),
             Self::ResourceExhausted(_) => "OTMP_RESOURCE_EXHAUSTED",
             Self::AuthenticatedRangesUnavailable => "OTMP_AUTHENTICATED_RANGES_UNAVAILABLE",
             Self::Cancelled => "OTMP_CANCELLED",
@@ -86,12 +89,17 @@ impl RuntimeError {
     }
 
     #[must_use]
-    pub const fn retryable(&self) -> bool {
+    pub fn retryable(&self) -> bool {
         match self {
+            Self::SharedCause(error) => error.retryable(),
             Self::PublicationIndeterminate | Self::RebaseExhausted => true,
             Self::Storage(error) => error.retryable(),
             _ => false,
         }
+    }
+
+    pub(crate) fn from_shared(error: std::sync::Arc<Self>) -> Self {
+        std::sync::Arc::try_unwrap(error).unwrap_or_else(Self::SharedCause)
     }
 
     #[must_use]

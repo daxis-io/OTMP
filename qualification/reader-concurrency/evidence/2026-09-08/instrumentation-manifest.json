@@ -1,0 +1,12 @@
+{
+  "base": "88cefa7f6cab3bd7670668cb99c43b974f63bd6e",
+  "source_archive_sha256": "7139cc245a557d3370bda59254efc160c9060642840a09dd2bfc68a1e7f8102c",
+  "lockfile_sha256": "91fcefc59bb8630209ef3754380ba8f88b0565e1d2750342d587604fd1ebdc16",
+  "profile": "release",
+  "target_dir": "/private/tmp/otmp-reader-concurrency-target",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: aarch64-apple-darwin\nrelease: 1.95.0\nLLVM version: 22.1.2\n",
+  "binary": {
+    "path": "/private/tmp/otmp-reader-concurrency-evidence/reader_scale-instrumentation",
+    "sha256": "3a56a37ac9f1fed1d51722c2a518ca655be091b3115b4b796416d06a30cd8f11"
+  }
+}

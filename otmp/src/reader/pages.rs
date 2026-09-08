@@ -2,19 +2,48 @@ use super::cache::{Cache, CachedBytes, Identity, PageKey};
 use super::{ReaderOptions, ReaderStatistics};
 use crate::storage::ObjectMetadata;
 use crate::{ObjectStore, RuntimeError};
+use futures_util::{
+    FutureExt,
+    future::{BoxFuture, Shared},
+};
 use otmp_protocol::{
     CheckpointIndexNode, Generation, ObjectReference, PageCodec, PageMapEntry, PageMapNode,
     PageObjectReference, Sha256, decode_checkpoint_index, decode_pack_header,
     decode_pack_index_parts, decode_page_map, image_root_hash,
 };
+use std::collections::BTreeMap;
 use std::ops::Range;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
+type RangeFuture = Shared<BoxFuture<'static, Result<Arc<CachedBytes>, Arc<RuntimeError>>>>;
+type RangeKey = (String, Sha256, u64, String, u64, u64);
+type RangeLoads = Arc<Mutex<BTreeMap<RangeKey, Weak<RangeLoad>>>>;
+struct RangeLoad {
+    future: RangeFuture,
+    id: u64,
+    key: RangeKey,
+    registry: RangeLoads,
+    _reservation: super::cache::Reservation,
+}
+impl Drop for RangeLoad {
+    fn drop(&mut self) {
+        let mut registry = self.registry.lock().unwrap();
+        if registry
+            .get(&self.key)
+            .is_some_and(|weak| std::ptr::eq(weak.as_ptr(), self))
+        {
+            registry.remove(&self.key);
+        }
+    }
+}
+
+static NEXT_RANGE_LOAD: AtomicU64 = AtomicU64::new(1);
 struct Context<S> {
     store: S,
     options: ReaderOptions,
     cache: Cache,
+    loads: RangeLoads,
     inflight: tokio::sync::Semaphore,
     bytes: AtomicU64,
     requests: AtomicU64,
@@ -54,6 +83,7 @@ impl<S: ObjectStore> ReadContext<S> {
             inner: Arc::new(Context {
                 store,
                 cache: Cache::new(options.cache_budget_bytes),
+                loads: Arc::default(),
                 inflight: tokio::sync::Semaphore::new(options.max_inflight_reads),
                 options,
                 bytes: AtomicU64::new(0),
@@ -85,10 +115,12 @@ impl<S: ObjectStore> ReadContext<S> {
             peak_cache_bytes: self.inner.cache.peak(),
         }
     }
+    #[tracing::instrument(name = "otmp.load", skip_all, fields(kind = "metadata_stat", uri = uri.as_str()))]
     pub(crate) async fn stat(
         &self,
         uri: &otmp_protocol::RelativeUri,
     ) -> Result<ObjectMetadata, RuntimeError> {
+        let mut trace = RangeTrace::new();
         let _permit = self
             .inner
             .inflight
@@ -96,7 +128,10 @@ impl<S: ObjectStore> ReadContext<S> {
             .await
             .map_err(|_| RuntimeError::Cancelled)?;
         self.inner.requests.fetch_add(1, Ordering::Relaxed);
-        Ok(self.inner.store.stat(uri).await?)
+        trace.requests = 1;
+        let result = self.inner.store.stat(uri).await;
+        trace.outcome = if result.is_ok() { "success" } else { "error" };
+        Ok(result?)
     }
     /// Mutable HEAD bypasses the immutable cache but still uses exact bounded reads.
     pub(crate) async fn mutable_range(
@@ -145,36 +180,111 @@ impl<S: ObjectStore> ReadContext<S> {
             self.inner.hits.fetch_add(1, Ordering::Relaxed);
             return Ok(bytes);
         }
-        let size =
-            usize::try_from(range.end - range.start).map_err(|_| corrupt("range size overflow"))?;
-        let allocation = size
-            .checked_mul(2)
-            .and_then(|n| {
-                n.checked_add(
-                    1024 + identity.uri.len() * 4 + metadata.version.as_opaque().len() * 2,
-                )
-            })
-            .ok_or_else(|| RuntimeError::ResourceExhausted("range allocation overflow".into()))?;
-        let reservation = self.inner.cache.reserve(allocation)?;
-        let _permit = self
-            .inner
-            .inflight
-            .acquire()
-            .await
-            .map_err(|_| RuntimeError::Cancelled)?;
-        self.inner.requests.fetch_add(1, Ordering::Relaxed);
-        let result = self
-            .inner
-            .store
-            .read_range(&reference.uri, range.clone(), metadata)
-            .await?;
-        result.validate(metadata, &range)?;
-        self.inner
-            .bytes
-            .fetch_add(result.bytes.len() as u64, Ordering::Relaxed);
-        self.inner
-            .cache
-            .insert(identity, range, result.bytes, reservation)
+        let key = (
+            identity.uri.clone(),
+            identity.hash,
+            identity.length,
+            metadata.version.as_opaque().to_owned(),
+            range.start,
+            range.end,
+        );
+        let load = {
+            let mut loads = self.inner.loads.lock().unwrap();
+            if loads
+                .keys()
+                .any(|old| old.0 == key.0 && (old.1 != key.1 || old.2 != key.2 || old.3 != key.3))
+            {
+                return Err(corrupt("conflicting in-flight object reference"));
+            }
+            if let Some(load) = loads.get(&key).and_then(Weak::upgrade) {
+                load
+            } else {
+                let reservation = self.inner.cache.reserve(
+                    512 + identity.uri.len() * 4 + metadata.version.as_opaque().len() * 2,
+                )?;
+                let context = self.clone();
+                let reference = reference.clone();
+                let metadata = metadata.clone();
+                let pinned = identity.clone();
+                let range = range.clone();
+                let load_id = NEXT_RANGE_LOAD.fetch_add(1, Ordering::Relaxed);
+                let future = async move {
+                    context
+                        .fill_range(reference, metadata, pinned, range, load_id)
+                        .await
+                        .map_err(Arc::new)
+                }
+                .boxed()
+                .shared();
+                let load = Arc::new(RangeLoad {
+                    future,
+                    id: load_id,
+                    key: key.clone(),
+                    registry: self.inner.loads.clone(),
+                    _reservation: reservation,
+                });
+                loads.insert(key, Arc::downgrade(&load));
+                load
+            }
+        };
+        tracing::debug!(target: "otmp.load", load_id = load.id, kind = "metadata_range", "load waiter");
+        let result = load.future.clone().await;
+        drop(load);
+        result.map_err(RuntimeError::from_shared)
+    }
+    #[tracing::instrument(name = "otmp.load", skip_all, fields(load_id = load_id, kind = "metadata_range", uri = reference.uri.as_str(), start = range.start, end = range.end))]
+    async fn fill_range(
+        &self,
+        reference: PageObjectReference,
+        metadata: ObjectMetadata,
+        identity: Identity,
+        range: Range<u64>,
+        load_id: u64,
+    ) -> Result<Arc<CachedBytes>, RuntimeError> {
+        if let Some(bytes) = self.inner.cache.get(&identity, &range)? {
+            self.inner.hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(bytes);
+        }
+        let mut trace = RangeTrace::new();
+        let result = async {
+            let size = usize::try_from(range.end - range.start)
+                .map_err(|_| corrupt("range size overflow"))?;
+            let allocation = size
+                .checked_mul(2)
+                .and_then(|n| {
+                    n.checked_add(
+                        1024 + identity.uri.len() * 4 + metadata.version.as_opaque().len() * 2,
+                    )
+                })
+                .ok_or_else(|| {
+                    RuntimeError::ResourceExhausted("range allocation overflow".into())
+                })?;
+            let reservation = self.inner.cache.reserve(allocation)?;
+            let _permit = self
+                .inner
+                .inflight
+                .acquire()
+                .await
+                .map_err(|_| RuntimeError::Cancelled)?;
+            trace.requests = 1;
+            self.inner.requests.fetch_add(1, Ordering::Relaxed);
+            let result = self
+                .inner
+                .store
+                .read_range(&reference.uri, range.clone(), &metadata)
+                .await?;
+            result.validate(&metadata, &range)?;
+            self.inner
+                .bytes
+                .fetch_add(result.bytes.len() as u64, Ordering::Relaxed);
+            trace.bytes = result.bytes.len();
+            self.inner
+                .cache
+                .insert(identity, range, result.bytes, reservation)
+        }
+        .await;
+        trace.outcome = if result.is_ok() { "success" } else { "error" };
+        result
     }
     pub(crate) async fn object(
         &self,
@@ -567,6 +677,29 @@ impl<S: ObjectStore> AuthenticatedImage<S> {
     }
 }
 
+struct RangeTrace {
+    started: std::time::Instant,
+    requests: u64,
+    bytes: usize,
+    outcome: &'static str,
+}
+impl RangeTrace {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            requests: 0,
+            bytes: 0,
+            outcome: "cancelled",
+        }
+    }
+}
+impl Drop for RangeTrace {
+    fn drop(&mut self) {
+        tracing::info!(target: "otmp.load", requests = self.requests, bytes = self.bytes,
+            elapsed_us = self.started.elapsed().as_micros(), outcome = self.outcome, "physical load summary");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,6 +803,83 @@ mod tests {
         ) -> Result<bool, StorageError> {
             self.inner.delete_if_version(key, version).await
         }
+    }
+
+    #[tokio::test]
+    async fn abandoned_and_failed_shared_ranges_remove_registry_and_keep_error_policy() {
+        let inner = InMemoryObjectStore::default();
+        let uri = "_otmp/test".parse().unwrap();
+        let created = inner.create_bytes(&uri, b"abcd").await.unwrap();
+        let store = BlockingRangeStore::new(inner);
+        let context = ReadContext::new(store.clone(), ReaderOptions::default()).unwrap();
+        let metadata = context.stat(&uri).await.unwrap();
+        let reference = PageObjectReference {
+            uri,
+            sha256: created.sha256,
+            length: otmp_protocol::JsonU64(4),
+        };
+        let mut first = Box::pin(context.range(&reference, &metadata, 0..4));
+        assert!(futures_util::poll!(&mut first).is_pending());
+        let mut conflict = reference.clone();
+        conflict.sha256 = Sha256::digest(b"other");
+        assert!(matches!(
+            context.range(&conflict, &metadata, 0..2).await,
+            Err(RuntimeError::Corrupt(_))
+        ));
+        drop(first);
+        assert!(context.inner.loads.lock().unwrap().is_empty());
+        assert_eq!(context.statistics().cache_bytes, 0);
+        store.release.close();
+        let error = context
+            .range(&reference, &metadata, 0..4)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, RuntimeError::Storage(_)),
+            "unique causes recover their original variant"
+        );
+        assert_eq!(error.code(), "OTMP_STORAGE_ERROR");
+        assert!(error.retryable());
+        assert!(context.inner.loads.lock().unwrap().is_empty());
+        assert_eq!(context.statistics().cache_bytes, 0);
+        assert_eq!(
+            context.inner.inflight.available_permits(),
+            ReaderOptions::default().max_inflight_reads
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_range_misses_share_io_and_survive_one_cancelled_waiter() {
+        let inner = InMemoryObjectStore::default();
+        let uri = "_otmp/test".parse().unwrap();
+        let created = inner.create_bytes(&uri, b"abcd").await.unwrap();
+        let store = BlockingRangeStore::new(inner);
+        let context = ReadContext::new(store.clone(), ReaderOptions::default()).unwrap();
+        let metadata = context.stat(&uri).await.unwrap();
+        let reference = PageObjectReference {
+            uri,
+            sha256: created.sha256,
+            length: otmp_protocol::JsonU64(4),
+        };
+        let mut first = Box::pin(context.range(&reference, &metadata, 0..4));
+        let mut second = Box::pin(context.range(&reference, &metadata, 0..4));
+        // Explicit polling establishes overlap without timing assumptions.
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(second.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert_eq!(store.started.load(Ordering::Acquire), 1);
+        drop(first);
+        store.release.add_permits(1);
+        assert_eq!(second.await.unwrap().as_ref().as_ref(), b"abcd");
+        assert_eq!(context.statistics().requests, 2);
     }
 
     #[tokio::test]
@@ -1162,7 +1372,7 @@ mod tests {
                 image.copy_page(1, &mut [0; 4096]).await
             }));
         }
-        store.wait_for_ranges(8).await;
+        store.wait_for_ranges(1).await;
         for task in &tasks {
             task.abort();
         }
@@ -1170,10 +1380,11 @@ mod tests {
             assert!(task.await.unwrap_err().is_cancelled());
         }
         assert_eq!(context.statistics().cache_bytes, 0);
+        assert!(context.inner.loads.lock().unwrap().is_empty());
 
         let image = image.clone();
         let ninth = tokio::spawn(async move { image.copy_page(1, &mut [0; 4096]).await });
-        store.wait_for_ranges(9).await;
+        store.wait_for_ranges(2).await;
         // Page one resolves both an index node and its checkpoint bytes; leave
         // enough permits for the complete ninth request without unblocking any
         // of the aborted tasks.

@@ -262,6 +262,9 @@ struct Worker {
 #[derive(Clone)]
 pub(crate) struct Engine {
     worker: Arc<Mutex<Worker>>,
+    admission: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    dispatches: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     queries: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -345,6 +348,9 @@ impl Engine {
         drop(guard);
         Ok(Self {
             worker: Arc::new(Mutex::new(opened?)),
+            admission: Arc::new(tokio::sync::Semaphore::new(1)),
+            #[cfg(test)]
+            dispatches: Arc::default(),
             #[cfg(test)]
             queries: Arc::default(),
         })
@@ -353,6 +359,11 @@ impl Engine {
     #[cfg(test)]
     pub(crate) fn query_count(&self) -> usize {
         self.queries.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dispatch_count(&self) -> usize {
+        self.dispatches.load(Ordering::Relaxed)
     }
 
     pub(crate) async fn query(
@@ -374,27 +385,110 @@ impl Engine {
         max_bytes: usize,
         max_row_bytes: usize,
     ) -> Result<Vec<Vec<turso_core::Value>>, RuntimeError> {
-        if max_rows == 0 || max_bytes == 0 || max_row_bytes == 0 {
+        let mut results = self
+            .query_group(
+                vec![QueryRequest {
+                    sql: sql.to_owned(),
+                    params,
+                    max_rows,
+                    max_bytes,
+                    max_row_bytes,
+                }],
+                Ok,
+            )
+            .await?;
+        Ok(results.pop().expect("one statement"))
+    }
+
+    pub(crate) async fn query_group<T: Send + 'static>(
+        &self,
+        requests: Vec<QueryRequest>,
+        mut decode: impl FnMut(Vec<Vec<turso_core::Value>>) -> Result<T, RuntimeError> + Send + 'static,
+    ) -> Result<Vec<T>, RuntimeError> {
+        if requests.is_empty() || requests.len() > 16 {
             return Err(RuntimeError::ResourceExhausted(
-                "query row and byte budgets must be non-zero".into(),
+                "engine groups require 1..=16 statements".into(),
             ));
         }
-        if !is_read_only_sql(sql) {
-            return Err(RuntimeError::Turso(
-                "reader engine accepts only SELECT, WITH, EXPLAIN, and PRAGMA queries".into(),
-            ));
+        for request in &requests {
+            if request.max_rows == 0 || request.max_bytes == 0 || request.max_row_bytes == 0 {
+                return Err(RuntimeError::ResourceExhausted(
+                    "query row and byte budgets must be non-zero".into(),
+                ));
+            }
+            if !is_read_only_sql(&request.sql) {
+                return Err(RuntimeError::Turso(
+                    "reader engine accepts only SELECT, WITH, EXPLAIN, and PRAGMA queries".into(),
+                ));
+            }
         }
+        let admitted = std::time::Instant::now();
+        let permit = self
+            .admission
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| RuntimeError::Cancelled)?;
         #[cfg(test)]
-        self.queries.fetch_add(1, Ordering::Relaxed);
+        {
+            self.queries.fetch_add(requests.len(), Ordering::Relaxed);
+            self.dispatches.fetch_add(1, Ordering::Relaxed);
+        }
+        let admission_wait_us = admitted.elapsed().as_micros();
+        let started = std::time::Instant::now();
+        let statements = requests.len();
+        let span = tracing::Span::current();
         let worker = self.worker.clone();
-        let sql = sql.to_owned();
         let cancellation = Arc::new(Cancellation::default());
         let guard = CancelOnDrop(cancellation.clone());
         let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let _span = span.enter();
             let worker = worker
                 .lock()
                 .map_err(|_| RuntimeError::Turso("reader worker lock poisoned".into()))?;
-            let working_bytes = worker
+            worker.storage.set_active(cancellation.clone())?;
+            let mut result = Vec::with_capacity(requests.len());
+            for request in requests {
+                cancellation.check()?;
+                // Decode and drop each bounded raw result before the next SQL operation.
+                result.push(worker.execute(request, &cancellation, &mut decode)?);
+            }
+            cancellation.check()?;
+            Ok::<_, RuntimeError>(result)
+        })
+        .await
+        .map_err(|error| RuntimeError::Turso(format!("reader worker failed: {error}")))?;
+        drop(guard);
+        tracing::info!(target: "otmp.scan", statements, admission_wait_us, dispatch_us = started.elapsed().as_micros(),
+            outcome = if result.is_ok() { "success" } else { "error" }, "metadata dispatch summary");
+        result
+    }
+}
+
+pub(crate) struct QueryRequest {
+    pub sql: String,
+    pub params: Vec<turso_core::Value>,
+    pub max_rows: usize,
+    pub max_bytes: usize,
+    pub max_row_bytes: usize,
+}
+impl Worker {
+    fn execute<T>(
+        &self,
+        request: QueryRequest,
+        cancellation: &Cancellation,
+        decode: &mut impl FnMut(Vec<Vec<turso_core::Value>>) -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        let QueryRequest {
+            sql,
+            params,
+            max_rows,
+            max_bytes,
+            max_row_bytes,
+        } = request;
+        let result = (|| {
+            let working_bytes = self
                 .storage
                 .source
                 .maximum_record_bytes()
@@ -404,10 +498,9 @@ impl Engine {
                 .ok_or_else(|| {
                     RuntimeError::ResourceExhausted("metadata query working budget overflow".into())
                 })?;
-            let _working = worker.storage.source.reserve(working_bytes)?;
-            worker.storage.set_active(cancellation.clone())?;
+            let _working = self.storage.source.reserve(working_bytes)?;
             cancellation.check()?;
-            let mut statement = worker.connection.prepare(&sql)?;
+            let mut statement = self.connection.prepare(&sql)?;
             for (index, value) in params.into_iter().enumerate() {
                 statement.bind_at(
                     NonZeroUsize::new(index + 1)
@@ -417,17 +510,16 @@ impl Engine {
             }
             let mut rows = Vec::new();
             let mut used = 0usize;
-            let mut callback_failure = None;
-            let statement_result = statement.run_with_row_callback(|row| {
-                if let Err(error) = cancellation.check() {
-                    callback_failure = Some(error);
-                    return Err(LimboError::Interrupt);
-                }
+            loop {
+                cancellation.check()?;
+                let check = || cancellation.check().map_err(|_| LimboError::Interrupt);
+                let Some(row) = statement.run_one_step_blocking(check, check)? else {
+                    break;
+                };
                 if rows.len() == max_rows {
-                    callback_failure = Some(RuntimeError::ResourceExhausted(
+                    return Err(RuntimeError::ResourceExhausted(
                         "metadata query row budget exhausted".into(),
                     ));
-                    return Err(LimboError::TooBig);
                 }
                 let row_bytes = row
                     .get_values()
@@ -435,39 +527,27 @@ impl Engine {
                         value_bytes(value).saturating_add(std::mem::size_of::<turso_core::Value>())
                     })
                     .sum::<usize>();
-                if row_bytes > max_row_bytes && max_row_bytes < max_bytes {
-                    callback_failure = Some(RuntimeError::ResourceExhausted(
+                if row_bytes > max_row_bytes {
+                    return Err(RuntimeError::ResourceExhausted(
                         "metadata query row byte budget exhausted".into(),
                     ));
-                    return Err(LimboError::TooBig);
                 }
-                let Some(next) = used.checked_add(row_bytes) else {
-                    callback_failure = Some(RuntimeError::ResourceExhausted(
-                        "metadata query byte budget overflowed".into(),
-                    ));
-                    return Err(LimboError::TooBig);
-                };
-                used = next;
-                if used > max_bytes {
-                    callback_failure = Some(RuntimeError::ResourceExhausted(
-                        "metadata query byte budget exhausted".into(),
-                    ));
-                    return Err(LimboError::TooBig);
-                }
+                used = used
+                    .checked_add(row_bytes)
+                    .filter(|used| *used <= max_bytes)
+                    .ok_or_else(|| {
+                        RuntimeError::ResourceExhausted(
+                            "metadata query byte budget exhausted".into(),
+                        )
+                    })?;
                 rows.push(row.get_values().cloned().collect());
-                Ok(())
-            });
-            worker.storage.take_failure()?;
-            if let Some(error) = callback_failure {
-                return Err(error);
             }
-            statement_result?;
-            cancellation.check()?;
-            Ok::<_, RuntimeError>(rows)
-        })
-        .await
-        .map_err(|error| RuntimeError::Turso(format!("reader worker failed: {error}")))?;
-        drop(guard);
+            decode(rows)
+        })();
+        // Consume failures even when prepare/step returns early, so one operation
+        // cannot poison the next operation's error cause.
+        self.storage.take_failure()?;
+        cancellation.check()?;
         result
     }
 }
@@ -482,7 +562,7 @@ fn is_read_only_sql(sql: &str) -> bool {
     )
 }
 
-fn value_bytes(value: &turso_core::Value) -> usize {
+pub(crate) fn value_bytes(value: &turso_core::Value) -> usize {
     match value {
         turso_core::Value::Null => 0,
         turso_core::Value::Numeric(_) => std::mem::size_of::<i64>(),
@@ -496,6 +576,56 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    #[tokio::test]
+    async fn grouped_queries_use_one_dispatch_and_keep_statement_bounds() {
+        let engine = Engine::open(source(fixture()), DEFAULT_PAGE_CACHE_BYTES)
+            .await
+            .unwrap();
+        let request = || QueryRequest {
+            sql: "SELECT 1".into(),
+            params: vec![],
+            max_rows: 1,
+            max_bytes: 64,
+            max_row_bytes: 64,
+        };
+        let rows = engine
+            .query_group((0..16).map(|_| request()).collect(), Ok)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 16);
+        assert_eq!(engine.dispatches.load(Ordering::Acquire), 1);
+        assert!(
+            engine
+                .query_group((0..17).map(|_| request()).collect(), Ok)
+                .await
+                .is_err()
+        );
+        let mut oversized = request();
+        oversized.sql = "SELECT 1 UNION ALL SELECT 2".into();
+        assert!(matches!(
+            engine.query_group(vec![request(), oversized], Ok).await,
+            Err(RuntimeError::ResourceExhausted(_))
+        ));
+        assert!(engine.query("SELECT 1", vec![], 1, 64).await.is_ok());
+    }
+    #[tokio::test]
+    async fn queued_engine_calls_do_not_dispatch_and_cancellation_removes_admission() {
+        let engine = Engine::open(source(fixture()), DEFAULT_PAGE_CACHE_BYTES)
+            .await
+            .unwrap();
+        let held = engine.admission.acquire().await.unwrap();
+        let mut waiting = Box::pin(engine.query("SELECT 1", vec![], 1, 64));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        assert_eq!(engine.dispatches.load(Ordering::Acquire), 0);
+        drop(waiting);
+        drop(held);
+        assert_eq!(
+            engine.query("SELECT 1", vec![], 1, 64).await.unwrap().len(),
+            1
+        );
+        assert_eq!(engine.dispatches.load(Ordering::Acquire), 1);
+        assert_eq!(engine.admission.available_permits(), 1);
+    }
 
     struct FixtureSource {
         bytes: Arc<[u8]>,

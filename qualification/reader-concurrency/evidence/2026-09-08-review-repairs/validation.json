@@ -1,0 +1,184 @@
+{
+  "comparator-clippy": {
+    "command": [
+      "cargo",
+      "clippy",
+      "--manifest-path",
+      "qualification/reader-comparison/Cargo.toml",
+      "--all-targets",
+      "--locked",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "elapsed_seconds": 2.699354083975777,
+    "exit_code": 0
+  },
+  "comparator-fmt": {
+    "command": [
+      "cargo",
+      "fmt",
+      "--manifest-path",
+      "qualification/reader-comparison/Cargo.toml",
+      "--check"
+    ],
+    "elapsed_seconds": 0.046980208018794656,
+    "exit_code": 0
+  },
+  "comparator-test": {
+    "command": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "qualification/reader-comparison/Cargo.toml",
+      "--locked"
+    ],
+    "elapsed_seconds": 6.387204291997477,
+    "exit_code": 0
+  },
+  "conformance": {
+    "command": [
+      "python3",
+      "conformance/regenerate.py",
+      "--check"
+    ],
+    "elapsed_seconds": 0.5403101670090109,
+    "exit_code": 0
+  },
+  "crash": {
+    "command": [
+      "bash",
+      "tests/run-subprocess.sh"
+    ],
+    "elapsed_seconds": 4.090405749855563,
+    "exit_code": 0
+  },
+  "doctests": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--workspace",
+      "--doc"
+    ],
+    "elapsed_seconds": 0.5405563749372959,
+    "exit_code": 0
+  },
+  "fmt": {
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--check"
+    ],
+    "elapsed_seconds": 0.19640683382749557,
+    "exit_code": 0
+  },
+  "nextest": {
+    "command": [
+      "cargo",
+      "nextest",
+      "run",
+      "--locked",
+      "--workspace",
+      "--all-features"
+    ],
+    "elapsed_seconds": 40.02363970805891,
+    "exit_code": 0
+  },
+  "provider-example": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "otmp-s3",
+      "--example",
+      "provider_evidence"
+    ],
+    "elapsed_seconds": 0.16777695785276592,
+    "exit_code": 0
+  },
+  "python-comparator": {
+    "command": [
+      "python3",
+      "-B",
+      "-W",
+      "error::ResourceWarning",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "qualification/reader-comparison/tests",
+      "-v"
+    ],
+    "elapsed_seconds": 0.09404879086650908,
+    "exit_code": 0
+  },
+  "python-scale": {
+    "command": [
+      "python3",
+      "-B",
+      "-W",
+      "error::ResourceWarning",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "qualification/reader-scale/tests",
+      "-v"
+    ],
+    "elapsed_seconds": 2.391395708080381,
+    "exit_code": 0
+  },
+  "reader-example": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "otmp-datafusion",
+      "--example",
+      "reader_scale"
+    ],
+    "elapsed_seconds": 15.232773166149855,
+    "exit_code": 0
+  },
+  "supply-chain": {
+    "command": [
+      "cargo",
+      "deny",
+      "check"
+    ],
+    "elapsed_seconds": 0.8893946669995785,
+    "exit_code": 0
+  },
+  "wasm": {
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "-p",
+      "otmp-protocol",
+      "--target",
+      "wasm32-unknown-unknown"
+    ],
+    "elapsed_seconds": 0.07760291593149304,
+    "exit_code": 0
+  },
+  "workspace-clippy": {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--all-features",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0,
+    "log": "clippy-2.log"
+  }
+}

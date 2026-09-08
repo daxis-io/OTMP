@@ -36,16 +36,59 @@ pub(crate) async fn enumerate<S: ObjectStore>(
             "metric field batch limit is 4096".into(),
         ));
     }
-    let reservation = reader.context.reserve_bytes(8 * 1024 * 1024)?;
     let cursor = match cursor {
         Some(c) if c.pin == reader.pin_id => Some(c),
         Some(_) => return Err(corrupt("file cursor belongs to another reader")),
         None => None,
     };
     if reader.branch.is_none() {
-        return historical(reader, cursor, fields, limit, reservation).await;
+        return historical(reader, cursor, fields, limit).await;
     }
-    branch(reader, cursor, fields, limit, reservation).await
+    branch(reader, cursor, fields, limit).await
+}
+
+async fn descriptor_rows<S: ObjectStore>(
+    reader: &MetadataReader<S>,
+    sql: &str,
+    params: Vec<turso_core::Value>,
+    limit: usize,
+) -> Result<
+    (
+        Vec<Vec<turso_core::Value>>,
+        crate::reader::cache::Reservation,
+    ),
+    RuntimeError,
+> {
+    let context = reader.context.clone();
+    let mut result = reader
+        .engine
+        .query_group(
+            vec![crate::reader_engine::QueryRequest {
+                sql: sql.to_owned(),
+                params,
+                max_rows: limit,
+                max_bytes: BYTES,
+                max_row_bytes: BYTES,
+            }],
+            move |rows| {
+                // Engine admission precedes allocation. Its working reservation
+                // covers the raw rows until this retained result charge exists.
+                // Preserve the previous eightfold decode allowance, sized from
+                // the bounded rows instead of charging every queued request 8 MiB.
+                let bytes = rows
+                    .iter()
+                    .flatten()
+                    .map(|value| {
+                        crate::reader_engine::value_bytes(value)
+                            + std::mem::size_of::<turso_core::Value>()
+                    })
+                    .sum::<usize>();
+                let reservation = context.reserve_bytes(bytes.saturating_mul(8).max(4096))?;
+                Ok((rows, reservation))
+            },
+        )
+        .await?;
+    Ok(result.pop().expect("one descriptor statement"))
 }
 
 async fn branch<S: ObjectStore>(
@@ -53,7 +96,6 @@ async fn branch<S: ObjectStore>(
     cursor: Option<FileCursor>,
     fields: &[u32],
     limit: usize,
-    reservation: crate::reader::cache::Reservation,
 ) -> Result<FileBatch, RuntimeError> {
     let branch = reader
         .branch
@@ -74,7 +116,7 @@ async fn branch<S: ObjectStore>(
         None => BRANCH_FIRST_SQL,
     };
     params.push(integer(i64::try_from(limit).map_err(|_| corrupt("limit"))?));
-    let rows = reader.engine.query(sql, params, limit, BYTES).await?;
+    let (rows, reservation) = descriptor_rows(reader, sql, params, limit).await?;
     let mut files = Vec::with_capacity(rows.len());
     let mut reservations = vec![reservation];
     let mut next = None;
@@ -136,7 +178,6 @@ async fn historical<S: ObjectStore>(
     cursor: Option<FileCursor>,
     fields: &[u32],
     limit: usize,
-    reservation: crate::reader::cache::Reservation,
 ) -> Result<FileBatch, RuntimeError> {
     let selected = reader
         .snapshot
@@ -157,7 +198,7 @@ async fn historical<S: ObjectStore>(
     {
         return Err(corrupt("historical cursor descriptor mismatch"));
     }
-    let rows=reader.engine.query("SELECT c.change_kind,f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,f.created_snapshot_id,f.created_version FROM otmp_snapshot_file_changes c LEFT JOIN otmp_files f ON f.file_id=c.file_id WHERE c.snapshot_id=?1 AND (?2 IS NULL OR c.file_id>?2) ORDER BY c.file_id LIMIT ?3",vec![turso_core::Value::Blob(snapshot.as_bytes().to_vec()),file.map_or(turso_core::Value::Null,|v|turso_core::Value::Blob(v.as_bytes().to_vec())),integer(i64::try_from(limit).map_err(|_|corrupt("limit"))?)],limit,BYTES).await?;
+    let (rows, reservation)=descriptor_rows(reader, "SELECT c.change_kind,f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,f.created_snapshot_id,f.created_version FROM otmp_snapshot_file_changes c LEFT JOIN otmp_files f ON f.file_id=c.file_id WHERE c.snapshot_id=?1 AND (?2 IS NULL OR c.file_id>?2) ORDER BY c.file_id LIMIT ?3",vec![turso_core::Value::Blob(snapshot.as_bytes().to_vec()),file.map_or(turso_core::Value::Null,|v|turso_core::Value::Blob(v.as_bytes().to_vec())),integer(i64::try_from(limit).map_err(|_|corrupt("limit"))?)],limit).await?;
     let mut files = Vec::new();
     let mut reservations = vec![reservation];
     let mut last = file;
@@ -240,6 +281,9 @@ async fn historical<S: ObjectStore>(
 // including the extra file-ID column, while grouping at most sixteen files.
 // This bounds a raw batch near 1 MiB even for unusually large scalar statistics.
 const METRIC_QUERY_FILES: usize = 16;
+// Keep useful dispatch amortization while returning the engine lane to peers
+// before one caller decodes a complete 256-file metadata batch.
+const METRIC_DISPATCH_OPERATIONS: usize = 4;
 const METRIC_ROW_BYTES: usize = 64 * 1024 + 16 + std::mem::size_of::<turso_core::Value>();
 
 fn metric_sql(count: usize) -> String {
@@ -266,50 +310,93 @@ async fn metrics<S: ObjectStore>(
     let _transient = reader
         .context
         .reserve_bytes(METRIC_QUERY_FILES * METRIC_ROW_BYTES)?;
-    for files in files.chunks_mut(METRIC_QUERY_FILES) {
-        let sql = metric_sql(files.len());
-        for field in fields {
-            let mut params = vec![integer(i64::from(*field))];
+    let operations = files
+        .len()
+        .div_ceil(METRIC_QUERY_FILES)
+        .checked_mul(fields.len())
+        .ok_or_else(|| corrupt("metric operation count overflow"))?;
+    for start in (0..operations).step_by(METRIC_DISPATCH_OPERATIONS) {
+        let mut requests = Vec::new();
+        let mut expected = Vec::new();
+        for operation in start..(start + METRIC_DISPATCH_OPERATIONS).min(operations) {
+            let offset = operation / fields.len() * METRIC_QUERY_FILES;
+            let requested = &files[offset..(offset + METRIC_QUERY_FILES).min(files.len())];
+            let field = fields[operation % fields.len()];
+            let mut params = vec![integer(i64::from(field))];
             params.extend(
-                files
+                requested
                     .iter()
                     .map(|file| turso_core::Value::Blob(file.file.file_id.as_bytes().to_vec())),
             );
-            let rows = reader
-                .engine
-                .query_with_row_limit(
-                    &sql,
-                    params,
-                    files.len(),
-                    files.len() * METRIC_ROW_BYTES,
-                    METRIC_ROW_BYTES,
-                )
-                .await?;
-            for row in rows {
-                if row.len() != 10 {
-                    return Err(corrupt("invalid metric row"));
-                }
-                let file_id = id(&row[0])?;
-                let file = files
-                    .iter_mut()
-                    .find(|file| file.file.file_id == file_id)
-                    .ok_or_else(|| corrupt("metric belongs to an unrequested file"))?;
-                let metric = decode_metric(&row[1..])?;
-                if metric.field_id != *field
-                    || file.metrics.iter().any(|value| value.field_id == *field)
-                {
-                    return Err(corrupt("duplicate or unrequested metric field"));
-                }
-                let charge = otmp_protocol::canonical_json::to_vec(&metric)?
-                    .len()
-                    .saturating_mul(4)
-                    .saturating_add(256);
-                retained.push(reader.context.reserve_bytes(charge)?);
-                file.metrics.push(metric);
+            requests.push(crate::reader_engine::QueryRequest {
+                sql: metric_sql(requested.len()),
+                params,
+                max_rows: requested.len(),
+                max_bytes: requested.len() * METRIC_ROW_BYTES,
+                max_row_bytes: METRIC_ROW_BYTES,
+            });
+            expected.push((
+                offset,
+                field,
+                requested
+                    .iter()
+                    .map(|file| file.file.file_id)
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        let context = reader.context.clone();
+        let mut expected_fields = expected.into_iter();
+        let decoded = reader
+            .engine
+            .query_group(requests, move |rows| {
+                let (offset, field, file_ids) =
+                    expected_fields.next().expect("one field per statement");
+                rows.into_iter()
+                    .map(|row| {
+                        if row.len() != 10 {
+                            return Err(corrupt("invalid metric row"));
+                        }
+                        let file_id = id(&row[0])?;
+                        let position = file_ids
+                            .iter()
+                            .position(|expected| *expected == file_id)
+                            .ok_or_else(|| corrupt("metric belongs to an unrequested file"))?;
+                        let metric = decode_metric(&row[1..])?;
+                        if metric.field_id != field {
+                            return Err(corrupt("unrequested metric field"));
+                        }
+                        let charge = metric_charge(&metric)?;
+                        let reservation = context.reserve_bytes(charge)?;
+                        Ok((offset + position, metric, reservation))
+                    })
+                    .collect::<Result<Vec<_>, RuntimeError>>()
+            })
+            .await?;
+        for (position, metric, reservation) in decoded.into_iter().flatten() {
+            let file = &mut files[position];
+            if file
+                .metrics
+                .iter()
+                .any(|value| value.field_id == metric.field_id)
+            {
+                return Err(corrupt("duplicate metric field"));
             }
+            retained.push(reservation);
+            file.metrics.push(metric);
         }
     }
     Ok(())
+}
+
+fn metric_charge(metric: &crate::FileMetric) -> Result<usize, RuntimeError> {
+    // Validated scalar/metadata values already have canonical JSON semantics.
+    // Sorting object keys cannot change their compact serialized length; avoid
+    // reparsing and re-encoding the metric just to retain the same byte charge.
+    Ok(serde_json::to_vec(metric)
+        .map_err(|error| otmp_protocol::ProtocolError::Encoding(error.to_string()))?
+        .len()
+        .saturating_mul(4)
+        .saturating_add(256))
 }
 
 fn decode_metric(r: &[turso_core::Value]) -> Result<crate::FileMetric, RuntimeError> {
@@ -349,6 +436,52 @@ fn opt(v: &turso_core::Value) -> Result<Option<u64>, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn metric_accounting_preserves_the_canonical_charge_without_reencoding() {
+        use otmp_protocol::{CanonicalValue, TypedScalar};
+        for scalar in [
+            TypedScalar::Null,
+            TypedScalar::Boolean(true),
+            TypedScalar::Int32(i32::MIN),
+            TypedScalar::Int64(i64::MAX),
+            TypedScalar::Float32(f32::NAN),
+            TypedScalar::Float64(-0.0),
+            TypedScalar::Decimal {
+                precision: 38,
+                scale: 4,
+                unscaled: vec![255; 16],
+            },
+            TypedScalar::String("\"\\\n\u{0000}雪".repeat(1024)),
+            TypedScalar::Binary(vec![0, 1, 255]),
+            TypedScalar::Fixed(vec![0; 16]),
+        ] {
+            let metric = crate::FileMetric {
+                field_id: u32::MAX,
+                column_size_bytes: Some(i64::MAX.cast_unsigned()),
+                value_count: None,
+                null_count: Some(0),
+                nan_count: None,
+                distinct_count: None,
+                lower_bound: Some(scalar.clone()),
+                upper_bound: Some(scalar),
+                metadata: [(
+                    "z\n雪".into(),
+                    CanonicalValue::Array(vec![
+                        CanonicalValue::Integer(i128::from(i64::MIN)),
+                        CanonicalValue::String("\"\\\n".into()),
+                    ]),
+                )]
+                .into(),
+            };
+            let previous = otmp_protocol::canonical_json::to_vec(&metric)
+                .unwrap()
+                .len()
+                * 4
+                + 256;
+            assert_eq!(super::metric_charge(&metric).unwrap(), previous);
+        }
+    }
+
     #[test]
     fn first_branch_batch_exposes_invalid_zero_id_membership() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
@@ -524,6 +657,7 @@ mod tests {
             "metrics must seek by both keys: {details:?}"
         );
         let before = reader.engine.query_count();
+        let dispatches_before = reader.engine.dispatch_count();
         let batch = reader.files(None, &[1, 2], 256).await.unwrap();
         assert_eq!(batch.files.len(), 33);
         for file in &batch.files {
@@ -533,6 +667,11 @@ mod tests {
         assert!(
             queries <= 7,
             "one membership query plus at most six bounded metric queries, got {queries}"
+        );
+        assert_eq!(
+            reader.engine.dispatch_count() - dispatches_before,
+            3,
+            "one membership dispatch and two bounded metric groups"
         );
     }
 }

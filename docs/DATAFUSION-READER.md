@@ -116,6 +116,7 @@ the async reader returns `OTMP_AUTHENTICATED_RANGES_UNAVAILABLE` for them.
 | SQLite record payload | 1 MiB | Configurable `maximum_record_bytes`, checked before overflow-record allocation |
 | Retained scan descriptors | 64 MiB per scan | Also reserved through the session's DataFusion memory pool and held for the physical plan's lifetime |
 | Shared Parquet footer cache | 64 MiB per provider | Admission before decode; active leases stay charged after eviction |
+| Admitted file preflights | 8 per provider | `ProviderOptions::preflight_concurrency` accepts 1–32; 1 retains sequential admission |
 
 Turso page reads preserve the logical bytes and reject writes, truncation and
 sync. A structural page validator tracks B-tree and overflow references, rejects
@@ -128,6 +129,28 @@ Resource exhaustion is an explicit error. The budgets bound retained objects
 and supported internal query buffers; they are not a promise that total process
 RSS equals their sum. DataFusion, Arrow, native engine bookkeeping, executable
 pages, and allocator overhead contribute to RSS.
+
+Non-default `ArrowReaderOptions` perform their own decode and index checks.
+Their admission must cover the conservative decode reservation plus any default
+footer still leased by a reader. A budget that fits only a cold default decode
+need not fit both. An impossible allocation returns resource exhaustion promptly.
+Cached preflight leases participate in admission progress until schema validation
+releases them; long-lived execution leases continue to count against capacity.
+
+Cancellation drops queued and asynchronous work. Footer decoding and schema
+binding are bounded synchronous calls: cancellation takes effect when control
+returns to an asynchronous boundary, without interrupting those calls mid-stack.
+
+## Alpha API compatibility
+
+Reader concurrency adds `RuntimeError::SharedCause(Arc<RuntimeError>)` so shared
+loads retain the original error and its retry policy. This is a source change to
+the exhaustive error enum in `0.0.2-alpha.0`: downstream matches must handle that
+variant, recursively matching the contained cause when variant-specific handling
+is needed. Prefer `code()` and `retryable()` for policy decisions; they delegate
+through shared causes. Both methods are now ordinary functions, so callers must
+move uses out of const-evaluation contexts. Uniquely owned errors retain their
+original variants. No wire error code or retry policy changes with this wrapper.
 
 The async API verifies selected linkage/identity/schema/references and every
 consumed page. `verify()` and `verify_history()` additionally traverse all index

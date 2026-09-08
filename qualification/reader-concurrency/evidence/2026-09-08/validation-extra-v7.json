@@ -1,0 +1,64 @@
+{
+  "nextest-v7.log": {
+    "command": [
+      "cargo",
+      "nextest",
+      "run",
+      "--locked",
+      "--workspace",
+      "--all-features"
+    ],
+    "exit_code": 0
+  },
+  "harness-v7.log": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "otmp-datafusion",
+      "--example",
+      "reader_scale"
+    ],
+    "exit_code": 0
+  },
+  "comparator-clippy-v7.log": {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--manifest-path",
+      "qualification/reader-comparison/Cargo.toml",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0
+  },
+  "comparator-tests-v7.log": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--manifest-path",
+      "qualification/reader-comparison/Cargo.toml"
+    ],
+    "exit_code": 0
+  },
+  "audit-v7.log": {
+    "command": [
+      "cargo",
+      "audit"
+    ],
+    "exit_code": 0
+  },
+  "deny-v7.log": {
+    "command": [
+      "cargo",
+      "deny",
+      "check"
+    ],
+    "exit_code": 0
+  }
+}

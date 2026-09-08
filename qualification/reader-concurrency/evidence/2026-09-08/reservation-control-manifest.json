@@ -1,0 +1,10 @@
+{
+  "base": "instrumentation-source.tar.gz",
+  "changed_files": [
+    "otmp/src/reader/files.rs",
+    "otmp/src/reader_engine.rs"
+  ],
+  "archive_sha256": "1c84dc7f55bd95e1d1a929b13f1f85c26634fb83c4f5f0eaa699704689820ba0",
+  "binary_sha256": "bac3a1afc263795fbf85f49b2b4e49abe23aaf479ff3ba5c089452199658d100",
+  "purpose": "Eight-query sequential control: move bounded descriptor result reservation behind existing worker admission; preserve sequential preflight and per-statement SQL dispatch."
+}

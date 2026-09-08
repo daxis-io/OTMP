@@ -7,6 +7,12 @@ mod transport;
 mod worker;
 #[tokio::main(worker_threads = 4)]
 async fn main() -> Result<(), fixture::Error> {
+    if std::env::var_os("RUST_LOG").is_some() {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .try_init()?;
+    }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let command = args.first().and_then(|value| value.to_str());
     let root = args

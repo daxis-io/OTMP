@@ -74,7 +74,36 @@ fn bridge(error: impl std::error::Error + Send + Sync + 'static) -> object_store
     }
 }
 
+struct StatTrace {
+    started: std::time::Instant,
+    outcome: &'static str,
+    span: tracing::Span,
+}
+impl Drop for StatTrace {
+    fn drop(&mut self) {
+        self.span.in_scope(|| {
+            tracing::info!(target: "otmp.load", requests = 1, bytes = 0,
+                elapsed_us = self.started.elapsed().as_micros(), outcome = self.outcome, "physical load summary");
+        });
+    }
+}
+
 impl<S: OtmpObjectStore> ReadOnlyStore<S> {
+    /// Only validated, version-pinned preflight results enter final plan assembly.
+    pub(crate) fn from_validated(
+        store: S,
+        objects: BTreeMap<String, ImmutableObject>,
+        counters: Arc<ReadCounters>,
+    ) -> Self {
+        Self {
+            store,
+            objects: Arc::new(objects),
+            counters,
+        }
+    }
+    pub(crate) fn pinned_objects(&self) -> impl Iterator<Item = &ImmutableObject> {
+        self.objects.values()
+    }
     pub async fn new(
         store: S,
         descriptors: impl IntoIterator<Item = (RelativeUri, Option<otmp_protocol::Sha256>, u64)>,
@@ -101,7 +130,14 @@ impl<S: OtmpObjectStore> ReadOnlyStore<S> {
                 continue;
             }
             counters.requests.fetch_add(1, Ordering::Relaxed);
-            let metadata = store.stat(&uri).await?;
+            let mut trace = StatTrace {
+                started: std::time::Instant::now(),
+                outcome: "cancelled",
+                span: tracing::info_span!("otmp.load", kind = "data_stat", uri = uri.as_str()),
+            };
+            let result = store.stat(&uri).await;
+            trace.outcome = if result.is_ok() { "success" } else { "error" };
+            let metadata = result?;
             if metadata.length != length {
                 return Err(RuntimeError::Corrupt(
                     "immutable data descriptor length changed before bridge creation".into(),

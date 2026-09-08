@@ -1,0 +1,45 @@
+{
+  "source_files_verified": 238,
+  "post_freeze_changes": {
+    "qualification/reader-concurrency/README.md": "Delivery README updated to name final V7 binary; no compiled source changed."
+  },
+  "worktrees": {
+    "/Users/ethanurbanski/OTMP": {
+      "head": "78c3311a5d883fdda3542ff6e5a918bb24fee3ca",
+      "status": []
+    },
+    "/private/tmp/otmp-reader-planning": {
+      "head": "88cefa7f6cab3bd7670668cb99c43b974f63bd6e",
+      "status": []
+    },
+    "/private/tmp/otmp-reader-concurrency": {
+      "head": "88cefa7f6cab3bd7670668cb99c43b974f63bd6e",
+      "status": [
+        " M Cargo.lock",
+        " M otmp-datafusion/Cargo.toml",
+        " M otmp-datafusion/examples/reader_scale.rs",
+        " M otmp-datafusion/examples/reader_scale/fixture.rs",
+        " M otmp-datafusion/examples/reader_scale/transport.rs",
+        " M otmp-datafusion/examples/reader_scale/worker.rs",
+        " M otmp-datafusion/src/footer.rs",
+        " M otmp-datafusion/src/provider.rs",
+        " M otmp-datafusion/src/store.rs",
+        " M otmp-datafusion/tests/planning.rs",
+        " M otmp-datafusion/tests/provider.rs",
+        " M otmp/Cargo.toml",
+        " M otmp/src/error.rs",
+        " M otmp/src/reader/files.rs",
+        " M otmp/src/reader/pages.rs",
+        " M otmp/src/reader_engine.rs",
+        " M qualification/reader-comparison/Cargo.lock",
+        " M qualification/reader-scale/run.py",
+        " M qualification/reader-scale/tests/test_run.py",
+        "?? docs/plans/2026-09-08-reader-runtime-isolation-follow-up.md",
+        "?? otmp-datafusion/tests/concurrency_model.rs",
+        "?? qualification/reader-concurrency/",
+        "?? qualification/reader-scale/concurrency.py",
+        "?? qualification/reader-scale/tests/test_concurrency.py"
+      ]
+    }
+  }
+}

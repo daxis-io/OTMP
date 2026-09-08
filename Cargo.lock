@@ -2837,6 +2837,7 @@ version = "0.0.2-alpha.0"
 dependencies = [
  "async-trait",
  "fs2",
+ "futures-util",
  "hex",
  "otmp-protocol",
  "rusqlite",
@@ -2876,6 +2877,7 @@ dependencies = [
  "chrono",
  "datafusion",
  "futures-util",
+ "loom",
  "object_store 0.13.2",
  "otmp",
  "otmp-protocol",
@@ -2883,6 +2885,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

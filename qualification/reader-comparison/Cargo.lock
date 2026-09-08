@@ -3308,6 +3308,7 @@ version = "0.0.2-alpha.0"
 dependencies = [
  "async-trait",
  "fs2",
+ "futures-util",
  "hex",
  "otmp-protocol",
  "rusqlite",
@@ -3336,6 +3337,7 @@ dependencies = [
  "otmp",
  "otmp-protocol",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -122,6 +122,7 @@ async fn count(provider: OtmpTableProvider<LocalObjectStore>) -> i64 {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep branch/history checks with their shared evolution fixture.
 async fn metric_pruning_keeps_projected_away_filter_correct_across_a_full_raw_batch() {
     let directory = tempfile::tempdir().unwrap();
     let low_path = directory.path().join("low.parquet");
@@ -144,11 +145,44 @@ async fn metric_pruning_keeps_projected_away_filter_correct_across_a_full_raw_ba
         .append_files(&AppendRequest::new("low-batch", low_files))
         .await
         .unwrap();
+    let mut evolved = schema();
+    evolved.schema_id = 2;
+    evolved.parent_schema_id = Some(1);
+    evolved.fields.push(Field {
+        field_id: 2,
+        name: "added".into(),
+        required: false,
+        field_type: LogicalType::Int64,
+        doc: None,
+        initial_default: Some(TypedScalar::Int64(42)),
+        write_default: None,
+    });
     table
-        .append_files(&AppendRequest::new(
-            "high-file",
-            vec![append_file(&high_path, &high_bytes, 100, 101, 256)],
-        ))
+        .transact(&otmp::TransactionRequest {
+            idempotency_key: "evolution".into(),
+            requirements: vec![
+                otmp::Requirement::CurrentSchemaIs { schema_id: 1 },
+                otmp::Requirement::SchemaIdAbsent { schema_id: 2 },
+                otmp::Requirement::FieldIdsAbsent { field_ids: vec![2] },
+            ],
+            operations: vec![
+                otmp::OperationRequest::AddSchema {
+                    operation_id: "add".into(),
+                    schema: evolved,
+                },
+                otmp::OperationRequest::SetCurrentSchema {
+                    operation_id: "set".into(),
+                    schema_id: 2,
+                },
+            ],
+            commit_metadata: otmp::CommitMetadata::default(),
+        })
+        .await
+        .unwrap();
+    let mut high_file = append_file(&high_path, &high_bytes, 100, 101, 256);
+    high_file.schema_id = 2;
+    table
+        .append_files(&AppendRequest::new("high-file", vec![high_file]))
         .await
         .unwrap();
 
@@ -193,6 +227,23 @@ async fn metric_pruning_keeps_projected_away_filter_correct_across_a_full_raw_ba
             .value(0),
         2
     );
+    for preflight_concurrency in [1, 8] {
+        let historical = OtmpTableProvider::open(
+            &table,
+            MetadataSelection::Current,
+            SnapshotSelection::SequenceNumber(2),
+            ReaderOptions::default(),
+            ProviderOptions {
+                preflight_concurrency,
+                ..ProviderOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        // Historical traversal starts with the newest snapshot, then follows
+        // all 256 pruned older descriptors under their immutable schema.
+        assert_eq!(count(historical).await, 2);
+    }
 }
 
 #[tokio::test]
@@ -262,4 +313,108 @@ async fn descriptor_charges_obey_the_datafusion_pool_and_release_with_the_plan()
         .unwrap_err();
     assert!(error.to_string().contains("Resources exhausted"), "{error}");
     assert_eq!(exhausted_pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn every_preflight_concurrency_preserves_rows_and_selected_file_membership() {
+    use datafusion::datasource::physical_plan::FileScanConfig;
+    use datafusion::datasource::source::DataSourceExec;
+
+    let directory = tempfile::tempdir().unwrap();
+    let table = Table::new(LocalObjectStore::new(directory.path()).unwrap());
+    table
+        .initialize(InitializeRequest::new(schema()))
+        .await
+        .unwrap();
+    let mut files = Vec::new();
+    for ordinal in 0..12 {
+        let source = directory.path().join(format!("{ordinal}.parquet"));
+        let first = i64::try_from(ordinal).unwrap() * 100;
+        let bytes = write_parquet(&source, vec![first, first + 1, first + 2]);
+        files.push(append_file(&source, &bytes, first, first + 2, ordinal));
+    }
+    table
+        .append_files(&AppendRequest::new("membership", files))
+        .await
+        .unwrap();
+    let mut expected_rows = None;
+    let mut expected_files = None;
+    for (file_pruning, preflight_concurrency) in [
+        (false, 1),
+        (true, 1),
+        (true, 2),
+        (true, 4),
+        (true, 8),
+        (true, 16),
+        (true, 32),
+    ] {
+        let provider = OtmpTableProvider::open(
+            &table,
+            MetadataSelection::Current,
+            SnapshotSelection::Ref("main".into()),
+            ReaderOptions::default(),
+            ProviderOptions {
+                file_pruning,
+                preflight_concurrency,
+                ..ProviderOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let context = SessionContext::new();
+        context.register_table("t", Arc::new(provider)).unwrap();
+        let plan = context
+            .sql("SELECT id FROM t WHERE id >= 600 ORDER BY id")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let mut selected = Vec::new();
+        let mut pending = vec![plan.clone()];
+        while let Some(node) = pending.pop() {
+            if let Some(scan) = node.downcast_ref::<DataSourceExec>() {
+                let config = scan.data_source().downcast_ref::<FileScanConfig>().unwrap();
+                selected.extend(
+                    config
+                        .file_groups
+                        .iter()
+                        .flat_map(datafusion::datasource::physical_plan::FileGroup::iter)
+                        .map(|file| file.object_meta.location.to_string()),
+                );
+            }
+            pending.extend(node.children().into_iter().cloned());
+        }
+        selected.sort();
+        assert_eq!(selected.len(), if file_pruning { 6 } else { 12 });
+        if file_pruning {
+            assert_eq!(
+                &selected,
+                expected_files.get_or_insert_with(|| selected.clone())
+            );
+        }
+        let batches = datafusion::physical_plan::collect(plan, context.task_ctx())
+            .await
+            .unwrap();
+        let rows: Vec<i64> = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            })
+            .collect();
+        assert_eq!(&rows, expected_rows.get_or_insert_with(|| rows.clone()));
+        assert_eq!(
+            rows,
+            (6..12)
+                .flat_map(|n| [n * 100, n * 100 + 1, n * 100 + 2])
+                .collect::<Vec<_>>()
+        );
+    }
 }

@@ -1,0 +1,11 @@
+{
+  "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6\nBuildVersion:\t\t25G72\n",
+  "machine": "arm64",
+  "cpu": "Apple M4 Max",
+  "memory_bytes": 68719476736,
+  "source_hashes_match": true,
+  "original_binary": {
+    "path": "/private/tmp/otmp-reader-planning-evidence/reader_scale-83d3e6a",
+    "sha256": "f6f9dc13e75b1f578f15dc3f66aa76d6facd273fde9e328b0df34544360507cf"
+  }
+}

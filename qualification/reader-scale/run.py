@@ -403,6 +403,30 @@ def _phase_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _overlap_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
+    queries: dict[str, dict[str, list[float | int]]] = {}
+    physical: dict[str, dict[str, list[float | int]]] = {}
+    throughput: dict[str, list[float]] = {}
+    for result in records:
+        for round in result.get("overlapping_rounds", []):
+            key = str(round["pass"])
+            for field in IO_FIELDS:
+                _append_metric(physical.setdefault(key, {}), field, round["io"].get(field))
+            if round["elapsed_ms"] > 0:
+                throughput.setdefault(key, []).append(len(round["queries"]) * 1000 / round["elapsed_ms"])
+            for query in round["queries"]:
+                metrics = queries.setdefault(f"{key}:{query['query']}", {})
+                for field in ("planning_ms", "planning_to_first_result_ms", "execution_ms", "complete_ms"):
+                    _append_metric(metrics, field, query.get(field))
+    return {
+        "query_latency_ms": {key: {field: distribution(values) for field, values in metrics.items()}
+                             for key, metrics in queries.items()},
+        "round_io": {key: {field: distribution(values) for field, values in metrics.items()}
+                     for key, metrics in physical.items()},
+        "throughput_queries_per_second": {key: distribution(values) for key, values in throughput.items()},
+    }
+
+
 def build_summary(sample_dirs: Iterable[pathlib.Path]) -> dict[str, Any]:
     successes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
@@ -465,6 +489,7 @@ def build_summary(sample_dirs: Iterable[pathlib.Path]) -> dict[str, Any]:
     failure_wall = [record["wall_ms"] for record in process_failures]
     return {
         "samples": {"total": total, "successful": len(successes), "failed": len(failures)},
+        "overlapping": _overlap_metrics(successes),
         "latency_ms": {
             "wall": distribution(wall),
             "process_exit": distribution(process_exit),

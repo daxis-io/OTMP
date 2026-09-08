@@ -7,6 +7,8 @@ pub struct ProviderOptions {
     pub footer_cache_bytes: usize,
     /// Disable file-metric pruning to obtain an unpruned native scan for qualification.
     pub file_pruning: bool,
+    /// Admitted preflights across scans sharing this provider (1..=32).
+    pub preflight_concurrency: usize,
 }
 
 impl Default for ProviderOptions {
@@ -15,6 +17,7 @@ impl Default for ProviderOptions {
             planning_budget_bytes: 64 * 1024 * 1024,
             footer_cache_bytes: crate::footer::DEFAULT_FOOTER_CACHE_BYTES,
             file_pruning: true,
+            preflight_concurrency: 8,
         }
     }
 }
@@ -28,7 +31,11 @@ pub struct OtmpTableProvider<S> {
     options: ProviderOptions,
     footer_cache: std::sync::Arc<crate::footer::FooterCache>,
     metrics: ProviderCounters,
+    preflight: std::sync::Arc<tokio::sync::Semaphore>,
+    active_scans: std::sync::atomic::AtomicUsize,
     io: std::sync::Arc<crate::store::ReadCounters>,
+    #[cfg(test)]
+    hooks: tests::Hooks,
 }
 
 /// Retains the physical-plan charge for selected file descriptors. A clone is
@@ -83,15 +90,26 @@ impl<S: otmp::ObjectStore> OtmpTableProvider<S> {
                 "OTMP scan planning budget must be positive".into(),
             ));
         }
+        if !(1..=32).contains(&options.preflight_concurrency) {
+            return Err(datafusion::error::DataFusionError::Plan(
+                "OTMP preflight concurrency must be in 1..=32".into(),
+            ));
+        }
+        let preflight =
+            std::sync::Arc::new(tokio::sync::Semaphore::new(options.preflight_concurrency));
         let schema = schema_to_arrow(reader.schema())?;
         let footer_cache = crate::footer::FooterCache::new(options.footer_cache_bytes)?;
         Ok(Self {
             reader: std::sync::Arc::new(reader),
             schema,
             options,
+            preflight,
+            active_scans: std::sync::atomic::AtomicUsize::new(0),
             footer_cache,
             metrics: ProviderCounters::default(),
             io: std::sync::Arc::new(crate::store::ReadCounters::default()),
+            #[cfg(test)]
+            hooks: tests::Hooks::default(),
         })
     }
 
@@ -106,48 +124,25 @@ impl<S: otmp::ObjectStore> OtmpTableProvider<S> {
     }
 }
 
-impl<S> std::fmt::Debug for OtmpTableProvider<S> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("OtmpTableProvider")
-            .field("schema", &self.schema)
-            .field("options", &self.options)
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait::async_trait]
-impl<S> datafusion::catalog::TableProvider for OtmpTableProvider<S>
-where
-    S: otmp::ObjectStore + std::fmt::Debug,
-{
-    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef {
-        self.schema.clone()
-    }
-
-    fn table_type(&self) -> datafusion::logical_expr::TableType {
-        datafusion::logical_expr::TableType::Base
-    }
-
+impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
     // Planning must retain the descriptor reservation, schema adapters, and footer
     // validation in one scope so every early return releases the same resources.
     #[allow(clippy::too_many_lines)]
-    async fn scan(
+    async fn plan_scan(
         &self,
         state: &dyn datafusion::catalog::Session,
         projection: Option<&Vec<usize>>,
         filters: &[datafusion::logical_expr::Expr],
         limit: Option<usize>,
+        trace: &mut ScanTrace<'_>,
     ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::physical_plan::ExecutionPlan>>
     {
         use datafusion::datasource::listing::PartitionedFile;
-        use datafusion::datasource::physical_plan::parquet::ParquetFileReaderFactory;
         use datafusion::datasource::physical_plan::{FileScanConfigBuilder, ParquetSource};
         use datafusion::datasource::source::DataSourceExec;
         use datafusion::execution::object_store::ObjectStoreUrl;
-        use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
-        use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-        use std::collections::BTreeMap;
+        use futures_util::{StreamExt, stream::FuturesUnordered};
+        use std::collections::{BTreeMap, BTreeSet};
         use std::sync::Arc;
         let started = std::time::Instant::now();
         let predicate = filters
@@ -184,85 +179,100 @@ where
             datafusion::execution::memory_pool::MemoryConsumer::new("otmp scan descriptors")
                 .register(&state.runtime_env().memory_pool),
         );
+        let query = Arc::new(self.reader.schema().clone());
         let mut descriptor_bytes = 0usize;
         let mut cursor = None;
-        let mut descriptors = Vec::new();
+        let mut descriptors = BTreeMap::new();
         let mut groups: BTreeMap<u32, Vec<PartitionedFile>> = BTreeMap::new();
         let mut schemas = BTreeMap::new();
+        let mut pending = std::collections::VecDeque::new();
+        let mut active = FuturesUnordered::new();
+        let mut admission = FuturesUnordered::new();
+        let mut admission_started = started;
+        let mut metadata = FuturesUnordered::new();
+        let mut objects = BTreeMap::new();
+        metadata.push(self.read_batch(None, &metric_fields, BTreeSet::new()));
         loop {
-            let batch = self
-                .reader
-                .files(cursor, &metric_fields, 256)
-                .await
-                .map_err(external)?;
-            for file in &batch.files {
-                if let std::collections::btree_map::Entry::Vacant(entry) =
-                    schemas.entry(file.schema_id)
-                {
-                    let schema = self
-                        .reader
-                        .file_schema(file.schema_id)
-                        .await
-                        .map_err(external)?;
-                    // The metadata cache owns the immutable schema allocation;
-                    // this plan retains one bounded schema reference and adapter.
-                    let charge = 1024 + schema.fields.len() * 256;
-                    reserve_descriptors(
-                        &reservation,
-                        &mut descriptor_bytes,
-                        charge,
-                        self.options.planning_budget_bytes,
-                    )?;
-                    entry.insert(schema);
-                }
-            }
-            self.metrics.considered.fetch_add(
-                batch.files.len() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            let keep = if self.options.file_pruning {
-                if let Some(predicate) = &predicate {
-                    crate::pruning::prune(
-                        predicate.clone(),
-                        self.reader.schema(),
-                        self.schema.clone(),
-                        &batch.files,
-                        &schemas,
-                    )?
-                } else {
-                    vec![true; batch.files.len()]
-                }
-            } else {
-                vec![true; batch.files.len()]
-            };
-            for (file, keep) in batch.files.into_iter().zip(keep) {
-                if !keep {
-                    self.metrics
-                        .pruned
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    continue;
-                }
-                reserve_descriptors(
-                    &reservation,
-                    &mut descriptor_bytes,
-                    descriptor_charge(file.file.uri.as_str()),
-                    self.options.planning_budget_bytes,
-                )?;
-                let planned =
-                    PartitionedFile::new(file.file.uri.as_str(), file.file.file_size_bytes)
-                        .with_extension(PlanningReservation {
-                            _reservation: reservation.clone(),
-                        });
-                groups.entry(file.schema_id).or_default().push(planned);
-                descriptors.push((
-                    file.file.uri,
-                    file.file.content_sha256,
-                    file.file.file_size_bytes,
+            if pending.is_empty() && metadata.is_empty() && cursor.is_some() {
+                metadata.push(self.read_batch(
+                    cursor.take(),
+                    &metric_fields,
+                    schemas.keys().copied().collect(),
                 ));
             }
-            cursor = batch.next_cursor;
-            if cursor.is_none() {
+            // Do not let a broad scan replenish the whole rolling window
+            // while peers are still retrieving metadata. Existing permits
+            // drain normally; the provider semaphore remains the hard bound.
+            let share = (self.options.preflight_concurrency
+                / self
+                    .active_scans
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .max(1))
+            .max(1);
+            if !pending.is_empty() && admission.is_empty() && active.len() < share {
+                admission_started = std::time::Instant::now();
+                admission.push(self.preflight.clone().acquire_owned());
+            }
+            if metadata.is_empty() && active.is_empty() && pending.is_empty() {
                 break;
+            }
+            tokio::select! {
+                biased;
+                Some(result) = active.next(), if !active.is_empty() => {
+                    let (object, validation_us): (crate::store::ImmutableObject, u64) = result?;
+                    trace.validation_us += validation_us;
+                    objects.insert(object.uri.to_string(), object);
+                    // A rolling window can stay ready on local/warm storage.
+                    // Return to peer scans after one completion even when the
+                    // caller drives several query futures from a single task.
+                    tokio::task::yield_now().await;
+                }
+                Some(result) = metadata.next(), if !metadata.is_empty() => {
+                    let (batch, new_schemas) = result?;
+                    trace.batches += 1;
+                    for (id, schema) in new_schemas {
+                        reserve_descriptors(&reservation, &mut descriptor_bytes,
+                            1024 + schema.fields.len() * 256, self.options.planning_budget_bytes)?;
+                        schemas.insert(id, schema);
+                    }
+                    self.metrics.considered.fetch_add(batch.files.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    let keep = if self.options.file_pruning {
+                        if let Some(predicate) = &predicate {
+                            crate::pruning::prune(predicate.clone(), self.reader.schema(), self.schema.clone(), &batch.files, &schemas)?
+                        } else { vec![true; batch.files.len()] }
+                    } else { vec![true; batch.files.len()] };
+                    for (file, keep) in batch.files.into_iter().zip(keep) {
+                        // The scan-wide registry also sees pruned descriptors, so
+                        // later batches cannot hide conflicting URI identities.
+                        reserve_descriptors(&reservation, &mut descriptor_bytes,
+                            descriptor_charge(file.file.uri.as_str()), self.options.planning_budget_bytes)?;
+                        let identity = (file.file.content_sha256, file.file.file_size_bytes);
+                        let entry = descriptors.entry(file.file.uri.to_string()).or_insert((identity, None));
+                        if entry.0 != identity {
+                            return Err(external(otmp::RuntimeError::Corrupt("conflicting immutable data descriptors use the same URI".into())));
+                        }
+                        if !keep {
+                            self.metrics.pruned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            continue;
+                        }
+                        if entry.1.is_none() {
+                            entry.1 = Some(file.schema_id);
+                            pending.push_back((file.file.uri.clone(), identity, file.schema_id));
+                        }
+                        let planned = PartitionedFile::new(file.file.uri.as_str(), file.file.file_size_bytes)
+                            .with_extension(PlanningReservation { _reservation: reservation.clone() });
+                        groups.entry(file.schema_id).or_default().push(planned);
+                    }
+                    cursor = batch.next_cursor;
+                    // The FileBatch metric reservations drop at this branch's
+                    // end; only compact, planning-charged candidates remain.
+                }
+                Some(permit) = admission.next(), if !admission.is_empty() => {
+                    trace.admission_us += elapsed_micros(admission_started);
+                    let permit = permit.map_err(|_| external(otmp::RuntimeError::Cancelled))?;
+                    let (uri, (hash, length), schema_id) = pending.pop_front().expect("one pending admission");
+                    active.push(self.preflight_object(uri, hash, length, vec![schemas[&schema_id].clone()], permit, query.clone()));
+                }
             }
         }
         if groups.is_empty() {
@@ -278,40 +288,52 @@ where
                 schema,
             )));
         }
-        let bridge = Arc::new(
-            crate::store::ReadOnlyStore::with_counters(
-                self.reader.store().clone(),
-                descriptors,
-                self.io.clone(),
-            )
-            .await
-            .map_err(external)?,
-        );
+        let bridge = Arc::new(crate::store::ReadOnlyStore::from_validated(
+            self.reader.store().clone(),
+            objects,
+            self.io.clone(),
+        ));
         let factory = Arc::new(crate::footer::FooterReaderFactory::new(
             bridge,
             self.footer_cache.clone(),
         ));
-        let query = Arc::new(self.reader.schema().clone());
         let mut plans = Vec::new();
-        let metrics = ExecutionPlanMetricsSet::new();
         for (schema_id, files) in groups {
             let adapter = Arc::new(crate::schemaadapter::OtmpAdapterFactory::new(
                 query.clone(),
                 schemas[&schema_id].clone(),
             ));
-            // Validate all query fields, including projected-away required fields,
-            // through the same bounded footer cache used during execution.
             for file in &files {
-                let mut reader = factory.create_reader(0, file.clone(), None, &metrics)?;
-                let metadata = reader
-                    .get_metadata(None)
-                    .await
-                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-                let physical = datafusion::parquet::arrow::parquet_to_arrow_schema(
-                    metadata.file_metadata().schema_descr(),
-                    metadata.file_metadata().key_value_metadata(),
-                )?;
-                adapter.create(self.schema.clone(), Arc::new(physical))?;
+                if descriptors[&file.object_meta.location.to_string()].1 != Some(schema_id) {
+                    use datafusion::datasource::physical_plan::parquet::ParquetFileReaderFactory;
+                    use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
+                    let waited = std::time::Instant::now();
+                    let _permit = self
+                        .preflight
+                        .acquire()
+                        .await
+                        .map_err(|_| external(otmp::RuntimeError::Cancelled))?;
+                    trace.admission_us += elapsed_micros(waited);
+                    let mut reader = factory.as_ref().clone().for_preflight().create_reader(
+                        0,
+                        file.clone(),
+                        None,
+                        &datafusion::physical_plan::metrics::ExecutionPlanMetricsSet::new(),
+                    )?;
+                    let footer = reader
+                        .get_metadata(None)
+                        .await
+                        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                    let validation_started = std::time::Instant::now();
+                    #[cfg(test)]
+                    tests::pause(&self.hooks.binding).await;
+                    let physical = datafusion::parquet::arrow::parquet_to_arrow_schema(
+                        footer.file_metadata().schema_descr(),
+                        footer.file_metadata().key_value_metadata(),
+                    )?;
+                    adapter.create(self.schema.clone(), Arc::new(physical))?;
+                    trace.validation_us += elapsed_micros(validation_started);
+                }
             }
             let mut source = ParquetSource::new(self.schema.clone())
                 .with_parquet_file_reader_factory(factory.clone());
@@ -344,6 +366,153 @@ where
         } else {
             datafusion::physical_plan::union::UnionExec::try_new(plans)
         }
+    }
+
+    async fn read_batch(
+        &self,
+        cursor: Option<otmp::FileCursor>,
+        fields: &[u32],
+        known: std::collections::BTreeSet<u32>,
+    ) -> datafusion::error::Result<(
+        otmp::FileBatch,
+        std::collections::BTreeMap<u32, std::sync::Arc<otmp_protocol::Schema>>,
+    )> {
+        let batch = self
+            .reader
+            .files(cursor, fields, 256)
+            .await
+            .map_err(external)?;
+        #[cfg(test)]
+        let batch = {
+            let mut batch = batch;
+            if let Some(edit) = &self.hooks.batch {
+                edit(&mut batch.files);
+            }
+            batch
+        };
+        let mut schemas = std::collections::BTreeMap::new();
+        for file in &batch.files {
+            if !known.contains(&file.schema_id) && !schemas.contains_key(&file.schema_id) {
+                schemas.insert(
+                    file.schema_id,
+                    self.reader
+                        .file_schema(file.schema_id)
+                        .await
+                        .map_err(external)?,
+                );
+            }
+        }
+        Ok((batch, schemas))
+    }
+    async fn preflight_object(
+        &self,
+        uri: otmp_protocol::RelativeUri,
+        hash: Option<otmp_protocol::Sha256>,
+        length: u64,
+        schemas: Vec<std::sync::Arc<otmp_protocol::Schema>>,
+        _permit: tokio::sync::OwnedSemaphorePermit,
+        query: std::sync::Arc<otmp_protocol::Schema>,
+    ) -> datafusion::error::Result<(crate::store::ImmutableObject, u64)> {
+        use datafusion::datasource::physical_plan::parquet::ParquetFileReaderFactory;
+        use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
+        use std::sync::Arc;
+        let bridge = Arc::new(
+            crate::store::ReadOnlyStore::with_counters(
+                self.reader.store().clone(),
+                [(uri.clone(), hash, length)],
+                self.io.clone(),
+            )
+            .await
+            .map_err(external)?,
+        );
+        #[cfg(test)]
+        tests::pause(&self.hooks.after_pin).await;
+        let factory =
+            crate::footer::FooterReaderFactory::new(bridge.clone(), self.footer_cache.clone())
+                .for_preflight();
+        let mut reader = factory.create_reader(
+            0,
+            datafusion::datasource::listing::PartitionedFile::new(uri.as_str(), length),
+            None,
+            &datafusion::physical_plan::metrics::ExecutionPlanMetricsSet::new(),
+        )?;
+        let metadata = reader
+            .get_metadata(None)
+            .await
+            .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+        let validation_started = std::time::Instant::now();
+        #[cfg(test)]
+        tests::pause(&self.hooks.validation).await;
+        let physical = Arc::new(datafusion::parquet::arrow::parquet_to_arrow_schema(
+            metadata.file_metadata().schema_descr(),
+            metadata.file_metadata().key_value_metadata(),
+        )?);
+        for schema in schemas {
+            crate::schemaadapter::OtmpAdapterFactory::new(query.clone(), schema)
+                .create(self.schema.clone(), physical.clone())?;
+        }
+        Ok((
+            bridge
+                .pinned_objects()
+                .next()
+                .expect("one pinned object")
+                .clone(),
+            elapsed_micros(validation_started),
+        ))
+    }
+}
+
+#[cfg(test)]
+#[path = "provider_tests.rs"]
+mod tests;
+
+impl<S> std::fmt::Debug for OtmpTableProvider<S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OtmpTableProvider")
+            .field("schema", &self.schema)
+            .field("options", &self.options)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> datafusion::catalog::TableProvider for OtmpTableProvider<S>
+where
+    S: otmp::ObjectStore + std::fmt::Debug,
+{
+    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef {
+        self.schema.clone()
+    }
+
+    fn table_type(&self) -> datafusion::logical_expr::TableType {
+        datafusion::logical_expr::TableType::Base
+    }
+
+    #[tracing::instrument(name = "otmp.scan", skip_all, fields(scan_id = NEXT_SCAN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))]
+    async fn scan(
+        &self,
+        state: &dyn datafusion::catalog::Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[datafusion::logical_expr::Expr],
+        limit: Option<usize>,
+    ) -> datafusion::error::Result<std::sync::Arc<dyn datafusion::physical_plan::ExecutionPlan>>
+    {
+        self.active_scans
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut trace = ScanTrace {
+            active_scans: &self.active_scans,
+            started: std::time::Instant::now(),
+            admission_us: 0,
+            validation_us: 0,
+            batches: 0,
+            outcome: "cancelled",
+        };
+        let result = self
+            .plan_scan(state, projection, filters, limit, &mut trace)
+            .await;
+        trace.outcome = if result.is_ok() { "success" } else { "error" };
+        result
     }
 
     fn supports_filters_pushdown(
@@ -516,4 +685,23 @@ fn reserve_descriptors(
     reservation.try_grow(amount)?;
     *used = next;
     Ok(())
+}
+
+static NEXT_SCAN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+struct ScanTrace<'a> {
+    active_scans: &'a std::sync::atomic::AtomicUsize,
+    started: std::time::Instant,
+    admission_us: u64,
+    validation_us: u64,
+    batches: u64,
+    outcome: &'static str,
+}
+impl Drop for ScanTrace<'_> {
+    fn drop(&mut self) {
+        self.active_scans
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(target: "otmp.scan", elapsed_us = elapsed_micros(self.started),
+            admission_wait_us = self.admission_us, validation_us = self.validation_us,
+            metadata_batches = self.batches, outcome = self.outcome, "scan summary");
+    }
 }

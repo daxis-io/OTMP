@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 fs2.workspace = true
+futures-util = "0.3.34"
 hex.workspace = true
 otmp-protocol.workspace = true
 rusqlite.workspace = true

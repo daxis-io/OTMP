@@ -1,0 +1,70 @@
+{
+  "scale-smoke": {
+    "command": [
+      "python3",
+      "qualification/reader-scale/smoke.py",
+      "--binary",
+      "/private/tmp/otmp-reader-review-repairs/reader_scale-candidate-v8"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 1.7715510409325361
+  },
+  "concurrency-v8": {
+    "command": [
+      "python3",
+      "qualification/reader-scale/concurrency.py",
+      "--baseline",
+      "/private/tmp/otmp-reader-concurrency-evidence/reader_scale-instrumentation",
+      "--eight-query-baseline",
+      "/private/tmp/otmp-reader-concurrency-evidence/reader_scale-reservation-control",
+      "--candidate",
+      "/private/tmp/otmp-reader-review-repairs/reader_scale-candidate-v8",
+      "--fixtures",
+      "/private/tmp/otmp-reader-concurrency-evidence/concurrency-fixtures",
+      "--out",
+      "/private/tmp/otmp-reader-review-repairs/concurrency-v8"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 215.3779120829422
+  },
+  "original-paired-v8": {
+    "command": [
+      "python3",
+      "qualification/reader-planning/run.py",
+      "--baseline",
+      "/private/tmp/otmp-reader-planning-evidence/reader_scale-83d3e6a",
+      "--candidate",
+      "/private/tmp/otmp-reader-review-repairs/reader_scale-candidate-v8",
+      "--fixtures",
+      "/private/tmp/otmp-reader-scale-evidence/fixtures",
+      "--out",
+      "/private/tmp/otmp-reader-review-repairs/original-paired-v8"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 491.6734507079236
+  },
+  "iceberg-v8": {
+    "command": [
+      "python3",
+      "qualification/reader-comparison/run.py",
+      "--binary",
+      "/private/tmp/otmp-reader-review-repairs/comparison-candidate-v8",
+      "--lock",
+      "qualification/reader-comparison/Cargo.lock",
+      "--source-repo",
+      "/private/tmp/otmp-reader-concurrency",
+      "--source-4096",
+      "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-4096",
+      "--derived-4096",
+      "/private/tmp/otmp-reader-planning-evidence/comparison-fixtures/growth-4096",
+      "--source-16384",
+      "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16384",
+      "--derived-16384",
+      "/private/tmp/otmp-reader-planning-evidence/comparison-fixtures/growth-16384",
+      "--out",
+      "/private/tmp/otmp-reader-review-repairs/iceberg-v8"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 153.4031884581782
+  }
+}

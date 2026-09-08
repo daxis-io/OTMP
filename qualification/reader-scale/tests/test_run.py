@@ -16,6 +16,20 @@ FAKE = HERE / "fake_worker.py"
 
 
 class PercentileTests(unittest.TestCase):
+    def test_overlap_summary_uses_query_timers_and_round_physical_counts(self):
+        summary = run._overlap_metrics([{"overlapping_rounds": [{
+            "pass": 0, "elapsed_ms": 20, "io": {"range_requests": 7},
+            "queries": [
+                {"query": 0, "planning_ms": 12, "execution_ms": 3, "complete_ms": 15,
+                 "planning_to_first_result_ms": 14},
+                {"query": 1, "planning_ms": 4, "execution_ms": 2, "complete_ms": 6,
+                 "planning_to_first_result_ms": 5},
+            ],
+        }]}])
+        self.assertEqual(summary["query_latency_ms"]["0:1"]["planning_ms"]["p95"], 4)
+        self.assertEqual(summary["round_io"]["0"]["range_requests"]["p95"], 7)
+        self.assertEqual(summary["throughput_queries_per_second"]["0"]["p50"], 100)
+
     def test_nearest_rank_boundaries(self):
         self.assertEqual(run.nearest_rank([9, 1, 5, 3], 0.50), 3)
         self.assertEqual(run.nearest_rank([9, 1, 5, 3], 0.95), 9)

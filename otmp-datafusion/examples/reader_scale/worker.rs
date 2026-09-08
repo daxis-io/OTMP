@@ -16,6 +16,11 @@ pub struct RunConfig {
     pub record_budget: usize,
     pub df_pool_bytes: usize,
     pub execute: bool,
+    pub preflight_concurrency: usize,
+    pub footer_budget: usize,
+    pub overlapping_survivors: Vec<Option<usize>>,
+    pub data_delays_ms: std::collections::BTreeMap<String, u64>,
+    pub data_fault: Option<super::transport::DataFault>,
 }
 impl Default for RunConfig {
     fn default() -> Self {
@@ -31,6 +36,11 @@ impl Default for RunConfig {
             record_budget: 1024 * 1024,
             df_pool_bytes: 256 * 1024 * 1024,
             execute: true,
+            preflight_concurrency: ProviderOptions::default().preflight_concurrency,
+            footer_budget: ProviderOptions::default().footer_cache_bytes,
+            overlapping_survivors: Vec::new(),
+            data_delays_ms: std::collections::BTreeMap::new(),
+            data_fault: None,
         }
     }
 }
@@ -42,6 +52,18 @@ pub async fn run(root: &Path, config: RunConfig) -> Result<Value, Error> {
         || !(1..=8).contains(&config.metadata_inflight)
         || config.delay_ms > 10_000
         || config.df_pool_bytes == 0
+        || !(1..=32).contains(&config.preflight_concurrency)
+        || config.overlapping_survivors.len() > 8
+        || config.data_delays_ms.iter().any(|(op, ms)| {
+            !matches!(op.as_str(), "stat" | "trailer" | "footer" | "data") || *ms > 10_000
+        })
+        || config.data_fault.as_ref().is_some_and(|fault| {
+            fault.request == 0
+                || !matches!(
+                    fault.operation.as_str(),
+                    "stat" | "trailer" | "footer" | "data"
+                )
+        })
     {
         return Err("invalid run configuration".into());
     }
@@ -62,7 +84,8 @@ pub async fn run(root: &Path, config: RunConfig) -> Result<Value, Error> {
     let store = MeasuredStore::new(
         LocalObjectStore::new(root)?,
         Duration::from_millis(config.delay_ms),
-    );
+    )
+    .with_data_controls(config.data_delays_ms.clone(), config.data_fault.clone());
     let table = Table::new(store.clone());
     let mut phases = vec![
         json!({"name":"fixture_validation","pass":0,"elapsed_ms":ms(worker_started),"io":Counts::default(),"reader":null,"provider":null,"pool_reserved_bytes":0}),
@@ -83,8 +106,9 @@ pub async fn run(root: &Path, config: RunConfig) -> Result<Value, Error> {
         options,
         ProviderOptions {
             planning_budget_bytes: config.planning_budget,
+            preflight_concurrency: config.preflight_concurrency,
+            footer_cache_bytes: config.footer_budget,
             file_pruning: config.pruning,
-            ..ProviderOptions::default()
         },
     )
     .await;
@@ -138,7 +162,38 @@ pub async fn run(root: &Path, config: RunConfig) -> Result<Value, Error> {
     ));
     let mut error = None;
     let mut result = None;
-    for pass in 0..config.passes {
+    let mut overlapping_rounds = Vec::new();
+    if !config.overlapping_survivors.is_empty() {
+        for pass in 0..config.passes {
+            let started = Instant::now();
+            let before = store.snapshot();
+            let queries = futures_util::future::join_all(
+                config
+                    .overlapping_survivors
+                    .iter()
+                    .enumerate()
+                    .map(|(query, survivors)| {
+                        timed_query(&context, files, rows, *survivors, config.execute, query)
+                    }),
+            )
+            .await;
+            let queries: Vec<_> = queries.into_iter().collect::<Result<_, _>>()?;
+            if let Some(failed) = queries.iter().find_map(|query| query.get("error")) {
+                error = Some(failed.clone());
+            }
+            overlapping_rounds.push(json!({"pass":pass,"elapsed_ms":ms(started),"queries":queries,
+                "io":store.snapshot().delta(&before),"reader":reader_delta(provider.reader().statistics(),ReaderStatistics::default()),
+                "provider":provider_delta(provider.metrics(),ProviderStatistics::default()),"pool_reserved_bytes":pool.reserved()}));
+            if error.is_some() {
+                break;
+            }
+        }
+    }
+    for pass in 0..if config.overlapping_survivors.is_empty() {
+        config.passes
+    } else {
+        0
+    } {
         let started = Instant::now();
         let before = store.snapshot();
         let reader_before = provider.reader().statistics();
@@ -223,7 +278,7 @@ pub async fn run(root: &Path, config: RunConfig) -> Result<Value, Error> {
     if reader.peak_cache_bytes > config.metadata_budget {
         violations.push("metadata cache exceeded its budget");
     }
-    if provider.metrics().peak_footer_cache_bytes > ProviderOptions::default().footer_cache_bytes {
+    if provider.metrics().peak_footer_cache_bytes > config.footer_budget {
         violations.push("footer cache exceeded its budget");
     }
     let started = Instant::now();
@@ -249,13 +304,464 @@ pub async fn run(root: &Path, config: RunConfig) -> Result<Value, Error> {
         );
     }
     Ok(
-        json!({"violations":violations,"outcome":if error.is_some(){"error"}else{"success"},"fixture":fixture,"config":config,"phases":phases,"error":error,"result":result,"worker_elapsed_ms":ms(worker_started),"sql":sql,"target_partitions":4}),
+        json!({"violations":violations,"outcome":if error.is_some(){"error"}else{"success"},"fixture":fixture,"config":config,"phases":phases,"overlapping_rounds":overlapping_rounds,"error":error,"result":result,"worker_elapsed_ms":ms(worker_started),"sql":sql,"target_partitions":4}),
+    )
+}
+async fn timed_query(
+    context: &SessionContext,
+    files: usize,
+    rows: usize,
+    survivors: Option<usize>,
+    execute: bool,
+    query: usize,
+) -> Result<Value, Error> {
+    use futures_util::StreamExt;
+    let (first, count, sum) = fixture::expected(files, rows, survivors)?;
+    let sql =
+        format!("SELECT count(*) AS n, coalesce(sum(id), 0) AS total FROM t WHERE id >= {first}");
+    let started = Instant::now();
+    let planned = async { context.sql(&sql).await?.create_physical_plan().await }.await;
+    let planning_ms = ms(started);
+    let plan = match planned {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Ok(
+                json!({"query":query,"planning_ms":planning_ms,"complete_ms":ms(started),"error":error_details("planning", &error)}),
+            );
+        }
+    };
+    let execution = Instant::now();
+    let mut first_result = None;
+    let mut values = None;
+    let mut batches = 0;
+    if execute {
+        let result = async {
+            let mut stream = datafusion::physical_plan::execute_stream(plan, context.task_ctx())?;
+            while let Some(batch) = stream.next().await {
+                let batch = batch?;
+                first_result.get_or_insert_with(|| ms(started));
+                batches += 1;
+                if batch.num_rows() == 1 {
+                    values = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .zip(batch.column(1).as_any().downcast_ref::<Int64Array>())
+                        .map(|(n, total)| (n.value(0), total.value(0)));
+                }
+            }
+            Ok::<_, DataFusionError>(())
+        }
+        .await;
+        if let Err(error) = result {
+            return Ok(
+                json!({"query":query,"planning_ms":planning_ms,"complete_ms":ms(started),"error":error_details("execution", &error)}),
+            );
+        }
+        if batches != 1 || values != Some((count, sum)) {
+            return Ok(
+                json!({"query":query,"planning_ms":planning_ms,"complete_ms":ms(started),"error":{"stage":"execution","code":"QUALIFICATION_RESULT_MISMATCH","message":format!("expected ({count},{sum}), received {values:?} in {batches} batches")}}),
+            );
+        }
+    }
+    Ok(
+        json!({"query":query,"survivors":survivors,"planning_ms":planning_ms,"planning_to_first_result_ms":first_result,
+        "execution_ms":ms(execution),"complete_ms":ms(started),"result":execute.then(|| json!({"count":count,"sum":sum}))}),
     )
 }
 #[cfg(test)]
 mod tests {
     use super::super::fixture::{self, PrepareConfig};
     use super::*;
+    #[tokio::test]
+    async fn small_scan_does_not_queue_behind_an_entire_broad_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("table");
+        fixture::prepare(
+            &root,
+            PrepareConfig {
+                files: 16,
+                rows_per_file: 1,
+                ..PrepareConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let store = MeasuredStore::new(LocalObjectStore::new(&root).unwrap(), Duration::ZERO)
+            .with_data_controls([("footer".into(), 100)].into(), None);
+        let table = Table::new(store.clone());
+        let provider = OtmpTableProvider::open(
+            &table,
+            MetadataSelection::Current,
+            SnapshotSelection::Ref("main".into()),
+            ReaderOptions::default(),
+            ProviderOptions {
+                preflight_concurrency: 1,
+                ..ProviderOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let context = SessionContext::new();
+        context.register_table("t", Arc::new(provider)).unwrap();
+        let broad_context = context.clone();
+        let broad = tokio::spawn(async move {
+            broad_context
+                .sql("SELECT * FROM t")
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store
+                .snapshot()
+                .by_class
+                .get("data")
+                .is_none_or(|data| data.range_requests < 2)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let small = context
+            .sql("SELECT * FROM t WHERE id >= 15")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        assert!(!broad.is_finished());
+        assert!(store.snapshot().by_class["data"].stat_requests <= 4);
+        drop(small);
+        broad.abort();
+        assert!(broad.await.unwrap_err().is_cancelled());
+        assert_eq!(store.snapshot().active, 0);
+    }
+    #[tokio::test]
+    async fn cancelling_one_scan_keeps_shared_footer_io_alive_for_its_peer() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("table");
+        fixture::prepare(
+            &root,
+            PrepareConfig {
+                files: 1,
+                ..PrepareConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let store = MeasuredStore::new(LocalObjectStore::new(&root).unwrap(), Duration::ZERO)
+            .with_data_controls([("stat".into(), 100), ("trailer".into(), 100)].into(), None);
+        let table = Table::new(store.clone());
+        let provider = OtmpTableProvider::open(
+            &table,
+            MetadataSelection::Current,
+            SnapshotSelection::Ref("main".into()),
+            ReaderOptions::default(),
+            ProviderOptions::default(),
+        )
+        .await
+        .unwrap();
+        let context = SessionContext::new();
+        context.register_table("t", Arc::new(provider)).unwrap();
+        let query = |context: SessionContext| {
+            tokio::spawn(async move {
+                context
+                    .sql("SELECT * FROM t")
+                    .await
+                    .unwrap()
+                    .create_physical_plan()
+                    .await
+            })
+        };
+        let first = query(context.clone());
+        let second = query(context);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let io = store.snapshot();
+                if io.by_class.get("data").is_some_and(|data| {
+                    data.stat_requests == 2 && data.range_requests == 1 && data.active == 1
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        drop(second.await.unwrap().unwrap());
+        let io = store.snapshot();
+        assert_eq!(io.by_class["data"].range_requests, 2);
+        assert_eq!(io.by_class["data"].cancelled, 0);
+        assert_eq!(io.active, 0);
+    }
+    #[tokio::test]
+    async fn concurrent_preflight_makes_progress_at_the_sequential_minimum_footer_budget() {
+        use otmp::ObjectStore;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("table");
+        fixture::prepare(
+            &root,
+            PrepareConfig {
+                files: 8,
+                rows_per_file: 3,
+                footer_padding_bytes: vec![0, 4096],
+                ..PrepareConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let store = LocalObjectStore::new(&root).unwrap();
+        let mut budget = 0;
+        for entry in std::fs::read_dir(root.join("data")).unwrap() {
+            let path = entry.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap();
+            let footer =
+                u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap())
+                    as usize;
+            let uri: otmp_protocol::RelativeUri =
+                format!("data/{}", path.file_name().unwrap().to_str().unwrap())
+                    .parse()
+                    .unwrap();
+            let metadata = store.stat(&uri).await.unwrap();
+            budget = budget.max(
+                footer * 128
+                    + 65536
+                    + 512
+                    + uri.as_str().len() * 4
+                    + metadata.version.as_opaque().len() * 2,
+            );
+        }
+        for concurrency in [1, 8] {
+            let config: RunConfig = serde_json::from_value(json!({
+                "preflight_concurrency":concurrency,"footer_budget":budget,"execute":false,
+                "data_delays_ms":{"footer":2}
+            }))
+            .unwrap();
+            let output = run(&root, config).await.unwrap();
+            assert_eq!(
+                output["outcome"], "success",
+                "concurrency {concurrency}, budget {budget}: {output}"
+            );
+        }
+        let store = MeasuredStore::new(store, Duration::ZERO);
+        let [entered, release] = store.pause_next_trailer();
+        let table = Table::new(store.clone());
+        let provider = OtmpTableProvider::open(
+            &table,
+            MetadataSelection::Current,
+            SnapshotSelection::Ref("main".into()),
+            ReaderOptions::default(),
+            ProviderOptions {
+                footer_cache_bytes: budget,
+                ..ProviderOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let context = SessionContext::new();
+        context.register_table("t", Arc::new(provider)).unwrap();
+        let query = |context: SessionContext, sql: &'static str| {
+            tokio::spawn(
+                async move { context.sql(sql).await.unwrap().create_physical_plan().await },
+            )
+        };
+        let small = query(context.clone(), "SELECT * FROM t WHERE id < 3");
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        let mut large = query(context, "SELECT * FROM t WHERE id >= 3 AND id < 6");
+        tokio::select! {
+            result = &mut large => panic!("large preflight completed before the small trailer released its key: {result:?}"),
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        release.notify_one();
+        drop(small.await.unwrap().unwrap());
+        drop(large.await.unwrap().unwrap());
+        assert_eq!(store.snapshot().active, 0);
+    }
+    #[tokio::test]
+    async fn metadata_enumeration_overlaps_preflight_across_batch_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("table");
+        fixture::prepare(
+            &root,
+            PrepareConfig {
+                files: 257,
+                rows_per_file: 1,
+                ..PrepareConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let config: RunConfig = serde_json::from_value(json!({
+            "preflight_concurrency": 2,"execute":false,"delay_ms":1,
+            "data_delays_ms":{"footer":10}
+        }))
+        .unwrap();
+        let output = run(&root, config).await.unwrap();
+        assert_eq!(output["outcome"], "success", "{output}");
+        let planning = output["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "planning")
+            .unwrap();
+        assert_eq!(planning["provider"]["files_considered"], 257);
+        assert!(
+            planning["io"]["metadata_data_overlaps"].as_u64().unwrap() > 0,
+            "metadata and data must overlap at the same instant, not just have different historical peaks"
+        );
+    }
+    #[tokio::test]
+    async fn simultaneous_scans_share_one_footer_fill_but_pin_independently() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("table");
+        fixture::prepare(
+            &root,
+            PrepareConfig {
+                files: 1,
+                ..PrepareConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let config: RunConfig = serde_json::from_value(json!({
+            "preflight_concurrency": 8, "execute": false,
+            "overlapping_survivors": [null, null, null, null, null, null, null, null],
+            "data_delays_ms": {"stat": 10, "trailer": 10, "footer": 10}
+        }))
+        .unwrap();
+        let output = run(&root, config).await.unwrap();
+        assert_eq!(output["outcome"], "success", "{output}");
+        let io = &output["overlapping_rounds"][0]["io"]["by_class"]["data"];
+        assert_eq!(io["stat_requests"], 8);
+        assert_eq!(io["range_requests"], 2);
+        assert_eq!(io["active"], 0);
+    }
+    #[tokio::test]
+    async fn admitted_preflights_overlap_and_release_under_a_single_decode_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("table");
+        fixture::prepare(
+            &root,
+            PrepareConfig {
+                files: 8,
+                rows_per_file: 3,
+                ..PrepareConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        for concurrency in [1, 2, 4, 8, 16, 32] {
+            let config: RunConfig = serde_json::from_value(json!({
+                "preflight_concurrency": concurrency,
+                "footer_budget": 200_000,
+                "data_delays_ms": {"stat": 1,"trailer": 1,"footer": 1}
+            }))
+            .unwrap();
+            let output = run(&root, config).await.unwrap();
+            assert_eq!(output["outcome"], "success", "{output}");
+            let planning = output["phases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == "planning")
+                .unwrap();
+            let peak = planning["io"]["by_class"]["data"]["peak_inflight"]
+                .as_u64()
+                .unwrap();
+            assert!(peak <= concurrency as u64);
+            if concurrency > 1 {
+                assert!(peak > 1);
+            }
+            assert_eq!(planning["provider"]["files_considered"], 8);
+            assert_eq!(output["result"], json!({"count":24,"sum":276}));
+            assert_eq!(output["violations"], json!([]));
+        }
+    }
+    #[tokio::test]
+    async fn overlapping_queries_have_direct_timers_and_one_shared_io_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("table");
+        fixture::prepare(
+            &root,
+            PrepareConfig {
+                files: 4,
+                rows_per_file: 3,
+                ..PrepareConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let config: RunConfig = serde_json::from_value(json!({
+            "overlapping_survivors": [null, 1, 1, 1], "passes": 2,
+            "preflight_concurrency": 1
+        }))
+        .unwrap();
+        let output = run(&root, config).await.unwrap();
+        assert_eq!(output["outcome"], "success", "{output}");
+        let rounds = output["overlapping_rounds"].as_array().unwrap();
+        assert_eq!(rounds.len(), 2);
+        for round in rounds {
+            let queries = round["queries"].as_array().unwrap();
+            assert_eq!(queries.len(), 4);
+            assert_eq!(queries[0]["result"], json!({"count":12,"sum":66}));
+            for query in queries {
+                assert!(
+                    query.get("io").is_none(),
+                    "physical accounting belongs to the round"
+                );
+                assert!(query["planning_ms"].as_f64().unwrap() >= 0.0);
+                assert!(
+                    query["planning_to_first_result_ms"].as_f64().unwrap()
+                        >= query["planning_ms"].as_f64().unwrap()
+                );
+                assert!(
+                    query["complete_ms"].as_f64().unwrap()
+                        >= query["planning_to_first_result_ms"].as_f64().unwrap()
+                );
+            }
+            assert!(round["io"]["stat_requests"].as_u64().unwrap() > 0);
+            assert_eq!(round["io"]["active"], 0);
+        }
+        assert_eq!(output["violations"], json!([]));
+    }
+    #[tokio::test]
+    async fn targeted_preflight_failures_are_recorded_and_release_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("table");
+        fixture::prepare(
+            &root,
+            PrepareConfig {
+                files: 2,
+                ..PrepareConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        for operation in ["stat", "trailer", "footer"] {
+            let config: RunConfig = serde_json::from_value(json!({
+                "data_fault": {"operation": operation, "request": 1},
+                "data_delays_ms": {"stat": 1, "trailer": 2, "footer": 3}
+            }))
+            .unwrap();
+            let output = run(&root, config).await.unwrap();
+            assert_eq!(output["outcome"], "error", "{output}");
+            assert_eq!(output["error"]["stage"], "planning");
+            assert_eq!(output["violations"], json!([]));
+            assert!(
+                output["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("injected")
+            );
+        }
+    }
     #[tokio::test]
     async fn optimized_and_unpruned_runs_match_with_warm_pins_and_full_phase_accounting() {
         let temp = tempfile::tempdir().unwrap();

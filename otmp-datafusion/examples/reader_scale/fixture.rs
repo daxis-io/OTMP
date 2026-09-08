@@ -10,6 +10,7 @@ pub struct PrepareConfig {
     pub batch_size: usize,
     pub property_bytes: usize,
     pub small_tail: bool,
+    pub footer_padding_bytes: Vec<usize>,
 }
 impl Default for PrepareConfig {
     fn default() -> Self {
@@ -19,6 +20,7 @@ impl Default for PrepareConfig {
             batch_size: 128,
             property_bytes: 0,
             small_tail: true,
+            footer_padding_bytes: vec![0],
         }
     }
 }
@@ -52,6 +54,9 @@ pub async fn prepare(root: &Path, config: PrepareConfig) -> Result<Value, Error>
         || config.batch_size == 0
         || config.batch_size > 131_072
         || config.property_bytes > 16 * 1024 * 1024
+        || config.footer_padding_bytes.is_empty()
+        || config.footer_padding_bytes.len() > 32
+        || config.footer_padding_bytes.iter().any(|n| *n > 1024 * 1024)
     {
         return Err("fixture geometry exceeds qualification limits".into());
     }
@@ -71,13 +76,11 @@ pub async fn prepare(root: &Path, config: PrepareConfig) -> Result<Value, Error>
         for ordinal in start..end {
             let first = i64::try_from(ordinal * config.rows_per_file)?;
             let last = first + i64::try_from(config.rows_per_file)? - 1;
-            let batch = RecordBatch::try_new(
+            let bytes = parquet_bytes(
                 arrow.clone(),
-                vec![Arc::new(Int64Array::from_iter_values(first..=last))],
+                first..=last,
+                config.footer_padding_bytes[ordinal % config.footer_padding_bytes.len()],
             )?;
-            let mut writer = ArrowWriter::try_new(Vec::new(), arrow.clone(), None)?;
-            writer.write(&batch)?;
-            let bytes = writer.into_inner()?;
             let path = temporary.path().join(format!("{ordinal}.parquet"));
             std::fs::write(&path, &bytes)?;
             data_bytes += bytes.len() as u64;
@@ -136,9 +139,51 @@ pub async fn prepare(root: &Path, config: PrepareConfig) -> Result<Value, Error>
     table.verify().await?;
     describe(root, &config, data_bytes)
 }
+fn parquet_bytes(
+    schema: datafusion::arrow::datatypes::SchemaRef,
+    rows: std::ops::RangeInclusive<i64>,
+    padding: usize,
+) -> Result<Vec<u8>, Error> {
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int64Array::from_iter_values(rows))],
+    )?;
+    let properties = (padding > 0).then(|| {
+        datafusion::parquet::file::properties::WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![
+                datafusion::parquet::file::metadata::KeyValue::new(
+                    "qualification.padding".into(),
+                    "x".repeat(padding),
+                ),
+            ]))
+            .build()
+    });
+    let mut writer = ArrowWriter::try_new(Vec::new(), schema, properties)?;
+    writer.write(&batch)?;
+    Ok(writer.into_inner()?)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn heterogeneous_footers_preserve_rows_and_have_distinct_lengths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("table");
+        let config: PrepareConfig = serde_json::from_value(serde_json::json!({
+            "files": 4, "rows_per_file": 3, "footer_padding_bytes": [0, 4096]
+        }))
+        .unwrap();
+        prepare(&root, config).await.unwrap();
+        let mut lengths = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(root.join("data")).unwrap() {
+            let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+            lengths.insert(u32::from_le_bytes(
+                bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap(),
+            ));
+        }
+        assert_eq!(lengths.len(), 2);
+        verify(&root).await.unwrap();
+    }
     #[test]
     fn expected_results_cover_selectivity_empty_selection_and_overflow() {
         assert_eq!(expected(4, 3, Some(2)).unwrap(), (6, 6, 51));
@@ -218,6 +263,7 @@ fn describe(root: &Path, config: &PrepareConfig, data_bytes: u64) -> Result<Valu
     let result = serde_json::json!({
         "files":config.files,"rows_per_file":config.rows_per_file,"batch_size":config.batch_size,
         "property_bytes":config.property_bytes,"small_tail":config.small_tail,
+        "footer_padding_bytes":config.footer_padding_bytes,
         "head_sha256":Sha256::digest(&head_bytes).to_string(),"table_version":head.table_version.0,
         "generation_sha256":head.metadata_generation.sha256.to_string(),
         "metadata_image_bytes":generation.metadata_image.page_count.0*u64::from(generation.metadata_image.page_size),
@@ -247,6 +293,9 @@ pub async fn tail(root: &Path) -> Result<Value, Error> {
     let mut config: PrepareConfig = serde_json::from_value(serde_json::json!({
         "files":before["files"],"rows_per_file":before["rows_per_file"],"batch_size":before["batch_size"],"property_bytes":before["property_bytes"],"small_tail":false,
     }))?;
+    if let Some(padding) = before.get("footer_padding_bytes") {
+        config.footer_padding_bytes = serde_json::from_value(padding.clone())?;
+    }
     let table = Table::new(LocalObjectStore::new(root)?);
     set_property(
         &table,

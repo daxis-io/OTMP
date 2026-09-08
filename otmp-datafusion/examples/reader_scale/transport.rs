@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -13,6 +13,8 @@ pub struct Counts {
     pub injected_us: u64,
     pub active: u64,
     pub peak_inflight: u64,
+    #[cfg(test)]
+    pub metadata_data_overlaps: u64,
     pub by_class: BTreeMap<String, Counts>,
 }
 impl Counts {
@@ -28,6 +30,8 @@ impl Counts {
             injected_us: self.injected_us - before.injected_us,
             active: self.active,
             peak_inflight: self.peak_inflight,
+            #[cfg(test)]
+            metadata_data_overlaps: self.metadata_data_overlaps - before.metadata_data_overlaps,
             by_class: self
                 .by_class
                 .iter()
@@ -117,6 +121,19 @@ pub struct MeasuredStore<S> {
     inner: S,
     delay: Duration,
     counts: Arc<Mutex<Counts>>,
+    data_delays: BTreeMap<String, u64>,
+    fault: Option<DataFault>,
+    data_operations: Arc<Mutex<BTreeMap<String, u64>>>,
+    #[cfg(test)]
+    trailer_gate: TrailerGate,
+}
+#[cfg(test)]
+type TrailerGate = Arc<Mutex<Option<[Arc<tokio::sync::Notify>; 2]>>>;
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataFault {
+    pub operation: String,
+    pub request: u64,
 }
 impl<S> MeasuredStore<S> {
     pub fn new(inner: S, delay: Duration) -> Self {
@@ -124,7 +141,45 @@ impl<S> MeasuredStore<S> {
             inner,
             delay,
             counts: Arc::default(),
+            data_delays: BTreeMap::new(),
+            fault: None,
+            data_operations: Arc::default(),
+            #[cfg(test)]
+            trailer_gate: Arc::default(),
         }
+    }
+    #[cfg(test)]
+    pub fn pause_next_trailer(&self) -> [Arc<tokio::sync::Notify>; 2] {
+        let gate = [Arc::default(), Arc::default()];
+        *self.trailer_gate.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+    pub fn with_data_controls(
+        mut self,
+        delays: BTreeMap<String, u64>,
+        fault: Option<DataFault>,
+    ) -> Self {
+        self.data_delays = delays;
+        self.fault = fault;
+        self
+    }
+    fn data_control(&self, uri: &RelativeUri, operation: &str) -> (Duration, bool) {
+        if object_class(uri.as_str()) != "data" {
+            return (self.delay, false);
+        }
+        let mut operations = self.data_operations.lock().unwrap();
+        let count = operations.entry(operation.into()).or_default();
+        *count += 1;
+        let fail = self
+            .fault
+            .as_ref()
+            .is_some_and(|fault| fault.operation == operation && fault.request == *count);
+        (
+            self.data_delays
+                .get(operation)
+                .map_or(self.delay, |ms| Duration::from_millis(*ms)),
+            fail,
+        )
     }
     pub fn snapshot(&self) -> Counts {
         self.counts.lock().unwrap().clone()
@@ -136,12 +191,19 @@ fn unsupported() -> StorageError {
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for MeasuredStore<S> {
     async fn read(&self, uri: &RelativeUri) -> Result<StoredObject, StorageError> {
-        let mut guard = self.begin(uri, Operation::Full).await;
+        let mut guard = self.begin(uri, Operation::Full, self.delay).await;
         guard.finish(0, true);
         Err(unsupported())
     }
     async fn stat(&self, uri: &RelativeUri) -> Result<ObjectMetadata, StorageError> {
-        let mut guard = self.begin(uri, Operation::Stat).await;
+        let (delay, fail) = self.data_control(uri, "stat");
+        let mut guard = self.begin(uri, Operation::Stat, delay).await;
+        if fail {
+            guard.finish(0, true);
+            return Err(StorageError::Unsupported(
+                "injected data stat failure".into(),
+            ));
+        }
         let result = self.inner.stat(uri).await;
         guard.finish(0, result.is_err());
         result
@@ -152,7 +214,30 @@ impl<S: ObjectStore> ObjectStore for MeasuredStore<S> {
         range: Range<u64>,
         expected: &ObjectMetadata,
     ) -> Result<StoredRange, StorageError> {
-        let mut guard = self.begin(uri, Operation::Range).await;
+        let operation =
+            if range.end == expected.length && range.end.saturating_sub(range.start) == 8 {
+                "trailer"
+            } else if range.end == expected.length.saturating_sub(8) {
+                "footer"
+            } else {
+                "data"
+            };
+        let (delay, fail) = self.data_control(uri, operation);
+        let mut guard = self.begin(uri, Operation::Range, delay).await;
+        #[cfg(test)]
+        if operation == "trailer" && object_class(uri.as_str()) == "data" {
+            let gate = self.trailer_gate.lock().unwrap().take();
+            if let Some([entered, release]) = gate {
+                entered.notify_one();
+                release.notified().await;
+            }
+        }
+        if fail {
+            guard.finish(0, true);
+            return Err(StorageError::Unsupported(format!(
+                "injected data {operation} failure"
+            )));
+        }
         let result = self
             .inner
             .read_range(uri, range.clone(), expected)
@@ -279,10 +364,17 @@ struct Request {
     finished: bool,
 }
 impl<S> MeasuredStore<S> {
-    async fn begin(&self, uri: &RelativeUri, operation: Operation) -> Request {
+    async fn begin(&self, uri: &RelativeUri, operation: Operation, delay: Duration) -> Request {
         let class = object_class(uri.as_str());
         {
             let mut counts = self.counts.lock().unwrap();
+            #[cfg(test)]
+            {
+                let data = counts.by_class.get("data").map_or(0, |value| value.active);
+                if (class == "data" && counts.active > data) || (class != "data" && data > 0) {
+                    counts.metadata_data_overlaps += 1;
+                }
+            }
             counts.enter(operation);
             counts
                 .by_class
@@ -294,11 +386,11 @@ impl<S> MeasuredStore<S> {
             counts: self.counts.clone(),
             class,
             started: tokio::time::Instant::now(),
-            injected_us: u64::try_from(self.delay.as_micros()).unwrap_or(u64::MAX),
+            injected_us: u64::try_from(delay.as_micros()).unwrap_or(u64::MAX),
             finished: false,
         };
-        if !self.delay.is_zero() {
-            tokio::time::sleep(self.delay).await;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
         }
         guard
     }

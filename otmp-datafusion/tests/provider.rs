@@ -5,10 +5,34 @@ use std::sync::Arc;
 
 #[test]
 fn provider_uses_a_bounded_default_planning_budget() {
+    assert_eq!(ProviderOptions::default().preflight_concurrency, 8);
     assert_eq!(
         ProviderOptions::default().planning_budget_bytes,
         64 * 1024 * 1024
     );
+}
+
+#[tokio::test]
+async fn preflight_concurrency_rejects_zero_and_values_over_thirty_two() {
+    let table = otmp::Table::new(otmp::InMemoryObjectStore::default());
+    table
+        .initialize(otmp::InitializeRequest::new(table_schema()))
+        .await
+        .unwrap();
+    for concurrency in [0, 33] {
+        let result = otmp_datafusion::OtmpTableProvider::open(
+            &table,
+            otmp::MetadataSelection::Current,
+            otmp::SnapshotSelection::Ref("main".into()),
+            otmp::ReaderOptions::default(),
+            ProviderOptions {
+                preflight_concurrency: concurrency,
+                ..ProviderOptions::default()
+            },
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("1..=32"));
+    }
 }
 
 #[test]

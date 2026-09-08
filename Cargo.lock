@@ -2879,6 +2879,7 @@ dependencies = [
  "object_store 0.13.2",
  "otmp",
  "otmp-protocol",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

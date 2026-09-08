@@ -1,5 +1,5 @@
 [workspace]
-members = ["otmp-protocol", "otmp", "otmp-cli", "otmp-s3"]
+members = ["otmp-protocol", "otmp", "otmp-cli", "otmp-s3", "otmp-datafusion"]
 resolver = "2"
 
 [workspace.package]

@@ -3,6 +3,9 @@ use std::collections::BTreeMap;
 #[path = "page_map.rs"]
 mod page_map;
 pub use page_map::*;
+#[path = "checkpoint_index.rs"]
+mod checkpoint_index;
+pub use checkpoint_index::*;
 
 use crate::{ProtocolError, TypedScalar, UuidValue};
 

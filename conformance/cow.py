@@ -181,6 +181,58 @@ def fixture_files():
     return files
 
 
+def checkpoint_index_files(files):
+    """Derive an indexed package without changing retained index-free bytes."""
+    indexed = dict(files)
+    head = json.loads(indexed['_otmp/HEAD'])
+    root = None
+    # Every generation shares the same base checkpoint in the COW fixture.
+    generations = []
+    for version in range(3):
+        uri = next(uri for uri in indexed if uri.startswith(f'_otmp/generations/{version}/'))
+        generations.append((uri, json.loads(indexed[uri])))
+    checkpoint = generations[0][1]['metadata_image']['checkpoint']
+    checkpoint_bytes = indexed[checkpoint['uri']]
+    page_size = 4096
+    leaves = []
+    for start in range(0, len(checkpoint_bytes), page_size * 128):
+        hashes = [hashlib.sha256(page).digest() for page in
+                  (checkpoint_bytes[offset:offset + page_size]
+                   for offset in range(start, min(start + page_size * 128, len(checkpoint_bytes)), page_size))]
+        node = cbor({'hashes': hashes, 'version': 1, 'node_type': 'leaf', 'first_page': start // page_size + 1})
+        digest_bytes = hashlib.sha256(node).digest()
+        uri = '_otmp/checkpoint-page-index/' + digest_bytes.hex() + '.cbor'
+        indexed[uri] = node
+        leaves.append((start // page_size + 1, len(hashes), uri, digest_bytes, len(node)))
+    # The fixture has fewer than 128 leaves, so its root is one internal node.
+    def reference(uri, hashed, length):
+        return b'\xa3' + cbor('uri') + cbor(uri) + cbor('length') + cbor(length) + cbor('sha256') + cbor(hashed)
+    entries = []
+    for first, count, uri, hashed, length in leaves:
+        entries.append(b'\xa3' + cbor('child') + reference(uri, hashed, length) + cbor('page_count') + cbor(count) + cbor('first_page') + cbor(first))
+    root_node = b'\xa4' + cbor('level') + cbor(1) + cbor('entries') + bytes([0x80 + len(entries)]) + b''.join(entries) + cbor('version') + cbor(1) + cbor('node_type') + cbor('internal')
+    root_hash = hashlib.sha256(root_node).digest()
+    root_uri = '_otmp/checkpoint-page-index/' + root_hash.hex() + '.cbor'
+    indexed[root_uri] = root_node
+    parent = None
+    for uri, generation in generations:
+        image = generation['metadata_image']
+        image['checkpoint_page_index'] = {
+            'checkpoint_sha256': checkpoint['sha256'],
+            'checkpoint_length': checkpoint['length'],
+            'page_size': page_size,
+            'page_count': image['page_count'],
+            'root': {'uri': root_uri, 'sha256': digest(root_node), 'length': str(len(root_node)), 'height': 1},
+        }
+        generation['physical_parent'] = parent
+        encoded = canonical(generation)
+        indexed[uri] = encoded
+        parent = {'uri': uri, 'sha256': digest(encoded), 'length': str(len(encoded)), 'media_type': 'application/vnd.otmp.generation+json'}
+    head['metadata_generation'] = parent
+    indexed['_otmp/HEAD'] = canonical(head)
+    return indexed
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
@@ -204,6 +256,16 @@ def main():
         generation = json.loads(next((target / f'_otmp/generations/{version}').glob('*.json')).read_bytes())
         expected_root = ROOT / f'conformance/tables/transactions/_otmp/checkpoints/{version}'
         assert resolve(target, generation) == next(expected_root.glob('*.sqlite3')).read_bytes()
+    indexed_target = ROOT / 'conformance/tables/indexed'
+    indexed = checkpoint_index_files(files)
+    if args.check:
+        actual = {str(p.relative_to(indexed_target)): p.read_bytes() for p in indexed_target.rglob('*') if p.is_file()}
+        assert indexed == actual, 'indexed fixture regeneration differs'
+    else:
+        for uri, data in indexed.items():
+            path = indexed_target / uri
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
     print('incremental fixture: versions 0-2 reconstruct exact retained SQLite bytes')
 
 

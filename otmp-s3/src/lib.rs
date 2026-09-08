@@ -8,12 +8,16 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::StreamExt as _;
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path;
 use object_store::{
-    ObjectStore as ApacheObjectStore, ObjectStoreExt as _, PutMode, PutOptions, UpdateVersion,
+    GetOptions, ObjectStore as ApacheObjectStore, ObjectStoreExt as _, PutMode, PutOptions,
+    UpdateVersion,
 };
-use otmp::storage::{CreatedObject, StoredObject};
+use otmp::storage::{
+    CreatedObject, ObjectMetadata, StoredObject, StoredRange, validate_range_request,
+};
 use otmp::{ConditionalWriteOutcome, ObjectStore, ObjectVersion, StorageError};
 use otmp_protocol::{RelativeUri, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -221,6 +225,76 @@ impl S3ObjectStore {
 impl ObjectStore for S3ObjectStore {
     async fn read(&self, key: &RelativeUri) -> Result<StoredObject, StorageError> {
         self.read_with_meta(key).await
+    }
+
+    async fn stat(&self, key: &RelativeUri) -> Result<ObjectMetadata, StorageError> {
+        let metadata = self
+            .inner
+            .head(&Self::path(key))
+            .await
+            .map_err(storage_error)?;
+        Ok(ObjectMetadata {
+            length: metadata.size,
+            version: Self::object_version(metadata.e_tag.as_deref(), metadata.version.as_deref())?,
+        })
+    }
+
+    async fn read_range(
+        &self,
+        key: &RelativeUri,
+        range: std::ops::Range<u64>,
+        expected: &ObjectMetadata,
+    ) -> Result<StoredRange, StorageError> {
+        validate_range_request(expected, &range)?;
+        let (e_tag, version) = Self::provider_version_owned(&expected.version)?;
+        let e_tag = e_tag.ok_or_else(|| {
+            StorageError::Unsupported("S3 authenticated range reads require an ETag".into())
+        })?;
+        let options = GetOptions::new()
+            .with_range(Some(range.clone()))
+            .with_if_match(Some(e_tag))
+            .with_version(version);
+        let result = self
+            .inner
+            .get_opts(&Self::path(key), options)
+            .await
+            .map_err(storage_error)?;
+        let metadata = ObjectMetadata {
+            length: result.meta.size,
+            version: Self::object_version(
+                result.meta.e_tag.as_deref(),
+                result.meta.version.as_deref(),
+            )?,
+        };
+        if result.range != range {
+            return Err(StorageError::VerificationFailed(
+                "S3 ignored or changed the requested byte range".into(),
+            ));
+        }
+        let capacity = usize::try_from(range.end - range.start).map_err(|_| {
+            StorageError::VerificationFailed("range cannot fit this platform's memory model".into())
+        })?;
+        let mut bytes = Vec::with_capacity(capacity);
+        let mut stream = result.into_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(storage_error)?;
+            let length = bytes.len().checked_add(chunk.len()).ok_or_else(|| {
+                StorageError::VerificationFailed("S3 range body length overflowed".into())
+            })?;
+            if length > capacity {
+                return Err(StorageError::VerificationFailed(
+                    "S3 returned more bytes than the requested range".into(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let response = StoredRange {
+            bytes,
+            range: range.clone(),
+            metadata,
+        };
+        response.validate(expected, &range)?;
+        Ok(response)
     }
 
     async fn create_from_reader(

@@ -16,6 +16,11 @@ allow = [
   "Zlib",
 ]
 
+[[licenses.exceptions]]
+name = "tiny-keccak"
+version = "2.0.2"
+allow = ["CC0-1.0"] # Arrow's ahash compile-time random seed dependency.
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+futures-util = "0.3"
 object_store.workspace = true
 otmp.workspace = true
 otmp-protocol.workspace = true

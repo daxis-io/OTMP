@@ -13,7 +13,18 @@ pub(super) struct Identity {
     pub version: Option<crate::ObjectVersion>,
 }
 
-type Key = (String, u64, u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct PageKey {
+    pub generation: Sha256,
+    pub checkpoint: bool,
+    pub page: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Key {
+    ObjectRange(String, u64, u64),
+    AuthenticatedPage(PageKey),
+}
 
 #[derive(Default)]
 struct Entries {
@@ -113,10 +124,12 @@ impl Cache {
                 )));
             };
             entries.values.remove(&key);
-            if let Some((_, count)) = entries.identities.get_mut(&key.0) {
+            if let Key::ObjectRange(uri, _, _) = key
+                && let Some((_, count)) = entries.identities.get_mut(&uri)
+            {
                 *count -= 1;
                 if *count == 0 {
-                    entries.identities.remove(&key.0);
+                    entries.identities.remove(&uri);
                 }
             }
         }
@@ -144,8 +157,80 @@ impl Cache {
         Self::check(&entries, identity)?;
         Ok(entries
             .values
-            .get(&(identity.uri.clone(), range.start, range.end))
+            .get(&Key::ObjectRange(
+                identity.uri.clone(),
+                range.start,
+                range.end,
+            ))
             .cloned())
+    }
+
+    pub fn metadata_for(
+        &self,
+        reference: &otmp_protocol::PageObjectReference,
+    ) -> Result<Option<crate::ObjectMetadata>, RuntimeError> {
+        let entries = self.entries.lock().unwrap();
+        let Some((identity, _)) = entries.identities.get(reference.uri.as_str()) else {
+            return Ok(None);
+        };
+        if identity.hash != reference.sha256 || identity.length != reference.length.0 {
+            return Err(RuntimeError::Corrupt(
+                "conflicting cached object reference".into(),
+            ));
+        }
+        Ok(identity
+            .version
+            .as_ref()
+            .map(|version| crate::ObjectMetadata {
+                length: identity.length,
+                version: version.clone(),
+            }))
+    }
+
+    pub fn get_page(&self, key: PageKey) -> Result<Option<Arc<CachedBytes>>, RuntimeError> {
+        let entries = self.entries.lock().unwrap();
+        let value = entries.values.get(&Key::AuthenticatedPage(key));
+        if value.is_some_and(|value| value.bytes.len() != 4096) {
+            return Err(RuntimeError::Corrupt("invalid cached page length".into()));
+        }
+        Ok(value.cloned())
+    }
+
+    /// Only the authenticated page resolver may admit pages to this namespace.
+    pub fn insert_page(
+        &self,
+        key: PageKey,
+        bytes: Vec<u8>,
+        reservation: Reservation,
+    ) -> Result<(), RuntimeError> {
+        if bytes.len() != 4096 {
+            return Err(RuntimeError::Corrupt(
+                "invalid authenticated page length".into(),
+            ));
+        }
+        if bytes
+            .capacity()
+            .checked_add(256)
+            .is_none_or(|size| size > reservation.amount)
+        {
+            return Err(RuntimeError::ResourceExhausted(
+                "page allocation exceeded reservation".into(),
+            ));
+        }
+        let mut entries = self.entries.lock().unwrap();
+        let key = Key::AuthenticatedPage(key);
+        if entries.values.contains_key(&key) {
+            return Ok(());
+        }
+        entries.order.push_back(key.clone());
+        entries.values.insert(
+            key,
+            Arc::new(CachedBytes {
+                bytes,
+                _reservation: reservation,
+            }),
+        );
+        Ok(())
     }
 
     pub fn insert(
@@ -166,7 +251,7 @@ impl Cache {
         }
         let mut entries = self.entries.lock().unwrap();
         Self::check(&entries, &identity)?;
-        let key = (identity.uri.clone(), range.start, range.end);
+        let key = Key::ObjectRange(identity.uri.clone(), range.start, range.end);
         if let Some(value) = entries.values.get(&key) {
             return Ok(value.clone());
         }
@@ -198,6 +283,56 @@ mod tests {
         drop(held);
         assert_eq!(cache.used(), 0);
         assert!(cache.reserve(1024).is_ok());
+    }
+
+    #[test]
+    fn authenticated_page_keys_and_allocations_share_the_range_budget() {
+        let cache = Cache::new(8192);
+        let key = PageKey {
+            generation: Sha256::digest(b"generation"),
+            checkpoint: false,
+            page: 1,
+        };
+        cache
+            .insert_page(key, vec![7; 4096], cache.reserve(4352).unwrap())
+            .unwrap();
+        let held = cache.get_page(key).unwrap().unwrap();
+        assert!(
+            cache
+                .get_page(PageKey {
+                    checkpoint: true,
+                    ..key
+                })
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .get_page(PageKey {
+                    generation: Sha256::digest(b"other"),
+                    ..key
+                })
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .get_page(PageKey { page: 2, ..key })
+                .unwrap()
+                .is_none()
+        );
+        // Eviction cannot release the reservation of a page still being copied.
+        assert!(cache.reserve(4096).is_err());
+        assert_eq!(cache.used(), 4352);
+        assert_eq!(held.as_ref().as_ref(), &[7; 4096]);
+        drop(held);
+        assert_eq!(cache.used(), 0);
+        assert!(
+            cache
+                .insert_page(key, vec![0; 4095], cache.reserve(4352).unwrap())
+                .is_err()
+        );
+        assert_eq!(cache.used(), 0);
     }
 
     #[test]

@@ -1,0 +1,67 @@
+{
+  "artifacts": {
+    "raw-index.json.gz": {
+      "bytes": 100059,
+      "sha256": "7f6e8b8d2c436e2c1006f512de4ce498a0e3b577e6233a498fdd834643982c13",
+      "uncompressed_sha256": "fa404d99dad0c6540cf312d1d8da403c01d21f1a1e4f337ec0293b23f00432fe"
+    },
+    "raw-samples.json.gz": {
+      "bytes": 10318148,
+      "sha256": "2e9ef81bf8e8db5708f635d0427f4696c9646fe25c29ca5b02553333bfa2a3c0",
+      "uncompressed_sha256": "95c635faada520a960a784edd219298a169b5257123b03b4106f6c7ebf4f5e23"
+    },
+    "results.json.gz": {
+      "bytes": 53170,
+      "sha256": "dc21970b72d8f61db3128a734cdf349fdc52b048d908db9fad945d925f7c98fa",
+      "uncompressed_sha256": "83e1dd7f97d6d96611c3c287cd6dd2559240cf43ad2a48e7d7ad6ad21a4dd93b"
+    }
+  },
+  "base_commit": "ca11c04c999649cf0f26e38fa3640478cd2469f2",
+  "baseline_binary": {
+    "path": "/private/tmp/otmp-reader-scale-cache-evidence/reader_scale-f513ef5c",
+    "sha256": "f513ef5cef59045f5fbe1ed31c38edab1e66aca4a2d138782610ce06193a1d4f",
+    "source_commit": "4135b824b5713a81c53b3c78de321cbe084e86a6"
+  },
+  "binaries": {
+    "comparison-83d3e6a": "482da30d1f96f8aa648c92551e73d82167b9b8bbc482ab7c72a96eec49ac7b96",
+    "reader_scale-83d3e6a": "f6f9dc13e75b1f578f15dc3f66aa76d6facd273fde9e328b0df34544360507cf"
+  },
+  "build_profile": "release",
+  "ci_validation": {
+    "bytes": 13390,
+    "path": "ci-validation.txt",
+    "sha256": "24a789483faf9f49fa83a749aaa2bbc2067d07d69be7fca068222b1859b07852"
+  },
+  "cpu": "Apple M4 Max",
+  "datafusion": "55.0.0",
+  "derived_fixture_root": "/private/tmp/otmp-reader-planning-evidence/comparison-fixtures",
+  "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures",
+  "host": "macOS-26.6-arm64-arm-64bit-Mach-O",
+  "iceberg_commit": "28ede505ebc3a274d4840624e5c85eae480a77ae",
+  "memory_bytes": 68719476736,
+  "parquet": "59.3.0",
+  "raw_files_archived": 2761,
+  "raw_root": "/private/tmp/otmp-reader-planning-evidence",
+  "samples": {
+    "boundary_controls_successful": 3,
+    "boundary_expected_errors": 5,
+    "iceberg_file_tasks_successful": 40,
+    "matched_provider_successful": 160,
+    "native_successful": 220
+  },
+  "schema_version": 1,
+  "source_commit": "83d3e6ad475c51cca0cce5a45eff6878b36d1c8a",
+  "validation": {
+    "ci": "Pending publication; final-commit remote CI has not run.",
+    "comparator_rust_tests_passed": 4,
+    "comparator_strict_clippy_exit_code": 0,
+    "comparison_provenance_unchanged": true,
+    "full_read_attempts": 0,
+    "independent_review": "Approved after two P2 findings were fixed; review-resolution.md in raw-samples.json.gz",
+    "native_and_boundary_invariant_checked_samples": 228,
+    "native_smoke_samples_passed": 6,
+    "teardown_active_requests": 0,
+    "teardown_pool_reservations": 0,
+    "workspace_tests_passed": 227
+  }
+}

@@ -46,6 +46,7 @@ impl Reservation {
 /// A lease retains its reservation even after FIFO eviction drops the cache map reference.
 pub struct FooterEntry {
     pub metadata: Arc<ParquetMetaData>,
+    tail: bytes::Bytes,
     _reservation: Reservation,
 }
 struct Entries {
@@ -156,9 +157,10 @@ impl FooterCache {
         &self,
         key: FooterIdentity,
         metadata: Arc<ParquetMetaData>,
+        tail: bytes::Bytes,
         reservation: Reservation,
     ) -> ParquetResult<Arc<FooterEntry>> {
-        if metadata.memory_size() > reservation.amount {
+        if metadata.memory_size().saturating_add(tail.len()) > reservation.amount {
             return Err(ParquetError::General(
                 "decoded footer exceeded its bounded reservation".into(),
             ));
@@ -173,6 +175,7 @@ impl FooterCache {
         }
         let entry = Arc::new(FooterEntry {
             metadata,
+            tail,
             _reservation: reservation,
         });
         entries.identities.insert(key.uri.clone(), key.clone());
@@ -215,6 +218,7 @@ impl<S: otmp::ObjectStore + fmt::Debug> ParquetFileReaderFactory for FooterReade
             key,
             cache: self.cache.clone(),
             lease: None,
+            option_lease: None,
             counters: self.bridge.counters(),
             opened: false,
         }))
@@ -225,10 +229,137 @@ struct CachedReader {
     key: FooterIdentity,
     cache: Arc<FooterCache>,
     lease: Option<Arc<FooterEntry>>,
+    option_lease: Option<Arc<FooterEntry>>,
     counters: Arc<crate::store::ReadCounters>,
     opened: bool,
 }
+struct ValidatedTail<'a> {
+    inner: &'a mut Box<dyn AsyncFileReader + Send>,
+    bytes: bytes::Bytes,
+    start: u64,
+    length: u64,
+}
+
+impl datafusion::parquet::arrow::async_reader::MetadataFetch for ValidatedTail<'_> {
+    fn fetch(&mut self, range: Range<u64>) -> BoxFuture<'_, ParquetResult<bytes::Bytes>> {
+        async move {
+            if range.start > range.end || range.end > self.length {
+                return Err(ParquetError::General(
+                    "metadata range exceeds pinned object".into(),
+                ));
+            }
+            if range.start >= self.start {
+                let start = usize::try_from(range.start - self.start)
+                    .map_err(|_| ParquetError::General("footer offset overflow".into()))?;
+                let end = usize::try_from(range.end - self.start)
+                    .map_err(|_| ParquetError::General("footer offset overflow".into()))?;
+                return Ok(self.bytes.slice(start..end));
+            }
+            self.inner.get_bytes(range).await
+        }
+        .boxed()
+    }
+}
+
 impl CachedReader {
+    fn reserve_footer(&self, footer_len: usize) -> ParquetResult<Reservation> {
+        let estimate = footer_len
+            .checked_mul(128)
+            .and_then(|n| n.checked_add(64 * 1024))
+            .ok_or_else(|| ParquetError::General("Parquet footer reservation overflow".into()))?;
+        self.cache.reserve(estimate)
+    }
+
+    async fn read_tail(&mut self) -> ParquetResult<(bytes::Bytes, Reservation)> {
+        // Non-default options can reuse authenticated serialized bytes, but
+        // they must decode their own metadata with the requested policies.
+        if let Some(entry) = self.cache.get(&self.key)?
+            && entry.tail.len() >= 8
+        {
+            let reservation = self.reserve_footer(entry.tail.len() - 8)?;
+            return Ok((entry.tail.clone(), reservation));
+        }
+        // Parquet's trailer declares the serialized footer length. Validate it
+        // before decoding, reserve a conservative decoded bound, then reduce
+        // the active lease to the actual retained metadata footprint.
+        if self.key.length < 8 {
+            return Err(ParquetError::General(
+                "Parquet object is shorter than its trailer".into(),
+            ));
+        }
+        let trailer = self
+            .inner
+            .get_bytes((self.key.length - 8)..self.key.length)
+            .await?;
+        if trailer.len() != 8 || &trailer[4..] != b"PAR1" {
+            return Err(ParquetError::General(
+                "invalid Parquet footer trailer".into(),
+            ));
+        }
+        let footer_len = u64::from(u32::from_le_bytes(
+            trailer[..4].try_into().expect("four bytes"),
+        ));
+        if footer_len > self.key.length - 8 {
+            return Err(ParquetError::General(
+                "Parquet footer length exceeds object length".into(),
+            ));
+        }
+        let reservation = self.reserve_footer(
+            usize::try_from(footer_len)
+                .map_err(|_| ParquetError::General("footer length overflow".into()))?,
+        )?;
+        let raw = self
+            .inner
+            .get_bytes((self.key.length - 8 - footer_len)..(self.key.length - 8))
+            .await?;
+        crate::footer_bounds::validate(&raw)?;
+        let mut tail = Vec::with_capacity(raw.len() + 8);
+        tail.extend_from_slice(&raw);
+        tail.extend_from_slice(&trailer);
+        Ok((bytes::Bytes::from(tail), reservation))
+    }
+
+    async fn load_metadata(
+        &mut self,
+        options: Option<&ArrowReaderOptions>,
+    ) -> ParquetResult<Arc<FooterEntry>> {
+        let (tail, mut reservation) = self.read_tail().await?;
+        // Let Parquet apply every ArrowReaderOptions setting while serving its
+        // footer requests from the already validated bytes. Index requests use
+        // the same version-pinned inner reader and original object bounds.
+        let fetch = ValidatedTail {
+            inner: &mut self.inner,
+            bytes: tail.clone(),
+            start: self.key.length - tail.len() as u64,
+            length: self.key.length,
+        };
+        let metadata = Arc::new(
+            datafusion::parquet::file::metadata::ParquetMetaDataReader::new()
+                .with_arrow_reader_options(options)
+                .load_and_finish(fetch, self.key.length)
+                .await?,
+        );
+        let actual = metadata
+            .memory_size()
+            .checked_add(256 + self.key.uri.len() * 4 + tail.len())
+            .ok_or_else(|| ParquetError::General("Parquet footer accounting overflow".into()))?;
+        if actual > reservation.amount {
+            return Err(ParquetError::General(
+                "decoded footer exceeded its bounded reservation".into(),
+            ));
+        }
+        reservation.shrink(reservation.amount - actual);
+        if options.is_none() {
+            self.cache
+                .insert(self.key.clone(), metadata, tail, reservation)
+        } else {
+            Ok(Arc::new(FooterEntry {
+                metadata,
+                tail,
+                _reservation: reservation,
+            }))
+        }
+    }
     fn mark_opened(&mut self) {
         if !self.opened {
             self.opened = true;
@@ -255,68 +386,22 @@ impl AsyncFileReader for CachedReader {
         options: Option<&'a ArrowReaderOptions>,
     ) -> BoxFuture<'a, ParquetResult<Arc<ParquetMetaData>>> {
         async move {
+            if options.is_some() {
+                let entry = self.load_metadata(options).await?;
+                let metadata = entry.metadata.clone();
+                self.option_lease = Some(entry);
+                return Ok(metadata);
+            }
             if self.lease.is_none() {
-                self.lease = if let Some(entry) = self.cache.get(&self.key)? {
-                    Some(entry)
-                } else {
-                    // Parquet's trailer declares the serialized footer length. Validate it
-                    // before decoding, reserve a conservative decoded bound, then reduce
-                    // the active lease to the actual retained metadata footprint.
-                    if self.key.length < 8 {
-                        return Err(ParquetError::General(
-                            "Parquet object is shorter than its trailer".into(),
-                        ));
-                    }
-                    let trailer = self
-                        .inner
-                        .get_bytes((self.key.length - 8)..self.key.length)
-                        .await?;
-                    if trailer.len() != 8 || &trailer[4..] != b"PAR1" {
-                        return Err(ParquetError::General(
-                            "invalid Parquet footer trailer".into(),
-                        ));
-                    }
-                    let footer_len = u64::from(u32::from_le_bytes(
-                        trailer[..4].try_into().expect("four bytes"),
-                    ));
-                    if footer_len > self.key.length - 8 {
-                        return Err(ParquetError::General(
-                            "Parquet footer length exceeds object length".into(),
-                        ));
-                    }
-                    let estimate = usize::try_from(footer_len)
-                        .ok()
-                        .and_then(|n| n.checked_mul(128))
-                        .and_then(|n| n.checked_add(64 * 1024))
-                        .ok_or_else(|| {
-                            ParquetError::General("Parquet footer reservation overflow".into())
-                        })?;
-                    let mut reservation = self.cache.reserve(estimate)?;
-                    let raw = self
-                        .inner
-                        .get_bytes((self.key.length - 8 - footer_len)..(self.key.length - 8))
-                        .await?;
-                    crate::footer_bounds::validate(&raw)?;
-                    let metadata = self.inner.get_metadata(options).await?;
-                    let actual = metadata
-                        .memory_size()
-                        .checked_add(256 + self.key.uri.len() * 4)
-                        .ok_or_else(|| {
-                            ParquetError::General("Parquet footer accounting overflow".into())
-                        })?;
-                    if actual > reservation.amount {
-                        return Err(ParquetError::General(
-                            "decoded footer exceeded its bounded reservation".into(),
-                        ));
-                    }
-                    reservation.shrink(reservation.amount - actual);
-                    Some(self.cache.insert(self.key.clone(), metadata, reservation)?)
-                };
+                self.lease = Some(match self.cache.get(&self.key)? {
+                    Some(entry) => entry,
+                    None => self.load_metadata(None).await?,
+                });
             }
             Ok(self
                 .lease
                 .as_ref()
-                .expect("lease assigned")
+                .expect("lease populated")
                 .metadata
                 .clone())
         }
@@ -346,6 +431,7 @@ mod tests {
             .insert(
                 first.clone(),
                 metadata.clone(),
+                bytes::Bytes::new(),
                 cache.reserve(charge).unwrap(),
             )
             .unwrap();
@@ -353,7 +439,12 @@ mod tests {
         let second = identity("second.parquet");
         drop(
             cache
-                .insert(second, metadata, cache.reserve(charge).unwrap())
+                .insert(
+                    second,
+                    metadata,
+                    bytes::Bytes::new(),
+                    cache.reserve(charge).unwrap(),
+                )
                 .unwrap(),
         );
         let transient = cache.reserve(charge * 2).unwrap();
@@ -373,6 +464,116 @@ mod tests {
         assert_eq!(budget.used.load(Ordering::Acquire), charge);
         drop(held);
         assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    async fn real_reader() -> (
+        Box<dyn AsyncFileReader + Send>,
+        Arc<crate::store::ReadCounters>,
+    ) {
+        use datafusion::arrow::{
+            array::Int64Array,
+            datatypes::{DataType, Field, Schema},
+            record_batch::RecordBatch,
+        };
+        use datafusion::parquet::arrow::ArrowWriter;
+        use otmp::ObjectStore as _;
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
+                .unwrap();
+        let mut bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut bytes, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let store = otmp::InMemoryObjectStore::default();
+        let uri: otmp_protocol::RelativeUri = "data/one.parquet".parse().unwrap();
+        let created = store.create_bytes(&uri, &bytes).await.unwrap();
+        let bridge = Arc::new(
+            ReadOnlyStore::new(store, [(uri, Some(created.sha256), created.length)])
+                .await
+                .unwrap(),
+        );
+        let counters = bridge.counters();
+        let factory = FooterReaderFactory::new(
+            bridge,
+            FooterCache::new(DEFAULT_FOOTER_CACHE_BYTES).unwrap(),
+        );
+        let reader = factory
+            .create_reader(
+                0,
+                PartitionedFile::new("data/one.parquet", created.length),
+                None,
+                &ExecutionPlanMetricsSet::new(),
+            )
+            .unwrap();
+        (reader, counters)
+    }
+
+    #[tokio::test]
+    async fn preflight_fetches_the_bounded_parquet_footer_once() {
+        let (mut reader, counters) = real_reader().await;
+        assert_eq!(
+            reader
+                .get_metadata(None)
+                .await
+                .unwrap()
+                .file_metadata()
+                .num_rows(),
+            2
+        );
+        assert_eq!(
+            counters.requests.load(Ordering::Relaxed),
+            3,
+            "one stat plus trailer and footer, with no redundant decode reads"
+        );
+        assert_eq!(
+            reader
+                .get_metadata(None)
+                .await
+                .unwrap()
+                .file_metadata()
+                .num_rows(),
+            2
+        );
+        assert_eq!(counters.requests.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn optioned_decoding_reuses_validated_tail_without_extra_reads() {
+        let (mut reader, counters) = real_reader().await;
+        reader.get_metadata(None).await.unwrap();
+        let before = counters.requests.load(Ordering::Relaxed);
+        reader
+            .get_metadata(Some(&ArrowReaderOptions::new()))
+            .await
+            .unwrap();
+        assert_eq!(
+            counters.requests.load(Ordering::Relaxed),
+            before,
+            "default Arrow options can decode the bounded cached tail without more storage I/O"
+        );
+    }
+
+    #[tokio::test]
+    async fn required_indexes_cannot_reuse_a_default_footer_lease() {
+        use datafusion::parquet::file::metadata::PageIndexPolicy;
+        let (mut reader, _) = real_reader().await;
+        let default = reader.get_metadata(None).await.unwrap();
+        assert!(default.offset_index().is_none());
+        let options = ArrowReaderOptions::new().with_offset_index_policy(PageIndexPolicy::Required);
+        let indexed = reader.get_metadata(Some(&options)).await.unwrap();
+        assert!(
+            indexed.offset_index().is_some(),
+            "a default preflight cache entry must not hide required offset indexes"
+        );
+        assert!(
+            reader
+                .get_metadata(None)
+                .await
+                .unwrap()
+                .offset_index()
+                .is_none()
+        );
     }
 
     fn identity(uri: &str) -> FooterIdentity {

@@ -114,6 +114,8 @@ impl<S: ObjectStore> Table<S> {
         &self,
         generation: &Generation,
     ) -> Result<ResolvedGeneration, RuntimeError> {
+        #[cfg(feature = "write-latency-qualification")]
+        let _phase = crate::write_latency_qualification::phase("generation_resolution");
         let image = &generation.metadata_image;
         let checkpoint = self
             .read_metadata(&ObjectReference {
@@ -451,6 +453,8 @@ pub(crate) fn persist(
     changed: &BTreeMap<u64, Vec<u8>>,
     eof: u64,
 ) -> Result<IncrementalImage, RuntimeError> {
+    #[cfg(feature = "write-latency-qualification")]
+    let _phase = crate::write_latency_qualification::phase("page_pack_page_map_construction");
     let mut artifacts = BTreeMap::new();
     let mut mappings = Vec::new();
     let page_size = crate::image::PAGE_SIZE;

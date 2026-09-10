@@ -7,6 +7,9 @@ mod physical;
 mod runtime;
 mod sql_writer;
 pub mod storage;
+#[cfg(feature = "write-latency-qualification")]
+#[doc(hidden)]
+pub mod write_latency_qualification;
 
 pub use error::RuntimeError;
 pub use runtime::{

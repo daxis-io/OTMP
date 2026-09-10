@@ -300,6 +300,8 @@ impl<'a> PreparedTransaction<'a> {
         logical_hash: Sha256,
     ) -> Result<Self, RuntimeError> {
         let connection = image::open_readonly(&base.image.path)?;
+        #[cfg(feature = "write-latency-qualification")]
+        let _phase = crate::write_latency_qualification::phase("operation_preparation");
         let results = prepare_operations(&connection, request)?;
         Ok(Self {
             base,
@@ -538,6 +540,31 @@ impl<S: ObjectStore> Table<S> {
             .publish_transaction(&request.idempotency_key, logical_hash, &[], |base| {
                 PreparedTransaction::new(base, request, logical_hash)?.build()
             })
+            .await?;
+        Ok(TransactionResult {
+            table_version: result.table_version,
+            commit_id: result.commit_id,
+            semantic_state_sha256,
+            operation_results: result.operation_results,
+        })
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "write-latency-qualification")]
+    pub async fn transact_pre_pinned(
+        &self,
+        request: &TransactionRequest,
+        pinned: PinnedTable,
+    ) -> Result<TransactionResult, RuntimeError> {
+        let logical_hash = intent_hash(&canonical_json::to_vec(request)?);
+        let (result, semantic_state_sha256) = self
+            .publish_transaction_from(
+                Some(pinned),
+                &request.idempotency_key,
+                logical_hash,
+                &[],
+                |base| PreparedTransaction::new(base, request, logical_hash)?.build(),
+            )
             .await?;
         Ok(TransactionResult {
             table_version: result.table_version,

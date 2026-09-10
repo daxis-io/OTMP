@@ -1,0 +1,12 @@
+{
+  "property_bytes": 0,
+  "table_id": "01a08d0f-552e-7560-9514-b484880dad1f",
+  "table_version": 2,
+  "generation_id": "01a08d0f-5583-7b60-ba51-1fcbd0629091",
+  "head_sha256": "sha256:b8b8f050da256faaeb1b0a20c902582101ff7827977d99e209d1f160c6dd5619",
+  "head_bytes": 944,
+  "logical_image_bytes": 266240,
+  "checkpoint_bytes": 266240,
+  "commit_bytes": 1536,
+  "retained_history_verified": true
+}

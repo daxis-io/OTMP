@@ -34,11 +34,25 @@ pub(crate) struct MaterializedImage {
 fn finish_turso(
     writer: crate::cow_writer::CandidateWriter,
 ) -> Result<CheckpointImage, RuntimeError> {
-    let frozen = writer.finish()?;
-    let bytes = frozen.materialize();
+    let frozen = {
+        #[cfg(feature = "write-latency-qualification")]
+        let _phase = crate::write_latency_qualification::phase("turso_checkpoint_freeze");
+        writer.finish()?
+    };
+    let bytes = {
+        #[cfg(feature = "write-latency-qualification")]
+        let _phase = crate::write_latency_qualification::phase("candidate_buffer_creation");
+        frozen.materialize()
+    };
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("metadata.sqlite3");
-    fs::write(&path, &bytes)?;
+    {
+        #[cfg(feature = "write-latency-qualification")]
+        let _phase = crate::write_latency_qualification::phase("validation_file_write");
+        fs::write(&path, &bytes)?;
+        #[cfg(feature = "write-latency-qualification")]
+        crate::write_latency_qualification::add_bytes("temporary_file_bytes", bytes.len() as u64);
+    }
     Ok(CheckpointImage {
         _directory: directory,
         path,
@@ -72,7 +86,11 @@ pub(crate) fn turso_metadata(
     operations: &[crate::OperationRequest],
 ) -> Result<CheckpointImage, RuntimeError> {
     let writer = crate::cow_writer::CandidateWriter::new(parent, None)?;
-    mutate_metadata(&writer.sql(), commit, uri, operations)?;
+    {
+        #[cfg(feature = "write-latency-qualification")]
+        let _phase = crate::write_latency_qualification::phase("turso_sql");
+        mutate_metadata(&writer.sql(), commit, uri, operations)?;
+    }
     finish_turso(writer)
 }
 
@@ -398,6 +416,8 @@ pub(crate) fn materialize(bytes: &[u8]) -> Result<MaterializedImage, RuntimeErro
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("metadata.sqlite3");
     fs::write(&path, bytes)?;
+    #[cfg(feature = "write-latency-qualification")]
+    crate::write_latency_qualification::add_bytes("temporary_file_bytes", bytes.len() as u64);
     Ok(MaterializedImage {
         _directory: directory,
         path,

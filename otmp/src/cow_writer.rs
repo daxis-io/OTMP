@@ -245,6 +245,8 @@ impl FrozenImage {
 
 impl CandidateWriter {
     pub(crate) fn new(parent: Arc<[u8]>, schema: Option<&str>) -> Result<Self> {
+        #[cfg(feature = "write-latency-qualification")]
+        let _phase = crate::write_latency_qualification::phase("turso_open");
         let directory = tempfile::tempdir().map_err(|e| turso_core::io_error(e, "tempdir"))?;
         let path = directory.path().join("candidate.sqlite3");
         let storage = Arc::new(Overlay::new(parent));

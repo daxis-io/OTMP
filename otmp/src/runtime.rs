@@ -371,6 +371,26 @@ impl PinnedTable {
         })
         .collect()
     }
+
+    #[doc(hidden)]
+    #[cfg(feature = "write-latency-qualification")]
+    pub fn qualification_property(
+        &self,
+        key: &str,
+    ) -> Result<Option<CanonicalValue>, RuntimeError> {
+        use rusqlite::OptionalExtension;
+        let connection = image::open_readonly(&self.image.path)?;
+        let value = connection
+            .query_row(
+                "SELECT value_json FROM otmp_properties WHERE property_key=?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        value
+            .map(|value| canonical_json::parse_canonical(value.as_bytes()).map_err(Into::into))
+            .transpose()
+    }
 }
 
 #[derive(Clone)]
@@ -666,6 +686,8 @@ impl<S: ObjectStore> Table<S> {
         commit: SemanticCommit,
         generation: Generation,
     ) -> Result<PinnedTable, RuntimeError> {
+        #[cfg(feature = "write-latency-qualification")]
+        let _parent_validation = crate::write_latency_qualification::phase("parent_validation");
         Self::validate_head_features(&head)?;
         commit.validate_runtime_profile()?;
         if commit.table_id != head.table_id
@@ -698,7 +720,16 @@ impl<S: ObjectStore> Table<S> {
             ));
         }
         let physical = self.resolve_generation(&generation).await?;
-        let image = image::materialize(&physical.bytes)?;
+        #[cfg(feature = "write-latency-qualification")]
+        crate::write_latency_qualification::add_bytes(
+            "parent_logical_bytes",
+            physical.bytes.len() as u64,
+        );
+        let image = {
+            #[cfg(feature = "write-latency-qualification")]
+            let _phase = crate::write_latency_qualification::phase("logical_image_materialization");
+            image::materialize(&physical.bytes)?
+        };
         let reader_features_json = canonical_text(&head.required_reader_features)?;
         let writer_features_json = canonical_text(&head.required_writer_features)?;
         image::validate(
@@ -896,7 +927,40 @@ impl<S: ObjectStore> Table<S> {
         staged: &[VerifiedStagedFile],
         build: impl Fn(&PinnedTable) -> Result<Candidate<R>, RuntimeError>,
     ) -> Result<(R, Sha256), RuntimeError> {
-        let mut parent = self.pin().await?;
+        self.publish_transaction_from(None, key, logical_hash, staged, build)
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)] // Keep conditional outcomes and probe boundaries together.
+    async fn publish_transaction_from<R: serde::de::DeserializeOwned>(
+        &self,
+        initial_parent: Option<PinnedTable>,
+        key: &str,
+        logical_hash: Sha256,
+        staged: &[VerifiedStagedFile],
+        build: impl Fn(&PinnedTable) -> Result<Candidate<R>, RuntimeError>,
+    ) -> Result<(R, Sha256), RuntimeError> {
+        let mut parent = if let Some(parent) = initial_parent {
+            #[cfg(feature = "write-latency-qualification")]
+            {
+                crate::write_latency_qualification::skipped_phase("parent_pin", 0);
+                crate::write_latency_qualification::skipped_phase("parent_validation", 1);
+                crate::write_latency_qualification::skipped_phase("generation_resolution", 2);
+                crate::write_latency_qualification::skipped_phase(
+                    "logical_image_materialization",
+                    2,
+                );
+                crate::write_latency_qualification::add_bytes(
+                    "parent_logical_bytes",
+                    parent.resolved.len() as u64,
+                );
+            }
+            parent
+        } else {
+            #[cfg(feature = "write-latency-qualification")]
+            let _phase = crate::write_latency_qualification::phase("parent_pin");
+            self.pin().await?
+        };
         let table_id = parent.head.table_id;
 
         let mut rebases = 0;
@@ -906,42 +970,59 @@ impl<S: ObjectStore> Table<S> {
                     "table identity changed during publication".into(),
                 ));
             }
-            if let Some(result) = replay::<R>(&parent, key, logical_hash)? {
-                return Ok(result);
-            }
-            let candidate = build(&parent)?;
-            for staged_file in staged {
-                let version = self
-                    .store
-                    .confirm_readable(&staged_file.uri, staged_file.sha256, staged_file.length)
-                    .await
-                    .map_err(|error| match error {
-                        StorageError::VerificationFailed(_) => RuntimeError::FingerprintMismatch,
-                        other => other.into(),
-                    })?;
-                if version != staged_file.version {
-                    return Err(RuntimeError::FingerprintMismatch);
+            {
+                #[cfg(feature = "write-latency-qualification")]
+                let _phase = crate::write_latency_qualification::phase("idempotency");
+                if let Some(result) = replay::<R>(&parent, key, logical_hash)? {
+                    return Ok(result);
                 }
             }
-            put_immutable(&self.store, &candidate.commit_uri, &candidate.commit_bytes).await?;
-            for artifact in &candidate.image_artifacts {
-                put_immutable(&self.store, &artifact.uri, &artifact.bytes).await?;
+            let candidate = {
+                #[cfg(feature = "write-latency-qualification")]
+                let _phase = crate::write_latency_qualification::phase("candidate_build");
+                build(&parent)?
+            };
+            {
+                #[cfg(feature = "write-latency-qualification")]
+                let _phase = crate::write_latency_qualification::phase("immutable_publication");
+                for staged_file in staged {
+                    let version = self
+                        .store
+                        .confirm_readable(&staged_file.uri, staged_file.sha256, staged_file.length)
+                        .await
+                        .map_err(|error| match error {
+                            StorageError::VerificationFailed(_) => {
+                                RuntimeError::FingerprintMismatch
+                            }
+                            other => other.into(),
+                        })?;
+                    if version != staged_file.version {
+                        return Err(RuntimeError::FingerprintMismatch);
+                    }
+                }
+                put_immutable(&self.store, &candidate.commit_uri, &candidate.commit_bytes).await?;
+                for artifact in &candidate.image_artifacts {
+                    put_immutable(&self.store, &artifact.uri, &artifact.bytes).await?;
+                }
+                put_immutable(
+                    &self.store,
+                    &candidate.generation_uri,
+                    &candidate.generation_bytes,
+                )
+                .await?;
+                failpoint("after_immutable_uploads");
             }
-            put_immutable(
-                &self.store,
-                &candidate.generation_uri,
-                &candidate.generation_bytes,
-            )
-            .await?;
-            failpoint("after_immutable_uploads");
 
             let mut indeterminate = 0;
             loop {
-                match self
-                    .store
-                    .replace_head(&parent.head_version, &candidate.head_bytes)
-                    .await
-                {
+                let outcome = {
+                    #[cfg(feature = "write-latency-qualification")]
+                    let _phase = crate::write_latency_qualification::phase("head_cas");
+                    self.store
+                        .replace_head(&parent.head_version, &candidate.head_bytes)
+                        .await
+                };
+                match outcome {
                     ConditionalWriteOutcome::Applied { .. } => {
                         return Ok((candidate.result, candidate.semantic_state));
                     }
@@ -1260,20 +1341,35 @@ fn finish_candidate<R>(
     let commit_id = commit.commit_id;
     let created_at_ms = commit.created_at_ms.0;
     let commit_hash = object_hash(&commit_bytes);
-    image::validate(
-        &checkpoint.path,
-        &ExpectedImage {
-            table_id: parent.head.table_id,
-            table_version,
-            semantic_state: commit.semantic_state_sha256,
-            commit_id,
-            commit_hash,
-            commit_uri: commit_uri.as_str(),
-            reader_features_json: &canonical_text(&parent.head.required_reader_features)?,
-            writer_features_json: &canonical_text(&parent.head.required_writer_features)?,
-            previous_semantic_state: commit.previous_semantic_state_sha256,
-        },
-    )?;
+    #[cfg(feature = "write-latency-qualification")]
+    {
+        crate::write_latency_qualification::add_bytes(
+            "candidate_logical_bytes",
+            checkpoint.bytes.len() as u64,
+        );
+        crate::write_latency_qualification::add_bytes(
+            "changed_pages",
+            checkpoint.changed_pages.len() as u64,
+        );
+    }
+    {
+        #[cfg(feature = "write-latency-qualification")]
+        let _phase = crate::write_latency_qualification::phase("exhaustive_validation");
+        image::validate(
+            &checkpoint.path,
+            &ExpectedImage {
+                table_id: parent.head.table_id,
+                table_version,
+                semantic_state: commit.semantic_state_sha256,
+                commit_id,
+                commit_hash,
+                commit_uri: commit_uri.as_str(),
+                reader_features_json: &canonical_text(&parent.head.required_reader_features)?,
+                writer_features_json: &canonical_text(&parent.head.required_writer_features)?,
+                previous_semantic_state: commit.previous_semantic_state_sha256,
+            },
+        )?;
+    }
     let incremental = crate::physical::persist(
         parent.page_tree.as_ref(),
         &checkpoint.changed_pages,
@@ -1381,7 +1477,19 @@ fn finish_candidate<R>(
         required_reader_features: parent.head.required_reader_features.clone(),
         required_writer_features: parent.head.required_writer_features.clone(),
     };
-    image::validate_commit_projection(&checkpoint.path, commit)?;
+    #[cfg(feature = "write-latency-qualification")]
+    crate::write_latency_qualification::add_bytes(
+        "published_image_artifact_bytes",
+        image_artifacts
+            .iter()
+            .map(|artifact| artifact.bytes.len() as u64)
+            .sum(),
+    );
+    {
+        #[cfg(feature = "write-latency-qualification")]
+        let _phase = crate::write_latency_qualification::phase("commit_projection_validation");
+        image::validate_commit_projection(&checkpoint.path, commit)?;
+    }
     let committed_state = image::open_readonly(&checkpoint.path)?.query_row(
         "SELECT semantic_state_sha256 FROM otmp_commits WHERE commit_id=?1",
         [commit.commit_id.as_bytes().as_slice()],

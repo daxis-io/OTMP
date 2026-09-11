@@ -2074,7 +2074,7 @@ async fn validate_append_rebase_write<S: ObjectStore>(
     pinned: &WritePin<S>,
     name: &str,
     original: Option<(RefType, Option<Id>)>,
-    version: u64,
+    mut version: u64,
 ) -> Result<(), RuntimeError> {
     let Some((RefType::Branch, old)) = original else {
         return Err(RuntimeError::SemanticConflict(
@@ -2094,21 +2094,37 @@ async fn validate_append_rebase_write<S: ObjectStore>(
             "target is not an append descendant".into(),
         ));
     }
-    for row in pinned.reader.commit_operations_after(version).await? {
-        let operations: Vec<CanonicalValue> = canonical_json::from_slice_canonical(row.as_bytes())?;
-        for operation in operations {
-            if let CanonicalValue::Object(fields) = operation {
-                if fields.get("ref") == Some(&string(name))
-                    && fields.get("type") != Some(&string("commit_snapshot"))
-                {
-                    return Err(RuntimeError::SemanticConflict(
-                        "target ref changed during append".into(),
-                    ));
-                }
-                if fields.get("type") == Some(&string("set_current_schema")) {
-                    return Err(RuntimeError::SemanticConflict(
-                        "current schema changed during append".into(),
-                    ));
+    let target_version = pinned.reader.coordinates().table_version;
+    while version < target_version {
+        let rows = pinned.reader.commit_operations_page_after(version).await?;
+        if rows.is_empty() {
+            return Err(RuntimeError::Corrupt(
+                "commit operation history is incomplete".into(),
+            ));
+        }
+        for (row_version, row) in rows {
+            if row_version != version + 1 {
+                return Err(RuntimeError::Corrupt(
+                    "commit operation history is not contiguous".into(),
+                ));
+            }
+            version = row_version;
+            let operations: Vec<CanonicalValue> =
+                canonical_json::from_slice_canonical(row.as_bytes())?;
+            for operation in operations {
+                if let CanonicalValue::Object(fields) = operation {
+                    if fields.get("ref") == Some(&string(name))
+                        && fields.get("type") != Some(&string("commit_snapshot"))
+                    {
+                        return Err(RuntimeError::SemanticConflict(
+                            "target ref changed during append".into(),
+                        ));
+                    }
+                    if fields.get("type") == Some(&string("set_current_schema")) {
+                        return Err(RuntimeError::SemanticConflict(
+                            "current schema changed during append".into(),
+                        ));
+                    }
                 }
             }
         }

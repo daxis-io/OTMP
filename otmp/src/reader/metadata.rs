@@ -13,6 +13,11 @@ use std::ops::Bound;
 use std::sync::Arc;
 use turso_core::{Numeric, Value};
 
+#[cfg(not(test))]
+const COMMIT_OPERATION_PAGE_ROWS: usize = 4096;
+#[cfg(test)]
+const COMMIT_OPERATION_PAGE_ROWS: usize = 2;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileCursor {
     pub(crate) pin: Id,
@@ -174,20 +179,24 @@ impl<S: ObjectStore> MetadataReader<S> {
             .transpose()
     }
 
-    pub(crate) async fn commit_operations_after(
+    pub(crate) async fn commit_operations_page_after(
         &self,
         version: u64,
-    ) -> Result<Vec<String>, RuntimeError> {
+    ) -> Result<Vec<(u64, String)>, RuntimeError> {
         self.engine
             .query(
-                "SELECT operation_summary_json FROM otmp_commits WHERE table_version>?1 ORDER BY table_version",
-                vec![integer(i64::try_from(version).map_err(|_| corrupt("version overflow"))?)],
-                4096,
+                "SELECT table_version,operation_summary_json FROM otmp_commits WHERE table_version>?1 AND table_version<=?2 ORDER BY table_version LIMIT ?3",
+                vec![
+                    sqlite(version)?,
+                    sqlite(self.coordinates.table_version)?,
+                    sqlite(COMMIT_OPERATION_PAGE_ROWS as u64)?,
+                ],
+                COMMIT_OPERATION_PAGE_ROWS,
                 8 * 1024 * 1024,
             )
             .await?
             .iter()
-            .map(|row| text(&row[0]))
+            .map(|row| Ok((uint(&row[0])?, text(&row[1])?)))
             .collect()
     }
 
@@ -419,6 +428,7 @@ pub(crate) fn hash(v: &Value) -> Result<Sha256, RuntimeError> {
             .map_err(|_| corrupt("invalid metadata hash"))?,
     ))
 }
+
 pub(crate) fn sqlite(n: u64) -> Result<Value, RuntimeError> {
     Ok(integer(
         i64::try_from(n).map_err(|_| corrupt("metadata integer overflow"))?,
@@ -516,8 +526,59 @@ async fn validate_commit_row<S: ObjectStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InMemoryObjectStore, InitializeRequest, ReaderOptions, Table};
+    use crate::{
+        CommitMetadata, InMemoryObjectStore, InitializeRequest, OperationRequest, ReaderOptions,
+        Requirement, Table, TransactionRequest,
+    };
+    use otmp_protocol::CanonicalValue;
     use std::str::FromStr;
+
+    #[tokio::test]
+    async fn commit_operations_are_paged_beyond_one_query_budget() {
+        let table = Table::new(InMemoryObjectStore::default());
+        let schema =
+            serde_json::from_slice(include_bytes!("../../../conformance/sources/schema.json"))
+                .unwrap();
+        table
+            .initialize(InitializeRequest::new(schema))
+            .await
+            .unwrap();
+        for index in 0..3 {
+            let property = format!("property-{index}");
+            table
+                .transact(&TransactionRequest {
+                    idempotency_key: format!("metadata-{index}"),
+                    requirements: vec![Requirement::PropertyIs {
+                        key: property.clone(),
+                        value: CanonicalValue::Null,
+                    }],
+                    operations: vec![OperationRequest::SetProperties {
+                        operation_id: "set".into(),
+                        updates: [(property, CanonicalValue::Bool(true))].into(),
+                        removals: Vec::new(),
+                    }],
+                    commit_metadata: CommitMetadata::default(),
+                })
+                .await
+                .unwrap();
+        }
+        let reader = table
+            .open_metadata_reader(
+                MetadataSelection::Current,
+                SnapshotSelection::Ref("main".into()),
+                ReaderOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        let first = reader.commit_operations_page_after(0).await.unwrap();
+        assert_eq!(first.len(), COMMIT_OPERATION_PAGE_ROWS);
+        let second = reader
+            .commit_operations_page_after(first.last().unwrap().0)
+            .await
+            .unwrap();
+        assert_eq!(second.len(), 1);
+    }
 
     #[tokio::test]
     async fn matching_tip_does_not_walk_snapshot_history() {

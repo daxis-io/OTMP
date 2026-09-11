@@ -1479,15 +1479,6 @@ fn validate_projected_snapshot_summary(
     transaction: &Writer<'_>,
     snapshot: &ProjectedSemanticSnapshot,
 ) -> Result<(), RuntimeError> {
-    let projected = transaction
-        .query_all(
-            "SELECT summary_key, value_json FROM otmp_snapshot_summary WHERE snapshot_id=?1 ORDER BY summary_key",
-            params![snapshot.snapshot_id.as_bytes().as_slice()],
-            4096,
-            |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
-        )?
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
     let CanonicalValue::Object(summary) = &snapshot.summary else {
         return Err(RuntimeError::Corrupt(
             "semantic snapshot summary is not an object".into(),
@@ -1497,6 +1488,15 @@ fn validate_projected_snapshot_summary(
         .iter()
         .map(|(key, value)| Ok((key.clone(), canonical_string(value)?)))
         .collect::<Result<BTreeMap<_, _>, RuntimeError>>()?;
+    let projected = transaction
+        .query_all(
+            "SELECT summary_key, value_json FROM otmp_snapshot_summary WHERE snapshot_id=?1 ORDER BY summary_key",
+            params![snapshot.snapshot_id.as_bytes().as_slice()],
+            expected.len().saturating_add(1),
+            |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
+        )?
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
     if projected != expected {
         return Err(RuntimeError::Corrupt(
             "semantic snapshot summary differs from relational summary rows".into(),
@@ -2547,6 +2547,37 @@ mod tests {
 
         let error = validate_commit_projection(&image.path, &commit).unwrap_err();
         assert!(error.to_string().contains("summary"), "{error}");
+    }
+
+    #[test]
+    fn targeted_summary_validation_accepts_more_than_4096_rows() {
+        let (image, commit) = static_append_projection();
+        let mut operation: ProjectedCommitSnapshot = canonical_json::from_slice_canonical(
+            &canonical_json::to_vec(&commit.operations[0]).unwrap(),
+        )
+        .unwrap();
+        let CanonicalValue::Object(summary) = &mut operation.snapshot.summary else {
+            panic!("snapshot summary must be an object");
+        };
+        let connection = Connection::open(&image.path).unwrap();
+        for index in 0..4094 {
+            let key = format!("caller-{index:04}");
+            let value = CanonicalValue::String("value".into());
+            summary.insert(key.clone(), value.clone());
+            connection
+                .execute(
+                    "INSERT INTO otmp_snapshot_summary(snapshot_id,summary_key,value_json) VALUES(?1,?2,?3)",
+                    params![
+                        operation.snapshot.snapshot_id.as_bytes().as_slice(),
+                        key,
+                        canonical_string(&value).unwrap()
+                    ],
+                )
+                .unwrap();
+        }
+
+        validate_projected_snapshot_summary(&Writer::Sqlite(&connection), &operation.snapshot)
+            .unwrap();
     }
 
     #[test]

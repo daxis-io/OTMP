@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use otmp_protocol::{
     COMMIT_MEDIA_TYPE, CanonicalValue, Field, Id, JsonU64, LogicalType, Schema, SemanticCommit,
     Sha256, TypedScalar, canonical_json, decode_partition_tuple, decode_typed_scalar,
-    encode_partition_tuple, encode_typed_scalar, partition_hash,
+    encode_partition_tuple, encode_typed_scalar, object_hash, partition_hash,
 };
 use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -16,7 +16,7 @@ use crate::{FileFormat, RuntimeError};
 const SCHEMA_SQL: &str = include_str!("../../spec/OTMP-0.0.2-alpha-table-schema.sql");
 pub(crate) const PAGE_SIZE: u32 = 4096;
 pub(crate) const APPLICATION_ID: i64 = 0x4f54_4d50;
-pub(crate) const USER_VERSION: i64 = 2;
+pub(crate) const USER_VERSION: i64 = 3;
 
 pub(crate) struct CheckpointImage {
     _directory: tempfile::TempDir,
@@ -24,6 +24,7 @@ pub(crate) struct CheckpointImage {
     pub bytes: Vec<u8>,
     pub page_count: u64,
     pub changed_pages: BTreeMap<u64, Vec<u8>>,
+    pub(crate) frozen: Option<crate::cow_writer::FrozenImage>,
 }
 
 pub(crate) struct MaterializedImage {
@@ -31,34 +32,47 @@ pub(crate) struct MaterializedImage {
     pub path: PathBuf,
 }
 
-fn finish_turso(
+pub(crate) fn finish_turso(
     writer: crate::cow_writer::CandidateWriter,
+    materialize: bool,
 ) -> Result<CheckpointImage, RuntimeError> {
     let frozen = {
         #[cfg(feature = "write-latency-qualification")]
         let _phase = crate::write_latency_qualification::phase("turso_checkpoint_freeze");
         writer.finish()?
     };
-    let bytes = {
-        #[cfg(feature = "write-latency-qualification")]
-        let _phase = crate::write_latency_qualification::phase("candidate_buffer_creation");
-        frozen.materialize()
-    };
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("metadata.sqlite3");
-    {
-        #[cfg(feature = "write-latency-qualification")]
-        let _phase = crate::write_latency_qualification::phase("validation_file_write");
-        fs::write(&path, &bytes)?;
-        #[cfg(feature = "write-latency-qualification")]
-        crate::write_latency_qualification::add_bytes("temporary_file_bytes", bytes.len() as u64);
-    }
+    let page_count = u64::try_from(frozen.length / PAGE_SIZE as usize)
+        .map_err(|_| RuntimeError::Corrupt("candidate page count overflow".into()))?;
+    let changed_pages = frozen.changed.clone();
+    let bytes = if materialize {
+        let bytes = {
+            #[cfg(feature = "write-latency-qualification")]
+            let _phase = crate::write_latency_qualification::phase("candidate_buffer_creation");
+            frozen.materialize()?
+        };
+        {
+            #[cfg(feature = "write-latency-qualification")]
+            let _phase = crate::write_latency_qualification::phase("validation_file_write");
+            fs::write(&path, &bytes)?;
+            #[cfg(feature = "write-latency-qualification")]
+            crate::write_latency_qualification::add_bytes(
+                "temporary_file_bytes",
+                bytes.len() as u64,
+            );
+        }
+        bytes
+    } else {
+        Vec::new()
+    };
     Ok(CheckpointImage {
         _directory: directory,
         path,
-        page_count: (bytes.len() / PAGE_SIZE as usize) as u64,
+        page_count,
         bytes,
-        changed_pages: frozen.changed,
+        changed_pages,
+        frozen: (!materialize).then_some(frozen),
     })
 }
 
@@ -67,31 +81,24 @@ pub(crate) fn turso_genesis(input: &GenesisImage<'_>) -> Result<CheckpointImage,
     let writer =
         crate::cow_writer::CandidateWriter::new(std::sync::Arc::from([]), Some(SCHEMA_SQL))?;
     mutate_genesis(&writer.sql(), input)?;
-    finish_turso(writer)
+    finish_turso(writer, true)
 }
 
-pub(crate) fn turso_append(
-    parent: std::sync::Arc<[u8]>,
+pub(crate) fn turso_append_pages(
+    parent: std::sync::Arc<dyn crate::reader_engine::PageSource>,
+    handle: tokio::runtime::Handle,
     input: &AppendImage<'_>,
-) -> Result<CheckpointImage, RuntimeError> {
-    let writer = crate::cow_writer::CandidateWriter::new(parent, None)?;
-    mutate_append(&writer.sql(), input)?;
-    finish_turso(writer)
-}
-
-pub(crate) fn turso_metadata(
-    parent: std::sync::Arc<[u8]>,
     commit: &SemanticCommit,
-    uri: &otmp_protocol::RelativeUri,
-    operations: &[crate::OperationRequest],
 ) -> Result<CheckpointImage, RuntimeError> {
-    let writer = crate::cow_writer::CandidateWriter::new(parent, None)?;
-    {
-        #[cfg(feature = "write-latency-qualification")]
-        let _phase = crate::write_latency_qualification::phase("turso_sql");
-        mutate_metadata(&writer.sql(), commit, uri, operations)?;
-    }
-    finish_turso(writer)
+    let writer = crate::cow_writer::CandidateWriter::from_pages(parent, handle)?;
+    mutate_append(&writer.sql(), input)?;
+    validate_targeted_candidate(
+        &writer.sql(),
+        commit,
+        input.commit_uri,
+        object_hash(&canonical_json::to_vec(commit)?),
+    )?;
+    finish_turso(writer, false)
 }
 
 pub(crate) fn open_readonly(path: &Path) -> Result<Connection, RuntimeError> {
@@ -129,6 +136,39 @@ pub(crate) struct ImageMetric {
     pub lower_bound_cbor: Option<Vec<u8>>,
     pub upper_bound_cbor: Option<Vec<u8>>,
     pub metadata_json: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OrderedProjection {
+    bound_type: Option<&'static str>,
+    lower: Option<i64>,
+    upper: Option<i64>,
+}
+
+fn ordered_projection(
+    lower: Option<&[u8]>,
+    upper: Option<&[u8]>,
+) -> Result<OrderedProjection, RuntimeError> {
+    fn value(bytes: Option<&[u8]>) -> Result<Option<(&'static str, i64)>, RuntimeError> {
+        Ok(match bytes.map(decode_typed_scalar).transpose()? {
+            Some(TypedScalar::Int32(value)) => Some(("int32", i64::from(value))),
+            Some(TypedScalar::Int64(value)) => Some(("int64", value)),
+            Some(TypedScalar::Date(value)) => Some(("date", i64::from(value))),
+            _ => None,
+        })
+    }
+    let lower = value(lower)?;
+    let upper = value(upper)?;
+    let bound_type = match (lower, upper) {
+        (Some((lower, _)), Some((upper, _))) if lower == upper => Some(lower),
+        (Some((bound_type, _)), None) | (None, Some((bound_type, _))) => Some(bound_type),
+        _ => None,
+    };
+    Ok(OrderedProjection {
+        bound_type,
+        lower: bound_type.and_then(|_| lower.map(|(_, value)| value)),
+        upper: bound_type.and_then(|_| upper.map(|(_, value)| value)),
+    })
 }
 
 #[derive(Clone)]
@@ -328,8 +368,12 @@ fn mutate_append(transaction: &Writer<'_>, input: &AppendImage<'_>) -> Result<()
             ],
         )?;
         for metric in &file.metrics {
+            let ordered = ordered_projection(
+                metric.lower_bound_cbor.as_deref(),
+                metric.upper_bound_cbor.as_deref(),
+            )?;
             transaction.execute(
-                "INSERT INTO otmp_file_metrics(file_id, field_id, column_size_bytes, value_count, null_count, nan_count, distinct_count, lower_bound_cbor, upper_bound_cbor, metadata_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO otmp_file_metrics(file_id, field_id, column_size_bytes, value_count, null_count, nan_count, distinct_count, lower_bound_cbor, upper_bound_cbor, ordered_bound_type, ordered_lower_i64, ordered_upper_i64, metadata_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     file.file_id.as_bytes().as_slice(),
                     i64::from(metric.field_id),
@@ -340,6 +384,9 @@ fn mutate_append(transaction: &Writer<'_>, input: &AppendImage<'_>) -> Result<()
                     optional_sqlite_i64(metric.distinct_count, "distinct count")?,
                     metric.lower_bound_cbor,
                     metric.upper_bound_cbor,
+                    ordered.bound_type,
+                    ordered.lower,
+                    ordered.upper,
                     metric.metadata_json,
                 ],
             )?;
@@ -416,8 +463,6 @@ pub(crate) fn materialize(bytes: &[u8]) -> Result<MaterializedImage, RuntimeErro
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("metadata.sqlite3");
     fs::write(&path, bytes)?;
-    #[cfg(feature = "write-latency-qualification")]
-    crate::write_latency_qualification::add_bytes("temporary_file_bytes", bytes.len() as u64);
     Ok(MaterializedImage {
         _directory: directory,
         path,
@@ -698,6 +743,7 @@ fn validate_relational_history(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Descriptor and metric invariants are one exhaustive validation pass.
 fn validate_file_descriptors(connection: &Connection) -> Result<(), RuntimeError> {
     let files = {
         let mut statement = connection.prepare(
@@ -731,7 +777,7 @@ fn validate_file_descriptors(connection: &Connection) -> Result<(), RuntimeError
 
     let metrics = {
         let mut statement = connection.prepare(
-            "SELECT m.value_count, m.null_count, m.nan_count, m.lower_bound_cbor, m.upper_bound_cbor, fld.type_json FROM otmp_file_metrics m JOIN otmp_files f ON f.file_id=m.file_id LEFT JOIN otmp_fields fld ON fld.schema_id=f.schema_id AND fld.field_id=m.field_id ORDER BY m.file_id, m.field_id",
+            "SELECT m.value_count, m.null_count, m.nan_count, m.lower_bound_cbor, m.upper_bound_cbor, fld.type_json, m.ordered_bound_type, m.ordered_lower_i64, m.ordered_upper_i64 FROM otmp_file_metrics m JOIN otmp_files f ON f.file_id=m.file_id LEFT JOIN otmp_fields fld ON fld.schema_id=f.schema_id AND fld.field_id=m.field_id ORDER BY m.file_id, m.field_id",
         )?;
         statement
             .query_map([], |row| {
@@ -742,11 +788,25 @@ fn validate_file_descriptors(connection: &Connection) -> Result<(), RuntimeError
                     row.get::<_, Option<Vec<u8>>>(3)?,
                     row.get::<_, Option<Vec<u8>>>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
     };
-    for (value_count, null_count, nan_count, lower, upper, field_type) in metrics {
+    for (
+        value_count,
+        null_count,
+        nan_count,
+        lower,
+        upper,
+        field_type,
+        ordered_type,
+        ordered_lower,
+        ordered_upper,
+    ) in metrics
+    {
         let Some(field_type) = field_type else {
             return Err(RuntimeError::Corrupt(
                 "metric field does not belong to the file schema".into(),
@@ -783,6 +843,18 @@ fn validate_file_descriptors(connection: &Connection) -> Result<(), RuntimeError
         {
             return Err(RuntimeError::Corrupt(
                 "relational metric bounds are reversed".into(),
+            ));
+        }
+        let projection = ordered_projection(
+            lower.as_ref().map(encode_typed_scalar).as_deref(),
+            upper.as_ref().map(encode_typed_scalar).as_deref(),
+        )?;
+        if ordered_type.as_deref() != projection.bound_type
+            || ordered_lower != projection.lower
+            || ordered_upper != projection.upper
+        {
+            return Err(RuntimeError::Corrupt(
+                "ordered metric projection differs from canonical bounds".into(),
             ));
         }
     }
@@ -892,24 +964,31 @@ fn normalized_fields(
     connection: &Connection,
     schema_id: u32,
 ) -> Result<BTreeMap<u32, NormalizedField>, RuntimeError> {
-    let mut statement = connection.prepare(
+    normalized_fields_with(&Writer::Sqlite(connection), schema_id)
+}
+
+fn normalized_fields_with(
+    transaction: &Writer<'_>,
+    schema_id: u32,
+) -> Result<BTreeMap<u32, NormalizedField>, RuntimeError> {
+    let raw = transaction.query_all(
         "SELECT field_id, parent_field_id, name, ordinal, required, type_json, doc, initial_default_json, write_default_json FROM otmp_fields WHERE schema_id=?1 ORDER BY field_id",
-    )?;
-    let raw = statement
-        .query_map([i64::from(schema_id)], |row| {
+        params![i64::from(schema_id)],
+        4096,
+        |row| {
             Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Option<i64>>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
+                row.get::<i64>(0)?,
+                row.get::<Option<i64>>(1)?,
+                row.get::<String>(2)?,
+                row.get::<i64>(3)?,
+                row.get::<i64>(4)?,
+                row.get::<String>(5)?,
+                row.get::<Option<String>>(6)?,
+                row.get::<Option<String>>(7)?,
+                row.get::<Option<String>>(8)?,
             ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        },
+    )?;
     raw.into_iter()
         .map(|row| {
             let field_id = u32::try_from(row.0)
@@ -992,33 +1071,95 @@ fn parse_optional_scalar(value: Option<String>) -> Result<Option<TypedScalar>, R
         .transpose()
 }
 
-pub(crate) fn idempotency(
-    path: &Path,
-    key: &str,
-) -> Result<Option<(Sha256, String)>, RuntimeError> {
-    let connection = open_readonly(path)?;
-    connection
-        .query_row(
-            "SELECT intent_sha256, result_json FROM otmp_idempotency WHERE idempotency_key=?1",
-            [key],
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()?
-        .map(|(hash, result)| {
-            let hash: [u8; 32] = hash
-                .try_into()
-                .map_err(|_| RuntimeError::Corrupt("invalid idempotency hash".into()))?;
-            Ok((Sha256::from_bytes(hash), result))
-        })
-        .transpose()
-}
-
 pub(crate) fn validate_commit_projection(
     path: &Path,
     commit: &SemanticCommit,
 ) -> Result<(), RuntimeError> {
     let connection = open_readonly(path)?;
-    let row: (i64, String, String, String) = connection.query_row(
+    validate_commit_projection_with(&Writer::Sqlite(&connection), commit)
+}
+
+pub(crate) fn validate_targeted_candidate(
+    transaction: &Writer<'_>,
+    commit: &SemanticCommit,
+    commit_uri: &str,
+    commit_hash: Sha256,
+) -> Result<(), RuntimeError> {
+    type MetaRow = (
+        String,
+        String,
+        Vec<u8>,
+        i64,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        i64,
+        i64,
+        i64,
+    );
+    for (pragma, expected) in [
+        ("application_id", APPLICATION_ID),
+        ("user_version", USER_VERSION),
+        ("page_size", i64::from(PAGE_SIZE)),
+    ] {
+        let actual: i64 =
+            transaction.query_row(&format!("PRAGMA {pragma}"), &[], |row| row.get(0))?;
+        if actual != expected {
+            return Err(RuntimeError::Corrupt(format!("invalid SQLite {pragma}")));
+        }
+    }
+    let meta: MetaRow = transaction.query_row(
+            "SELECT protocol, protocol_version, table_id, table_version, semantic_state_sha256, last_commit_id, last_commit_sha256, current_schema_id, default_partition_spec_id, default_sort_order_id FROM otmp_meta WHERE singleton=1",
+            &[],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?)),
+        )?;
+    if meta.0 != "otmp"
+        || meta.1 != "0.0.2-alpha"
+        || meta.2 != commit.table_id.as_bytes()
+        || u64::try_from(meta.3).ok() != Some(commit.table_version.0)
+        || meta.4 != commit.semantic_state_sha256.as_bytes()
+        || meta.5 != commit.commit_id.as_bytes()
+        || meta.6 != commit_hash.as_bytes()
+    {
+        return Err(RuntimeError::Corrupt(
+            "otmp_meta does not match semantic commit".into(),
+        ));
+    }
+    let defaults_exist: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM otmp_schemas WHERE schema_id=?1) AND EXISTS(SELECT 1 FROM otmp_partition_specs WHERE partition_spec_id=?2) AND EXISTS(SELECT 1 FROM otmp_sort_orders WHERE sort_order_id=?3)",
+        params![meta.7, meta.8, meta.9],
+        |row| row.get(0),
+    )?;
+    if !defaults_exist {
+        return Err(RuntimeError::Corrupt(
+            "metadata defaults do not exist".into(),
+        ));
+    }
+    let commit_matches: i64 = transaction.query_row(
+        "SELECT count(*) FROM otmp_commits WHERE table_version=?1 AND commit_id=?2 AND semantic_state_sha256=?3 AND commit_object_uri=?4 AND commit_object_sha256=?5",
+        params![
+            sqlite_i64(commit.table_version.0, "table version")?,
+            commit.commit_id.as_bytes().as_slice(),
+            commit.semantic_state_sha256.as_bytes().as_slice(),
+            commit_uri,
+            commit_hash.as_bytes().as_slice(),
+        ],
+        |row| row.get(0),
+    )?;
+    if commit_matches != 1 {
+        return Err(RuntimeError::Corrupt(
+            "last commit row does not match commit object".into(),
+        ));
+    }
+    validate_affected_foreign_keys(transaction, commit)?;
+    validate_commit_projection_with(transaction, commit)
+}
+
+pub(crate) fn validate_commit_projection_with(
+    transaction: &Writer<'_>,
+    commit: &SemanticCommit,
+) -> Result<(), RuntimeError> {
+    let row: (i64, String, String, String) = transaction.query_row(
         "SELECT intent_count, operation_summary_json, result_json, metadata_json FROM otmp_commits WHERE table_version=?1 AND commit_id=?2",
         params![
             sqlite_i64(commit.table_version.0, "table version")?,
@@ -1035,16 +1176,15 @@ pub(crate) fn validate_commit_projection(
             "semantic commit projection differs from relational commit row".into(),
         ));
     }
-    validate_snapshot_projection(&connection, commit)?;
-    validate_metadata_projection(&connection, commit)?;
+    validate_snapshot_projection(transaction, commit)?;
+    validate_metadata_projection(transaction, commit)?;
     for intent in &commit.intents {
-        let projected: Option<(Vec<u8>, Vec<u8>, i64, String)> = connection
-            .query_row(
+        let projected: Option<(Vec<u8>, Vec<u8>, i64, String)> = transaction
+            .query_optional(
                 "SELECT intent_sha256, commit_id, table_version, result_json FROM otmp_idempotency WHERE idempotency_key=?1",
-                [&intent.key],
+                params![&intent.key],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
+            )?;
         let Some(projected) = projected else {
             return Err(RuntimeError::Corrupt(
                 "semantic intent has no idempotency row".into(),
@@ -1063,9 +1203,9 @@ pub(crate) fn validate_commit_projection(
     if let (Some(parent_version), Some(parent_reference)) =
         (commit.parent_table_version, &commit.parent_commit)
     {
-        let (uri, hash): (String, Vec<u8>) = connection.query_row(
+        let (uri, hash): (String, Vec<u8>) = transaction.query_row(
             "SELECT commit_object_uri, commit_object_sha256 FROM otmp_commits WHERE table_version=?1",
-            [sqlite_i64(parent_version.0, "parent table version")?],
+            params![sqlite_i64(parent_version.0, "parent table version")?],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         if uri != parent_reference.uri.as_str()
@@ -1081,12 +1221,12 @@ pub(crate) fn validate_commit_projection(
 }
 
 fn validate_snapshot_projection(
-    connection: &Connection,
+    transaction: &Writer<'_>,
     commit: &SemanticCommit,
 ) -> Result<(), RuntimeError> {
-    let expected_snapshot_rows: i64 = connection.query_row(
+    let expected_snapshot_rows: i64 = transaction.query_row(
         "SELECT count(*) FROM otmp_snapshots WHERE committed_table_version=?1",
-        [sqlite_i64(commit.table_version.0, "table version")?],
+        params![sqlite_i64(commit.table_version.0, "table version")?],
         |row| row.get(0),
     )?;
     let mut operation_snapshot_ids = BTreeSet::new();
@@ -1106,8 +1246,8 @@ fn validate_snapshot_projection(
                 "semantic commit contains a duplicate snapshot identity".into(),
             ));
         }
-        let projected: Option<ProjectedSnapshotRow> = connection
-            .query_row(
+        let projected: Option<ProjectedSnapshotRow> = transaction
+            .query_optional(
                 "SELECT parent_snapshot_id, sequence_number, schema_id, partition_spec_id, sort_order_id, operation, committed_at_ms, scan_root_uri, scan_root_sha256, summary_json, metadata_json FROM otmp_snapshots WHERE snapshot_id=?1 AND committed_table_version=?2",
                 params![
                     snapshot_id.as_bytes().as_slice(),
@@ -1128,17 +1268,16 @@ fn validate_snapshot_projection(
                         metadata_json: row.get(10)?,
                     })
                 },
-            )
-            .optional()?;
+            )?;
         let Some(projected) = projected else {
             return Err(RuntimeError::Corrupt(
                 "semantic snapshot has no relational snapshot row".into(),
             ));
         };
         validate_projected_snapshot_row(commit, &operation, projected)?;
-        validate_projected_snapshot_summary(connection, &operation.snapshot)?;
-        validate_snapshot_changes(connection, commit, &operation)?;
-        validate_projected_ref(connection, commit, &operation)?;
+        validate_projected_snapshot_summary(transaction, &operation.snapshot)?;
+        validate_snapshot_changes(transaction, commit, &operation)?;
+        validate_projected_ref(transaction, commit, &operation)?;
     }
     if usize::try_from(expected_snapshot_rows).ok() != Some(operation_snapshot_ids.len()) {
         return Err(RuntimeError::Corrupt(
@@ -1210,6 +1349,61 @@ struct ProjectedSemanticMetric {
     metadata: CanonicalValue,
 }
 
+fn validate_affected_foreign_keys(
+    transaction: &Writer<'_>,
+    commit: &SemanticCommit,
+) -> Result<(), RuntimeError> {
+    for operation in &commit.operations {
+        let CanonicalValue::Object(operation) = operation else {
+            continue;
+        };
+        if operation.get("type") != Some(&CanonicalValue::String("commit_snapshot".into())) {
+            continue;
+        }
+        let operation: ProjectedCommitSnapshot = canonical_json::from_slice_canonical(
+            &canonical_json::to_vec(&CanonicalValue::Object(operation.clone()))?,
+        )?;
+        let snapshot_links: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM otmp_snapshots s JOIN otmp_schemas sc ON sc.schema_id=s.schema_id JOIN otmp_partition_specs p ON p.partition_spec_id=s.partition_spec_id JOIN otmp_sort_orders o ON o.sort_order_id=s.sort_order_id LEFT JOIN otmp_snapshots parent ON parent.snapshot_id=s.parent_snapshot_id WHERE s.snapshot_id=?1 AND (s.parent_snapshot_id IS NULL OR parent.snapshot_id IS NOT NULL))",
+            params![operation.snapshot.snapshot_id.as_bytes().as_slice()],
+            |row| row.get(0),
+        )?;
+        if !snapshot_links {
+            return Err(RuntimeError::Corrupt(
+                "affected snapshot has an invalid foreign key".into(),
+            ));
+        }
+        for file in &operation.added_files {
+            let file_links: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM otmp_files f JOIN otmp_schemas sc ON sc.schema_id=f.schema_id JOIN otmp_partition_specs p ON p.partition_spec_id=f.partition_spec_id LEFT JOIN otmp_sort_orders o ON o.sort_order_id=f.sort_order_id JOIN otmp_snapshots s ON s.snapshot_id=f.created_snapshot_id WHERE f.file_id=?1 AND (f.sort_order_id IS NULL OR o.sort_order_id IS NOT NULL))",
+                params![file.file_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )?;
+            if !file_links {
+                return Err(RuntimeError::Corrupt(
+                    "affected file has an invalid foreign key".into(),
+                ));
+            }
+            for metric in &file.metrics {
+                let metric_links: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM otmp_file_metrics m JOIN otmp_field_ids f ON f.field_id=m.field_id WHERE m.file_id=?1 AND m.field_id=?2)",
+                    params![
+                        file.file_id.as_bytes().as_slice(),
+                        sqlite_i64(metric.field_id.0, "field ID")?,
+                    ],
+                    |row| row.get(0),
+                )?;
+                if !metric_links {
+                    return Err(RuntimeError::Corrupt(
+                        "affected metric has an invalid foreign key".into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 struct ProjectedSnapshotRow {
     parent_snapshot_id: Option<Vec<u8>>,
     sequence_number: i64,
@@ -1257,17 +1451,15 @@ fn validate_projected_snapshot_row(
 }
 
 fn validate_projected_ref(
-    connection: &Connection,
+    transaction: &Writer<'_>,
     commit: &SemanticCommit,
     operation: &ProjectedCommitSnapshot,
 ) -> Result<(), RuntimeError> {
-    let projected: Option<(Option<Vec<u8>>, i64)> = connection
-        .query_row(
-            "SELECT snapshot_id, updated_version FROM otmp_refs WHERE ref_name=?1",
-            [&operation.target_ref],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
+    let projected: Option<(Option<Vec<u8>>, i64)> = transaction.query_optional(
+        "SELECT snapshot_id, updated_version FROM otmp_refs WHERE ref_name=?1",
+        params![&operation.target_ref],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
     let projected = projected
         .map(|(id, version)| Ok::<_, RuntimeError>((id.map(id_from_blob).transpose()?, version)))
         .transpose()?;
@@ -1284,19 +1476,9 @@ fn validate_projected_ref(
 }
 
 fn validate_projected_snapshot_summary(
-    connection: &Connection,
+    transaction: &Writer<'_>,
     snapshot: &ProjectedSemanticSnapshot,
 ) -> Result<(), RuntimeError> {
-    let projected = {
-        let mut statement = connection.prepare(
-            "SELECT summary_key, value_json FROM otmp_snapshot_summary WHERE snapshot_id=?1 ORDER BY summary_key",
-        )?;
-        statement
-            .query_map([snapshot.snapshot_id.as_bytes().as_slice()], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<BTreeMap<_, _>, _>>()?
-    };
     let CanonicalValue::Object(summary) = &snapshot.summary else {
         return Err(RuntimeError::Corrupt(
             "semantic snapshot summary is not an object".into(),
@@ -1306,6 +1488,15 @@ fn validate_projected_snapshot_summary(
         .iter()
         .map(|(key, value)| Ok((key.clone(), canonical_string(value)?)))
         .collect::<Result<BTreeMap<_, _>, RuntimeError>>()?;
+    let projected = transaction
+        .query_all(
+            "SELECT summary_key, value_json FROM otmp_snapshot_summary WHERE snapshot_id=?1 ORDER BY summary_key",
+            params![snapshot.snapshot_id.as_bytes().as_slice()],
+            expected.len().saturating_add(1),
+            |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
+        )?
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
     if projected != expected {
         return Err(RuntimeError::Corrupt(
             "semantic snapshot summary differs from relational summary rows".into(),
@@ -1315,21 +1506,16 @@ fn validate_projected_snapshot_summary(
 }
 
 fn validate_snapshot_changes(
-    connection: &Connection,
+    transaction: &Writer<'_>,
     commit: &SemanticCommit,
     operation: &ProjectedCommitSnapshot,
 ) -> Result<(), RuntimeError> {
-    let changes = {
-        let mut statement = connection.prepare(
-            "SELECT file_id, change_kind FROM otmp_snapshot_file_changes WHERE snapshot_id=?1 ORDER BY file_id, change_kind",
-        )?;
-        statement
-            .query_map(
-                [operation.snapshot.snapshot_id.as_bytes().as_slice()],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
-            )?
-            .collect::<Result<Vec<_>, _>>()?
-    };
+    let changes = transaction.query_all(
+        "SELECT file_id, change_kind FROM otmp_snapshot_file_changes WHERE snapshot_id=?1 ORDER BY file_id, change_kind",
+        params![operation.snapshot.snapshot_id.as_bytes().as_slice()],
+        operation.added_files.len().saturating_add(operation.removed_file_ids.len()).saturating_add(1),
+        |row| Ok((row.get::<Vec<u8>>(0)?, row.get::<String>(1)?)),
+    )?;
     let projected_changes = changes
         .into_iter()
         .map(|(id, kind)| Ok((id_from_blob(id)?, kind)))
@@ -1351,21 +1537,16 @@ fn validate_snapshot_changes(
             "semantic snapshot file changes differ from relational changes".into(),
         ));
     }
-    let projected_created_files = {
-        let mut statement = connection.prepare(
+    let projected_created_files = transaction
+        .query_all(
             "SELECT file_id FROM otmp_files WHERE created_snapshot_id=?1 OR created_version=?2 ORDER BY file_id",
-        )?;
-        statement
-            .query_map(
-                params![
-                    operation.snapshot.snapshot_id.as_bytes().as_slice(),
-                    sqlite_i64(commit.table_version.0, "table version")?,
-                ],
-                |row| row.get::<_, Vec<u8>>(0),
-            )?
-            .map(|row| id_from_blob(row?))
-            .collect::<Result<BTreeSet<_>, RuntimeError>>()?
-    };
+            params![operation.snapshot.snapshot_id.as_bytes().as_slice(), sqlite_i64(commit.table_version.0, "table version")?],
+            operation.added_files.len().saturating_add(1),
+            |row| row.get::<Vec<u8>>(0),
+        )?
+        .into_iter()
+        .map(id_from_blob)
+        .collect::<Result<BTreeSet<_>, RuntimeError>>()?;
     let semantic_added_files = operation
         .added_files
         .iter()
@@ -1378,7 +1559,7 @@ fn validate_snapshot_changes(
     }
     for file in &operation.added_files {
         validate_projected_file(
-            connection,
+            transaction,
             commit,
             &operation.snapshot,
             file,
@@ -1389,16 +1570,16 @@ fn validate_snapshot_changes(
 }
 
 fn validate_projected_file(
-    connection: &Connection,
+    transaction: &Writer<'_>,
     commit: &SemanticCommit,
     snapshot: &ProjectedSemanticSnapshot,
     file: &ProjectedSemanticFile,
     target_ref: &str,
 ) -> Result<(), RuntimeError> {
-    let projected: Option<ProjectedFileRow> = connection
-        .query_row(
+    let projected: Option<ProjectedFileRow> = transaction
+        .query_optional(
             "SELECT file_kind, uri, object_identity, file_format, file_size_bytes, record_count, schema_id, partition_spec_id, sort_order_id, partition_values_cbor, partition_hash, content_sha256, encryption_metadata, data_sequence_number, file_sequence_number, created_snapshot_id, created_version, metadata_json FROM otmp_files WHERE file_id=?1",
-            [file.file_id.as_bytes().as_slice()],
+            params![file.file_id.as_bytes().as_slice()],
             |row| {
                 Ok(ProjectedFileRow {
                     file_kind: row.get(0)?,
@@ -1421,8 +1602,7 @@ fn validate_projected_file(
                     metadata_json: row.get(17)?,
                 })
             },
-        )
-        .optional()?;
+        )?;
     let Some(projected) = projected else {
         return Err(RuntimeError::Corrupt(
             "semantic added file has no relational file row".into(),
@@ -1459,13 +1639,12 @@ fn validate_projected_file(
             "semantic added file differs from relational file descriptor".into(),
         ));
     }
-    let live_projection: Option<(Vec<u8>, i64, i64)> = connection
-        .query_row(
+    let live_projection: Option<(Vec<u8>, i64, i64)> = transaction
+        .query_optional(
             "SELECT added_snapshot_id, data_sequence_number, file_sequence_number FROM otmp_ref_live_files WHERE ref_name=?2 AND file_id=?1",
             params![file.file_id.as_bytes().as_slice(),target_ref],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
+        )?;
     if live_projection
         .map(|(snapshot_id, data_sequence, file_sequence)| {
             Ok::<_, RuntimeError>((id_from_blob(snapshot_id)?, data_sequence, file_sequence))
@@ -1481,7 +1660,7 @@ fn validate_projected_file(
             "semantic added file differs from relational live-file projection".into(),
         ));
     }
-    validate_projected_metrics(connection, file)
+    validate_projected_metrics(transaction, file)
 }
 
 struct ProjectedFileRow {
@@ -1506,15 +1685,15 @@ struct ProjectedFileRow {
 }
 
 fn validate_projected_metrics(
-    connection: &Connection,
+    transaction: &Writer<'_>,
     file: &ProjectedSemanticFile,
 ) -> Result<(), RuntimeError> {
-    let projected = {
-        let mut statement = connection.prepare(
-            "SELECT field_id, column_size_bytes, value_count, null_count, nan_count, distinct_count, lower_bound_cbor, upper_bound_cbor, bloom_filter_uri, bloom_filter_sha256, metadata_json FROM otmp_file_metrics WHERE file_id=?1 ORDER BY field_id",
-        )?;
-        statement
-            .query_map([file.file_id.as_bytes().as_slice()], |row| {
+    let projected = transaction
+        .query_all(
+            "SELECT field_id, column_size_bytes, value_count, null_count, nan_count, distinct_count, lower_bound_cbor, upper_bound_cbor, ordered_bound_type, ordered_lower_i64, ordered_upper_i64, bloom_filter_uri, bloom_filter_sha256, metadata_json FROM otmp_file_metrics WHERE file_id=?1 ORDER BY field_id",
+            params![file.file_id.as_bytes().as_slice()],
+            file.metrics.len().saturating_add(1),
+            |row| {
                 Ok(ProjectedMetricRow {
                     field_id: row.get(0)?,
                     column_size_bytes: row.get(1)?,
@@ -1524,13 +1703,15 @@ fn validate_projected_metrics(
                     distinct_count: row.get(5)?,
                     lower_bound_cbor: row.get(6)?,
                     upper_bound_cbor: row.get(7)?,
-                    bloom_filter_uri: row.get(8)?,
-                    bloom_filter_sha256: row.get(9)?,
-                    metadata_json: row.get(10)?,
+                    ordered_bound_type: row.get(8)?,
+                    ordered_lower_i64: row.get(9)?,
+                    ordered_upper_i64: row.get(10)?,
+                    bloom_filter_uri: row.get(11)?,
+                    bloom_filter_sha256: row.get(12)?,
+                    metadata_json: row.get(13)?,
                 })
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-    };
+            },
+        )?;
     let mut semantic_metrics = file.metrics.iter().collect::<Vec<_>>();
     semantic_metrics.sort_by_key(|metric| metric.field_id.0);
     if projected.len() != semantic_metrics.len() {
@@ -1539,6 +1720,18 @@ fn validate_projected_metrics(
         ));
     }
     for (projected, metric) in projected.iter().zip(semantic_metrics) {
+        let ordered = ordered_projection(
+            metric
+                .lower_bound
+                .as_ref()
+                .map(encode_typed_scalar)
+                .as_deref(),
+            metric
+                .upper_bound
+                .as_ref()
+                .map(encode_typed_scalar)
+                .as_deref(),
+        )?;
         if u64::try_from(projected.field_id).ok() != Some(metric.field_id.0)
             || projected_u64(projected.column_size_bytes) != metric.column_size_bytes
             || projected_u64(projected.value_count) != metric.value_count
@@ -1547,6 +1740,9 @@ fn validate_projected_metrics(
             || projected_u64(projected.distinct_count) != metric.distinct_count
             || projected.lower_bound_cbor != metric.lower_bound.as_ref().map(encode_typed_scalar)
             || projected.upper_bound_cbor != metric.upper_bound.as_ref().map(encode_typed_scalar)
+            || projected.ordered_bound_type.as_deref() != ordered.bound_type
+            || projected.ordered_lower_i64 != ordered.lower
+            || projected.ordered_upper_i64 != ordered.upper
             || projected.bloom_filter_uri.is_some()
             || projected.bloom_filter_sha256.is_some()
             || projected.metadata_json != canonical_string(&metric.metadata)?
@@ -1574,48 +1770,12 @@ struct ProjectedMetricRow {
     distinct_count: Option<i64>,
     lower_bound_cbor: Option<Vec<u8>>,
     upper_bound_cbor: Option<Vec<u8>>,
+    ordered_bound_type: Option<String>,
+    ordered_lower_i64: Option<i64>,
+    ordered_upper_i64: Option<i64>,
     bloom_filter_uri: Option<String>,
     bloom_filter_sha256: Option<Vec<u8>>,
     metadata_json: String,
-}
-
-pub(crate) fn current_schema_and_snapshot(
-    path: &Path,
-) -> Result<(u32, Option<Id>, u64), RuntimeError> {
-    let connection = open_readonly(path)?;
-    let (schema, snapshot, sequence): (i64, Option<Vec<u8>>, i64) = connection.query_row(
-        "SELECT m.current_schema_id, r.snapshot_id, m.last_sequence_number FROM otmp_meta m JOIN otmp_refs r ON r.ref_name='main' WHERE m.singleton=1",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
-    Ok((
-        u32::try_from(schema).map_err(|_| RuntimeError::Corrupt("invalid schema ID".into()))?,
-        snapshot.map(id_from_blob).transpose()?,
-        u64::try_from(sequence).map_err(|_| RuntimeError::Corrupt("invalid sequence".into()))?,
-    ))
-}
-
-pub(crate) fn field_types(
-    path: &Path,
-    schema_id: u32,
-) -> Result<BTreeMap<u32, LogicalType>, RuntimeError> {
-    let connection = open_readonly(path)?;
-    let mut statement = connection.prepare(
-        "SELECT field_id, type_json FROM otmp_fields WHERE schema_id=?1 ORDER BY field_id",
-    )?;
-    let rows = statement.query_map([i64::from(schema_id)], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-    })?;
-    let mut output = BTreeMap::new();
-    for row in rows {
-        let (id, json) = row?;
-        let field_type = canonical_json::from_slice_canonical(json.as_bytes())?;
-        output.insert(
-            u32::try_from(id).map_err(|_| RuntimeError::Corrupt("invalid field ID".into()))?,
-            field_type,
-        );
-    }
-    Ok(output)
 }
 
 fn finish_checkpoint(
@@ -1636,6 +1796,7 @@ fn finish_checkpoint(
         path,
         bytes,
         changed_pages: BTreeMap::new(),
+        frozen: None,
         page_count: u64::try_from(page_count)
             .map_err(|_| RuntimeError::Corrupt("invalid page count".into()))?,
     })
@@ -1773,6 +1934,26 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn affected_file_projection_seeks_by_creation_identity() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(SCHEMA_SQL).unwrap();
+        let mut statement = connection
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT file_id FROM otmp_files WHERE created_snapshot_id=?1 OR created_version=?2 ORDER BY file_id",
+            )
+            .unwrap();
+        let details = statement
+            .query_map(params![vec![0_u8; 16], 1], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            !details.iter().any(|line| line.contains("SCAN otmp_files")),
+            "affected-file validation must not scan every descriptor: {details:?}"
+        );
+    }
+
     fn schema() -> Schema {
         Schema {
             schema_id: 1,
@@ -1875,6 +2056,190 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("foreign_key_check"));
+    }
+
+    #[test]
+    fn targeted_validation_leaves_unrelated_damage_to_exhaustive_verify() {
+        let (image, commit) = static_append_projection();
+        let connection = Connection::open(&image.path).unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO otmp_identifier_fields(schema_id, ordinal, field_id) VALUES(1, 1, 99)",
+                [],
+            )
+            .unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../conformance/tables/append");
+        let head: Head =
+            canonical_json::from_slice_canonical(&fs::read(root.join("_otmp/HEAD")).unwrap())
+                .unwrap();
+        validate_targeted_candidate(
+            &Writer::Sqlite(&connection),
+            &commit,
+            head.semantic_commit.uri.as_str(),
+            head.semantic_commit.sha256,
+        )
+        .unwrap();
+        assert!(
+            validate(
+                &image.path,
+                &expected(
+                    head.table_id,
+                    commit.commit_id,
+                    head.semantic_state_sha256,
+                    head.semantic_commit.sha256,
+                )
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn metadata_projection_rejects_incomplete_branch_membership() {
+        let (image, mut commit) = static_append_projection();
+        let connection = Connection::open(&image.path).unwrap();
+        let snapshot_id: Vec<u8> = connection
+            .query_row(
+                "SELECT snapshot_id FROM otmp_refs WHERE ref_name='main'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let snapshot_id = id_from_blob(snapshot_id).unwrap();
+        let operation = crate::OperationRequest::CreateRef {
+            operation_id: "audit".into(),
+            name: "audit".into(),
+            ref_type: crate::RefType::Branch,
+            snapshot_id: Some(snapshot_id),
+        };
+        commit.operations = vec![canonical_json::to_value(&operation).unwrap()];
+        let writer = Writer::Sqlite(&connection);
+        crate::runtime::transactions::apply_operations(
+            &writer,
+            std::slice::from_ref(&operation),
+            commit.table_version.0,
+        )
+        .unwrap();
+        writer
+            .execute(
+                "DELETE FROM otmp_ref_live_files WHERE ref_name='audit'",
+                params![],
+            )
+            .unwrap();
+
+        let error = validate_metadata_projection(&writer, &commit).unwrap_err();
+        assert!(error.to_string().contains("metadata operation"), "{error}");
+    }
+
+    #[test]
+    fn metadata_projection_rejects_schema_provenance_divergence() {
+        for mutation in [
+            "UPDATE otmp_schemas SET created_version=0 WHERE schema_id=2",
+            "UPDATE otmp_field_ids SET created_version=0 WHERE field_id=2",
+            "UPDATE otmp_field_ids SET first_schema_id=1 WHERE field_id=2",
+        ] {
+            let (image, mut commit) = static_append_projection();
+            let connection = Connection::open(&image.path).unwrap();
+            let mut next = schema();
+            next.schema_id = 2;
+            next.parent_schema_id = Some(1);
+            next.fields.push(Field {
+                field_id: 2,
+                name: "note".into(),
+                required: false,
+                field_type: LogicalType::String,
+                doc: None,
+                initial_default: None,
+                write_default: None,
+            });
+            let operation = crate::OperationRequest::AddSchema {
+                operation_id: "schema".into(),
+                schema: next,
+            };
+            commit.operations = vec![canonical_json::to_value(&operation).unwrap()];
+            let writer = Writer::Sqlite(&connection);
+            crate::runtime::transactions::apply_operations(
+                &writer,
+                std::slice::from_ref(&operation),
+                commit.table_version.0,
+            )
+            .unwrap();
+            writer.execute(mutation, params![]).unwrap();
+
+            let error = validate_metadata_projection(&writer, &commit).unwrap_err();
+            assert!(error.to_string().contains("metadata operation"), "{error}");
+        }
+    }
+
+    #[test]
+    fn ref_creation_provenance_requires_a_branch() {
+        let (image, commit) = static_append_projection();
+        let connection = Connection::open(&image.path).unwrap();
+        let operation = crate::OperationRequest::CreateRef {
+            operation_id: "tag".into(),
+            name: "audit".into(),
+            ref_type: crate::RefType::Tag,
+            snapshot_id: None,
+        };
+        connection
+            .execute(
+                "UPDATE otmp_commits SET operation_summary_json=?1 WHERE table_version=?2",
+                params![
+                    canonical_string(&vec![canonical_json::to_value(&operation).unwrap()]).unwrap(),
+                    commit.table_version.0,
+                ],
+            )
+            .unwrap();
+
+        assert!(
+            !ref_creation_matches(
+                &Writer::Sqlite(&connection),
+                "audit",
+                i64::try_from(commit.table_version.0).unwrap(),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn validation_rejects_v2_images() {
+        let (checkpoint, table_id, commit_id, state, commit_hash) = genesis();
+        let connection = Connection::open(&checkpoint.path).unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        drop(connection);
+
+        let error = validate(
+            &checkpoint.path,
+            &expected(table_id, commit_id, state, commit_hash),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("user_version"), "{error}");
+    }
+
+    #[test]
+    fn validation_rejects_ordered_projection_divergence() {
+        let (image, _) = static_append_projection();
+        let connection = Connection::open(&image.path).unwrap();
+        let file_id: Vec<u8> = connection
+            .query_row("SELECT file_id FROM otmp_files LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let bound = encode_typed_scalar(&TypedScalar::Int64(7));
+        connection
+            .execute(
+                "INSERT INTO otmp_file_metrics(file_id,field_id,lower_bound_cbor,upper_bound_cbor,ordered_bound_type,ordered_lower_i64,ordered_upper_i64,metadata_json) VALUES(?1,1,?2,?2,'int64',6,7,'{}')",
+                params![file_id, bound],
+            )
+            .unwrap();
+
+        let error = validate_file_descriptors(&connection).unwrap_err();
+        assert!(
+            error.to_string().contains("ordered metric projection"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2185,6 +2550,37 @@ mod tests {
     }
 
     #[test]
+    fn targeted_summary_validation_accepts_more_than_4096_rows() {
+        let (image, commit) = static_append_projection();
+        let mut operation: ProjectedCommitSnapshot = canonical_json::from_slice_canonical(
+            &canonical_json::to_vec(&commit.operations[0]).unwrap(),
+        )
+        .unwrap();
+        let CanonicalValue::Object(summary) = &mut operation.snapshot.summary else {
+            panic!("snapshot summary must be an object");
+        };
+        let connection = Connection::open(&image.path).unwrap();
+        for index in 0..4094 {
+            let key = format!("caller-{index:04}");
+            let value = CanonicalValue::String("value".into());
+            summary.insert(key.clone(), value.clone());
+            connection
+                .execute(
+                    "INSERT INTO otmp_snapshot_summary(snapshot_id,summary_key,value_json) VALUES(?1,?2,?3)",
+                    params![
+                        operation.snapshot.snapshot_id.as_bytes().as_slice(),
+                        key,
+                        canonical_string(&value).unwrap()
+                    ],
+                )
+                .unwrap();
+        }
+
+        validate_projected_snapshot_summary(&Writer::Sqlite(&connection), &operation.snapshot)
+            .unwrap();
+    }
+
+    #[test]
     fn commit_projection_rejects_snapshot_change_set_divergence() {
         let (image, commit) = static_append_projection();
         let connection = Connection::open(&image.path).unwrap();
@@ -2226,29 +2622,33 @@ mod tests {
     }
 }
 
-pub(crate) fn read_schema(connection: &Connection, schema_id: u32) -> Result<Schema, RuntimeError> {
-    let (parent_schema_id, doc) = connection.query_row(
+pub(crate) fn read_schema_with(
+    transaction: &Writer<'_>,
+    schema_id: u32,
+) -> Result<Schema, RuntimeError> {
+    let (parent_schema_id, doc) = transaction.query_row(
         "SELECT parent_schema_id,doc FROM otmp_schemas WHERE schema_id=?1",
-        [schema_id],
+        params![schema_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let rows = normalized_fields(connection, schema_id)?;
+    let rows = normalized_fields_with(transaction, schema_id)?;
     let mut roots = rows
         .into_values()
         .filter(|r| r.parent.is_none())
         .collect::<Vec<_>>();
     roots.sort_by_key(|r| r.ordinal);
-    let mut identifiers = connection.prepare(
+    let identifier_field_ids = transaction.query_all(
         "SELECT field_id FROM otmp_identifier_fields WHERE schema_id=?1 ORDER BY ordinal",
+        params![schema_id],
+        4096,
+        |row| row.get(0),
     )?;
     Ok(Schema {
         schema_id,
         parent_schema_id,
         doc,
         fields: roots.into_iter().map(|r| r.field).collect(),
-        identifier_field_ids: identifiers
-            .query_map([schema_id], |r| r.get(0))?
-            .collect::<Result<_, _>>()?,
+        identifier_field_ids,
     })
 }
 
@@ -2270,7 +2670,7 @@ pub(crate) fn apply_metadata(
     finish_checkpoint(directory, path)
 }
 
-fn mutate_metadata(
+pub(crate) fn mutate_metadata(
     tx: &Writer<'_>,
     commit: &SemanticCommit,
     uri: &otmp_protocol::RelativeUri,
@@ -2335,7 +2735,7 @@ pub(crate) fn replay_semantic_commit(
         .iter()
         .map(|v| canonical_json::from_slice_canonical(&canonical_json::to_vec(v)?))
         .collect::<Result<Vec<crate::Requirement>, otmp_protocol::ProtocolError>>()?;
-    crate::runtime::transactions::evaluate(&previous, &requirements)?;
+    crate::runtime::transactions::evaluate(&Writer::Sqlite(&previous), &requirements)?;
     let is_append = matches!(&commit.operations[0],CanonicalValue::Object(o) if o.get("type") == Some(&CanonicalValue::String("commit_snapshot".into())));
     if is_append {
         replay_append(&fs::read(parent)?, commit, uri)
@@ -2353,7 +2753,8 @@ pub(crate) fn replay_semantic_commit(
                 &commit.metadata,
             )?)?,
         };
-        let results = crate::runtime::transactions::prepare_operations(&previous, &request)?;
+        let results =
+            crate::runtime::transactions::prepare_operations(&Writer::Sqlite(&previous), &request)?;
         let durable = crate::runtime::transactions::DurableResult {
             table_version: commit.table_version.0,
             commit_id: commit.commit_id,
@@ -2476,7 +2877,7 @@ fn replay_append(
 }
 
 fn validate_metadata_projection(
-    connection: &Connection,
+    transaction: &Writer<'_>,
     commit: &SemanticCommit,
 ) -> Result<(), RuntimeError> {
     use crate::OperationRequest;
@@ -2497,14 +2898,14 @@ fn validate_metadata_projection(
             } => {
                 let mut valid = true;
                 for (key, value) in updates {
-                    let row:Option<(String,i64)>=connection.query_row("SELECT value_json,updated_version FROM otmp_properties WHERE property_key=?1",[key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                    let row:Option<(String,i64)>=transaction.query_optional("SELECT value_json,updated_version FROM otmp_properties WHERE property_key=?1",params![key],|r|Ok((r.get(0)?,r.get(1)?)))?;
                     valid &= row == Some((canonical_string(&value)?, version));
                 }
                 for key in removals {
-                    valid &= !connection.query_row(
+                    valid &= !transaction.query_row(
                         "SELECT EXISTS(SELECT 1 FROM otmp_properties WHERE property_key=?1)",
-                        [key],
-                        |r| r.get::<_, bool>(0),
+                        params![key],
+                        |r| r.get::<bool>(0),
                     )?;
                 }
                 valid
@@ -2515,38 +2916,50 @@ fn validate_metadata_projection(
                 snapshot_id,
                 ..
             } => {
-                let row = crate::runtime::transactions::ref_row(connection, &name)?;
-                let created: Option<i64> = connection
-                    .query_row(
-                        "SELECT created_version FROM otmp_refs WHERE ref_name=?1",
-                        [name],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                row == Some((ref_type, snapshot_id)) && created == Some(version)
+                let row = ref_row_with(transaction, &name)?;
+                let versions: Option<(i64, i64)> = transaction.query_optional(
+                    "SELECT created_version,updated_version FROM otmp_refs WHERE ref_name=?1",
+                    params![name],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                row == Some((ref_type, snapshot_id))
+                    && versions == Some((version, version))
+                    && validate_ref_live_files(transaction, &name, ref_type, snapshot_id)?
             }
             OperationRequest::ReplaceRef {
                 name, snapshot_id, ..
             } => {
-                let row = crate::runtime::transactions::ref_row(connection, &name)?;
-                let updated: Option<i64> = connection
-                    .query_row(
-                        "SELECT updated_version FROM otmp_refs WHERE ref_name=?1",
-                        [name],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                row == Some((crate::RefType::Branch, Some(snapshot_id))) && updated == Some(version)
+                let row = ref_row_with(transaction, &name)?;
+                let versions: Option<(i64, i64)> = transaction.query_optional(
+                    "SELECT created_version,updated_version FROM otmp_refs WHERE ref_name=?1",
+                    params![name],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                let versions_valid = match versions {
+                    Some((created, updated)) if created < version && updated == version => {
+                        ref_creation_matches(transaction, &name, created)?
+                    }
+                    _ => false,
+                };
+                row == Some((crate::RefType::Branch, Some(snapshot_id)))
+                    && versions_valid
+                    && validate_ref_live_files(
+                        transaction,
+                        &name,
+                        crate::RefType::Branch,
+                        Some(snapshot_id),
+                    )?
             }
             OperationRequest::DropRef { name, .. } => {
-                crate::runtime::transactions::ref_row(connection, &name)?.is_none()
+                ref_row_with(transaction, &name)?.is_none()
+                    && ref_live_file_count(transaction, &name)? == 0
             }
             OperationRequest::AddSchema { schema, .. } => {
-                read_schema(connection, schema.schema_id)? == schema
+                validate_added_schema(transaction, &schema, version)?
             }
-            OperationRequest::SetCurrentSchema { schema_id, .. } => connection.query_row(
+            OperationRequest::SetCurrentSchema { schema_id, .. } => transaction.query_row(
                 "SELECT current_schema_id=?1 FROM otmp_meta",
-                [schema_id],
+                params![schema_id],
                 |r| r.get(0),
             )?,
         };
@@ -2559,32 +2972,168 @@ fn validate_metadata_projection(
     Ok(())
 }
 
+fn ref_creation_matches(
+    transaction: &Writer<'_>,
+    name: &str,
+    created_version: i64,
+) -> Result<bool, RuntimeError> {
+    if name == "main" && created_version == 0 {
+        return Ok(true);
+    }
+    let operations: Option<String> = transaction.query_optional(
+        "SELECT operation_summary_json FROM otmp_commits WHERE table_version=?1",
+        params![created_version],
+        |row| row.get(0),
+    )?;
+    let Some(operations) = operations else {
+        return Ok(false);
+    };
+    let operations: Vec<CanonicalValue> =
+        canonical_json::from_slice_canonical(operations.as_bytes())?;
+    Ok(operations.iter().any(|operation| {
+        matches!(operation, CanonicalValue::Object(fields)
+            if matches!(fields.get("type"), Some(CanonicalValue::String(kind)) if kind == "create_ref")
+                && matches!(fields.get("ref"), Some(CanonicalValue::String(reference)) if reference == name)
+                && matches!(fields.get("ref_type"), Some(CanonicalValue::String(kind)) if kind == "branch"))
+    }))
+}
+
+fn ref_live_file_count(transaction: &Writer<'_>, name: &str) -> Result<i64, RuntimeError> {
+    transaction.query_row(
+        "SELECT count(*) FROM otmp_ref_live_files WHERE ref_name=?1",
+        params![name],
+        |row| row.get(0),
+    )
+}
+
+fn validate_ref_live_files(
+    transaction: &Writer<'_>,
+    name: &str,
+    ref_type: crate::RefType,
+    snapshot: Option<Id>,
+) -> Result<bool, RuntimeError> {
+    if ref_type == crate::RefType::Tag {
+        return Ok(ref_live_file_count(transaction, name)? == 0);
+    }
+    let mut expected_total = 0_i64;
+    for snapshot_id in transaction.ancestry(snapshot)? {
+        let expected: i64 = transaction.query_row(
+            "SELECT count(*) FROM otmp_snapshot_file_changes WHERE snapshot_id=?1 AND change_kind='add'",
+            params![snapshot_id.as_bytes().as_slice()],
+            |row| row.get(0),
+        )?;
+        let projected: i64 = transaction.query_row(
+            "SELECT count(*) FROM otmp_ref_live_files rf JOIN otmp_snapshot_file_changes c ON c.file_id=rf.file_id AND c.snapshot_id=rf.added_snapshot_id JOIN otmp_snapshots s ON s.snapshot_id=c.snapshot_id WHERE rf.ref_name=?1 AND c.snapshot_id=?2 AND c.change_kind='add' AND rf.data_sequence_number=s.sequence_number AND rf.file_sequence_number=s.sequence_number",
+            params![name, snapshot_id.as_bytes().as_slice()],
+            |row| row.get(0),
+        )?;
+        if projected != expected {
+            return Ok(false);
+        }
+        expected_total = expected_total.checked_add(expected).ok_or_else(|| {
+            RuntimeError::ResourceExhausted("branch membership count overflow".into())
+        })?;
+    }
+    Ok(ref_live_file_count(transaction, name)? == expected_total)
+}
+
+fn validate_added_schema(
+    transaction: &Writer<'_>,
+    schema: &Schema,
+    version: i64,
+) -> Result<bool, RuntimeError> {
+    if read_schema_with(transaction, schema.schema_id)? != *schema {
+        return Ok(false);
+    }
+    let created: i64 = transaction.query_row(
+        "SELECT created_version FROM otmp_schemas WHERE schema_id=?1",
+        params![schema.schema_id],
+        |row| row.get(0),
+    )?;
+    if created != version {
+        return Ok(false);
+    }
+    let mut expected = BTreeSet::new();
+    for field in &schema.fields {
+        collect_field_ids(field, &mut expected);
+    }
+    if let Some(parent_id) = schema.parent_schema_id {
+        let parent = read_schema_with(transaction, parent_id)?;
+        for field in &parent.fields {
+            let mut inherited = BTreeSet::new();
+            collect_field_ids(field, &mut inherited);
+            expected.retain(|id| !inherited.contains(id));
+        }
+    }
+    let projected = transaction
+        .query_all(
+            "SELECT field_id,created_version FROM otmp_field_ids WHERE first_schema_id=?1 ORDER BY field_id",
+            params![schema.schema_id],
+            4096,
+            |row| Ok((row.get::<u32>(0)?, row.get::<i64>(1)?)),
+        )?
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    Ok(projected.len() == expected.len()
+        && expected
+            .iter()
+            .all(|field_id| projected.get(field_id) == Some(&version)))
+}
+
+fn ref_row_with(
+    transaction: &Writer<'_>,
+    name: &str,
+) -> Result<Option<(crate::RefType, Option<Id>)>, RuntimeError> {
+    transaction
+        .query_optional(
+            "SELECT ref_type, snapshot_id FROM otmp_refs WHERE ref_name=?1",
+            params![name],
+            |row| Ok((row.get::<String>(0)?, row.get::<Option<Vec<u8>>>(1)?)),
+        )?
+        .map(|(kind, id)| {
+            Ok((
+                match kind.as_str() {
+                    "branch" => crate::RefType::Branch,
+                    "tag" => crate::RefType::Tag,
+                    _ => return Err(RuntimeError::Corrupt("invalid ref type".into())),
+                },
+                id.map(id_from_blob).transpose()?,
+            ))
+        })
+        .transpose()
+}
+
 #[cfg(test)]
 mod regeneration {
     use super::*;
-    use otmp_protocol::{Generation, Head, object_hash};
+    use otmp_protocol::{
+        GENERATION_MEDIA_TYPE, Generation, Head, ObjectReference, image_root_hash, object_hash,
+    };
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Regeneration keeps the complete retained-package comparison together.
     fn canonical_packages_regenerate_from_retained_commits() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../conformance/tables");
+        let regenerate = std::env::var_os("OTMP_REGENERATE_CONFORMANCE").is_some();
         for package in ["genesis", "append", "transactions"] {
             let package = root.join(package);
-            let head: Head = canonical_json::from_slice_canonical(
+            let mut head: Head = canonical_json::from_slice_canonical(
                 &fs::read(package.join("_otmp/HEAD")).unwrap(),
             )
             .unwrap();
-            let mut reference = Some(head.metadata_generation);
+            let mut reference = Some(head.metadata_generation.clone());
             let mut generations = Vec::new();
             while let Some(r) = reference {
                 let bytes = fs::read(package.join(r.uri.as_str())).unwrap();
                 let generation: Generation = canonical_json::from_slice_canonical(&bytes).unwrap();
                 assert_eq!(canonical_json::to_vec(&generation).unwrap(), bytes);
                 reference = generation.physical_parent.clone();
-                generations.push(generation);
+                generations.push((r.uri, generation));
             }
             generations.reverse();
             let mut previous: Option<Vec<u8>> = None;
-            for generation in generations {
+            let mut physical_parent = None;
+            for (generation_uri, mut generation) in generations {
                 let bytes =
                     fs::read(package.join(generation.semantic_commit.uri.as_str())).unwrap();
                 let commit: SemanticCommit = canonical_json::from_slice_canonical(&bytes).unwrap();
@@ -2647,17 +3196,81 @@ mod regeneration {
                     })
                     .unwrap()
                 };
-                let stored =
-                    fs::read(package.join(generation.metadata_image.checkpoint.uri.as_str()))
-                        .unwrap();
-                assert_eq!(
-                    object_hash(&checkpoint.bytes),
-                    object_hash(&stored),
-                    "checkpoint regeneration at version {}",
-                    commit.table_version.0
-                );
-                assert_eq!(checkpoint.bytes, stored);
+                let checkpoint_path =
+                    package.join(generation.metadata_image.checkpoint.uri.as_str());
+                if regenerate {
+                    fs::write(&checkpoint_path, &checkpoint.bytes).unwrap();
+                    generation.metadata_image.checkpoint.sha256 = object_hash(&checkpoint.bytes);
+                    generation.metadata_image.checkpoint.length =
+                        otmp_protocol::JsonU64(checkpoint.bytes.len() as u64);
+                    generation.metadata_image.page_count = otmp_protocol::JsonU64(
+                        u64::try_from(checkpoint.bytes.len() / PAGE_SIZE as usize).unwrap(),
+                    );
+                    generation.metadata_image.image_root_sha256 = image_root_hash(
+                        generation.table_id,
+                        generation.table_version.0,
+                        PAGE_SIZE,
+                        generation.metadata_image.page_count.0,
+                        generation.metadata_image.checkpoint.sha256,
+                        generation
+                            .metadata_image
+                            .page_map
+                            .as_ref()
+                            .map(|root| root.sha256),
+                    );
+                    let (index, artifacts) = crate::checkpoint_index::build(
+                        &generation.metadata_image.checkpoint,
+                        PAGE_SIZE,
+                        &checkpoint.bytes,
+                    )
+                    .unwrap();
+                    generation.metadata_image.checkpoint_page_index = Some(index);
+                    for artifact in artifacts {
+                        let path = package.join(artifact.uri.as_str());
+                        fs::create_dir_all(path.parent().unwrap()).unwrap();
+                        fs::write(path, artifact.bytes).unwrap();
+                    }
+                    generation.physical_parent = physical_parent;
+                    let generation_bytes = canonical_json::to_vec(&generation).unwrap();
+                    fs::write(package.join(generation_uri.as_str()), &generation_bytes).unwrap();
+                    physical_parent = Some(ObjectReference {
+                        uri: generation_uri,
+                        sha256: object_hash(&generation_bytes),
+                        length: Some(otmp_protocol::JsonU64(generation_bytes.len() as u64)),
+                        media_type: Some(GENERATION_MEDIA_TYPE.into()),
+                    });
+                } else {
+                    let stored = fs::read(checkpoint_path).unwrap();
+                    assert_eq!(
+                        object_hash(&checkpoint.bytes),
+                        object_hash(&stored),
+                        "checkpoint regeneration at version {}",
+                        commit.table_version.0
+                    );
+                    assert_eq!(checkpoint.bytes, stored);
+                    let (index, artifacts) = crate::checkpoint_index::build(
+                        &generation.metadata_image.checkpoint,
+                        PAGE_SIZE,
+                        &checkpoint.bytes,
+                    )
+                    .unwrap();
+                    assert_eq!(generation.metadata_image.checkpoint_page_index, Some(index));
+                    for artifact in artifacts {
+                        assert_eq!(
+                            fs::read(package.join(artifact.uri.as_str())).unwrap(),
+                            artifact.bytes
+                        );
+                    }
+                }
                 previous = Some(checkpoint.bytes);
+            }
+            if regenerate {
+                head.metadata_generation = physical_parent.unwrap();
+                fs::write(
+                    package.join("_otmp/HEAD"),
+                    canonical_json::to_vec(&head).unwrap(),
+                )
+                .unwrap();
             }
         }
     }

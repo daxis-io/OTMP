@@ -29,6 +29,29 @@ impl OtmpAdapterFactory {
     }
 }
 
+pub(crate) fn binding_charge(schema: &OtmpSchema) -> Result<usize> {
+    fn field_count(items: &[OtmpField]) -> usize {
+        items
+            .iter()
+            .map(|field| {
+                let children = match &field.field_type {
+                    LogicalType::Struct { fields: children } => field_count(children),
+                    LogicalType::List { element } => field_count(std::slice::from_ref(element)),
+                    LogicalType::Map { key, value } => field_count(std::slice::from_ref(key))
+                        .saturating_add(field_count(std::slice::from_ref(value))),
+                    _ => 0,
+                };
+                1_usize.saturating_add(children)
+            })
+            .sum()
+    }
+    let encoded = otmp_protocol::canonical_json::to_vec(schema)
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+    Ok(512_usize
+        .saturating_add(encoded.len().saturating_mul(4))
+        .saturating_add(field_count(&schema.fields).saturating_mul(512)))
+}
+
 #[derive(Debug)]
 struct Adapter {
     columns: Vec<(String, Arc<dyn PhysicalExpr>)>,
@@ -93,6 +116,42 @@ impl PhysicalExprAdapterFactory for OtmpAdapterFactory {
             columns.push((query.name.clone(), expr));
         }
         Ok(Arc::new(Adapter { columns }))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ValidatedAdapterFactory {
+    bindings: Vec<(SchemaRef, Arc<dyn PhysicalExprAdapter>)>,
+}
+
+impl ValidatedAdapterFactory {
+    pub(crate) fn new(
+        bindings: impl IntoIterator<Item = (SchemaRef, Arc<dyn PhysicalExprAdapter>)>,
+    ) -> Self {
+        let mut unique = Vec::new();
+        for binding in bindings {
+            if !unique
+                .iter()
+                .any(|(physical, _): &(SchemaRef, _)| physical == &binding.0)
+            {
+                unique.push(binding);
+            }
+        }
+        Self { bindings: unique }
+    }
+}
+
+impl PhysicalExprAdapterFactory for ValidatedAdapterFactory {
+    fn create(
+        &self,
+        _logical: SchemaRef,
+        physical: SchemaRef,
+    ) -> Result<Arc<dyn PhysicalExprAdapter>> {
+        self.bindings
+            .iter()
+            .find(|(validated, _)| validated.as_ref() == physical.as_ref())
+            .map(|(_, binding)| binding.clone())
+            .ok_or_else(|| error("Parquet schema differs from validated immutable state"))
     }
 }
 

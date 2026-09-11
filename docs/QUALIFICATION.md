@@ -103,8 +103,9 @@ compares HEAD under a lock, writes a same-directory temporary HEAD, and renames
 atomically. Candidates remain invisible until publication; abandoned immutable
 objects are allowed.
 
-The subprocess suite runs four append failpoints (staging flush, temporary HEAD,
-immutable uploads, final rename) and three publication failpoints for each of
+The subprocess suite runs nine append failpoints spanning staging, authenticated
+parent reads, changed-page freeze, immutable artifacts, generation publication,
+HEAD CAS, and durable rename, plus three publication failpoints for each of
 property-only and ref-only transactions. A new process opens/verifies either the
 old or complete new version and checks SQLite integrity. Metadata crash cases
 assert zero snapshots and unchanged sequence. This is process-crash evidence,

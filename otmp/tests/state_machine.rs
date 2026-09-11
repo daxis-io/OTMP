@@ -74,6 +74,114 @@ async fn setup() -> (
     (directory, store, table)
 }
 
+#[derive(Clone, Default)]
+struct IndeterminateReadFailureStore {
+    inner: InMemoryObjectStore,
+    fail_reads: Arc<AtomicBool>,
+    data_keys: Arc<std::sync::Mutex<Vec<RelativeUri>>>,
+}
+
+#[async_trait]
+impl ObjectStore for IndeterminateReadFailureStore {
+    async fn read(&self, key: &RelativeUri) -> Result<otmp::storage::StoredObject, StorageError> {
+        if self.fail_reads.load(Ordering::SeqCst) {
+            return Err(StorageError::Injected("reconciliation read".into()));
+        }
+        self.inner.read(key).await
+    }
+
+    async fn stat(&self, key: &RelativeUri) -> Result<otmp::ObjectMetadata, StorageError> {
+        self.inner.stat(key).await
+    }
+
+    async fn read_range(
+        &self,
+        key: &RelativeUri,
+        range: std::ops::Range<u64>,
+        expected: &otmp::ObjectMetadata,
+    ) -> Result<otmp::StoredRange, StorageError> {
+        self.inner.read_range(key, range, expected).await
+    }
+
+    async fn create_from_reader(
+        &self,
+        key: &RelativeUri,
+        reader: &mut (dyn AsyncRead + Send + Unpin),
+        maximum_length: Option<u64>,
+    ) -> Result<otmp::storage::CreatedObject, StorageError> {
+        let created = self
+            .inner
+            .create_from_reader(key, reader, maximum_length)
+            .await?;
+        if key.as_str().starts_with("data/") {
+            self.data_keys.lock().unwrap().push(key.clone());
+        }
+        Ok(created)
+    }
+
+    async fn create_head(&self, bytes: &[u8]) -> ConditionalWriteOutcome {
+        self.inner.create_head(bytes).await
+    }
+
+    async fn replace_head(
+        &self,
+        expected: &ObjectVersion,
+        bytes: &[u8],
+    ) -> ConditionalWriteOutcome {
+        let outcome = self.inner.replace_head(expected, bytes).await;
+        if matches!(outcome, ConditionalWriteOutcome::Indeterminate { .. }) {
+            self.fail_reads.store(true, Ordering::SeqCst);
+        }
+        outcome
+    }
+
+    async fn delete_if_version(
+        &self,
+        key: &RelativeUri,
+        version: &ObjectVersion,
+    ) -> Result<bool, StorageError> {
+        self.inner.delete_if_version(key, version).await
+    }
+}
+
+#[tokio::test]
+async fn ambiguous_publication_never_deletes_maybe_committed_staging() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = IndeterminateReadFailureStore::default();
+    let table = Table::new(store.clone()).with_retry_policy(TransactionRetryPolicy {
+        maximum_rebases: 8,
+        maximum_indeterminate_reconciliations: 0,
+    });
+    table
+        .initialize(InitializeRequest::new(schema()))
+        .await
+        .unwrap();
+    let bytes = b"ambiguous";
+    let path = directory.path().join("ambiguous.parquet");
+    tokio::fs::write(&path, bytes).await.unwrap();
+    store
+        .inner
+        .inject_conditional(InjectedConditional::IndeterminateAfter);
+
+    let error = table
+        .append_files(&request(path, bytes, "ambiguous-read-failure"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "OTMP_PUBLICATION_INDETERMINATE");
+    let uri = store.data_keys.lock().unwrap()[0].clone();
+    assert_eq!(store.inner.read(&uri).await.unwrap().bytes, bytes);
+    assert_eq!(
+        Table::new(store.inner.clone())
+            .pin()
+            .await
+            .unwrap()
+            .status()
+            .table_version,
+        1
+    );
+}
+
 #[tokio::test]
 async fn applied_but_response_lost_is_reconciled_by_idempotency() {
     let (directory, store, table) = setup().await;
@@ -276,6 +384,19 @@ impl ObjectStore for FailingArtifactStore {
         self.inner.read(key).await
     }
 
+    async fn stat(&self, key: &RelativeUri) -> Result<otmp::ObjectMetadata, StorageError> {
+        self.inner.stat(key).await
+    }
+
+    async fn read_range(
+        &self,
+        key: &RelativeUri,
+        range: std::ops::Range<u64>,
+        expected: &otmp::ObjectMetadata,
+    ) -> Result<otmp::StoredRange, StorageError> {
+        self.inner.read_range(key, range, expected).await
+    }
+
     async fn create_from_reader(
         &self,
         key: &RelativeUri,
@@ -364,6 +485,19 @@ impl TwoWriterStore {
 impl ObjectStore for TwoWriterStore {
     async fn read(&self, key: &RelativeUri) -> Result<otmp::storage::StoredObject, StorageError> {
         self.inner.read(key).await
+    }
+
+    async fn stat(&self, key: &RelativeUri) -> Result<otmp::ObjectMetadata, StorageError> {
+        self.inner.stat(key).await
+    }
+
+    async fn read_range(
+        &self,
+        key: &RelativeUri,
+        range: std::ops::Range<u64>,
+        expected: &otmp::ObjectMetadata,
+    ) -> Result<otmp::StoredRange, StorageError> {
+        self.inner.read_range(key, range, expected).await
     }
 
     async fn create_from_reader(
@@ -593,6 +727,19 @@ impl PauseAfterDataCreateStore {
 impl ObjectStore for PauseAfterDataCreateStore {
     async fn read(&self, key: &RelativeUri) -> Result<otmp::storage::StoredObject, StorageError> {
         self.inner.read(key).await
+    }
+
+    async fn stat(&self, key: &RelativeUri) -> Result<otmp::ObjectMetadata, StorageError> {
+        self.inner.stat(key).await
+    }
+
+    async fn read_range(
+        &self,
+        key: &RelativeUri,
+        range: std::ops::Range<u64>,
+        expected: &otmp::ObjectMetadata,
+    ) -> Result<otmp::StoredRange, StorageError> {
+        self.inner.read_range(key, range, expected).await
     }
 
     async fn create_from_reader(

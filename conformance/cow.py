@@ -141,6 +141,9 @@ def fixture_files():
     for version, original in enumerate(generations):
         generation = copy.deepcopy(original)
         image = generation['metadata_image']
+        # Retain one explicitly index-free COW fixture; checkpoint_index_files
+        # derives the authenticated-reader variant from these same bytes.
+        image['checkpoint_page_index'] = None
         current = verified(source, image['checkpoint'])
         if version:
             changed = [(p + 1, current[p * 4096:(p + 1) * 4096]) for p in range(len(current) // 4096)
@@ -233,6 +236,16 @@ def checkpoint_index_files(files):
     return indexed
 
 
+def write_fixture(target, files):
+    for path in target.rglob('*'):
+        if path.is_file() and str(path.relative_to(target)) not in files:
+            path.unlink()
+    for uri, data in files.items():
+        path = target / uri
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
@@ -248,10 +261,7 @@ def main():
         actual = {str(p.relative_to(target)): p.read_bytes() for p in target.rglob('*') if p.is_file()}
         assert files == actual, 'incremental fixture regeneration differs'
     else:
-        for uri, data in files.items():
-            path = target / uri
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
+        write_fixture(target, files)
     for version in range(3):
         generation = json.loads(next((target / f'_otmp/generations/{version}').glob('*.json')).read_bytes())
         expected_root = ROOT / f'conformance/tables/transactions/_otmp/checkpoints/{version}'
@@ -262,10 +272,7 @@ def main():
         actual = {str(p.relative_to(indexed_target)): p.read_bytes() for p in indexed_target.rglob('*') if p.is_file()}
         assert indexed == actual, 'indexed fixture regeneration differs'
     else:
-        for uri, data in indexed.items():
-            path = indexed_target / uri
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
+        write_fixture(indexed_target, indexed)
     print('incremental fixture: versions 0-2 reconstruct exact retained SQLite bytes')
 
 

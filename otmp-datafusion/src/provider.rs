@@ -3,7 +3,8 @@
 pub struct ProviderOptions {
     /// Maximum retained file-descriptor bytes while planning one scan.
     pub planning_budget_bytes: usize,
-    /// Maximum decoded Parquet footer metadata retained by this provider.
+    /// Maximum validated object versions, Parquet footers, schemas, and bindings
+    /// retained by this provider.
     pub footer_cache_bytes: usize,
     /// Disable file-metric pruning to obtain an unpruned native scan for qualification.
     pub file_pruning: bool,
@@ -156,8 +157,18 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
                 )
             })
             .transpose()?;
+        let ranges = if self.options.file_pruning {
+            crate::pruning::lower_ranges(filters, self.reader.schema())
+        } else {
+            Vec::new()
+        };
+        if !ranges.is_empty() {
+            self.metrics
+                .catalog_pruning_scans
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut metric_fields = std::collections::BTreeSet::new();
-        for filter in filters {
+        for filter in filters.iter().filter(|_| self.options.file_pruning) {
             for column in filter.column_refs() {
                 let field = self
                     .reader
@@ -191,12 +202,14 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
         let mut admission_started = started;
         let mut metadata = FuturesUnordered::new();
         let mut objects = BTreeMap::new();
-        metadata.push(self.read_batch(None, &metric_fields, BTreeSet::new()));
+        let mut validated = BTreeMap::new();
+        metadata.push(self.read_batch(None, &metric_fields, &ranges, BTreeSet::new()));
         loop {
             if pending.is_empty() && metadata.is_empty() && cursor.is_some() {
                 metadata.push(self.read_batch(
                     cursor.take(),
                     &metric_fields,
+                    &ranges,
                     schemas.keys().copied().collect(),
                 ));
             }
@@ -219,9 +232,10 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
             tokio::select! {
                 biased;
                 Some(result) = active.next(), if !active.is_empty() => {
-                    let (object, validation_us): (crate::store::ImmutableObject, u64) = result?;
+                    let (entry, validation_us): (std::sync::Arc<crate::footer::ValidatedFileEntry>, u64) = result?;
                     trace.validation_us += validation_us;
-                    objects.insert(object.uri.to_string(), object);
+                    objects.insert(entry.object.uri.to_string(), entry.object.clone());
+                    validated.insert(entry.object.uri.to_string(), entry);
                     // A rolling window can stay ready on local/warm storage.
                     // Return to peer scans after one completion even when the
                     // caller drives several query futures from a single task.
@@ -242,8 +256,8 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
                         } else { vec![true; batch.files.len()] }
                     } else { vec![true; batch.files.len()] };
                     for (file, keep) in batch.files.into_iter().zip(keep) {
-                        // The scan-wide registry also sees pruned descriptors, so
-                        // later batches cannot hide conflicting URI identities.
+                        // Catalog pruning has already rejected unrelated files.
+                        // The registry retains the candidate-local identity check.
                         reserve_descriptors(&reservation, &mut descriptor_bytes,
                             descriptor_charge(file.file.uri.as_str()), self.options.planning_budget_bytes)?;
                         let identity = (file.file.content_sha256, file.file.file_size_bytes);
@@ -257,7 +271,7 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
                         }
                         if entry.1.is_none() {
                             entry.1 = Some(file.schema_id);
-                            pending.push_back((file.file.uri.clone(), identity, file.schema_id));
+                            pending.push_back((file.file.file_id, file.file.uri.clone(), identity, file.schema_id));
                         }
                         let planned = PartitionedFile::new(file.file.uri.as_str(), file.file.file_size_bytes)
                             .with_extension(PlanningReservation { _reservation: reservation.clone() });
@@ -270,8 +284,8 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
                 Some(permit) = admission.next(), if !admission.is_empty() => {
                     trace.admission_us += elapsed_micros(admission_started);
                     let permit = permit.map_err(|_| external(otmp::RuntimeError::Cancelled))?;
-                    let (uri, (hash, length), schema_id) = pending.pop_front().expect("one pending admission");
-                    active.push(self.preflight_object(uri, hash, length, vec![schemas[&schema_id].clone()], permit, query.clone()));
+                    let (file_id, uri, (hash, length), schema_id) = pending.pop_front().expect("one pending admission");
+                    active.push(self.preflight_object(file_id, uri, hash, length, schema_id, schemas[&schema_id].clone(), permit, query.clone()));
                 }
             }
         }
@@ -293,16 +307,18 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
             objects,
             self.io.clone(),
         ));
-        let factory = Arc::new(crate::footer::FooterReaderFactory::new(
-            bridge,
-            self.footer_cache.clone(),
-        ));
+        let factory = Arc::new(
+            crate::footer::FooterReaderFactory::new(bridge, self.footer_cache.clone())
+                .with_validated(validated.values().cloned()),
+        );
         let mut plans = Vec::new();
         for (schema_id, files) in groups {
-            let adapter = Arc::new(crate::schemaadapter::OtmpAdapterFactory::new(
-                query.clone(),
-                schemas[&schema_id].clone(),
-            ));
+            let mut bindings = Vec::new();
+            bindings.extend(files.iter().filter_map(|file| {
+                validated
+                    .get(&file.object_meta.location.to_string())
+                    .map(|entry| (entry.physical.clone(), entry.binding.clone()))
+            }));
             for file in &files {
                 if descriptors[&file.object_meta.location.to_string()].1 != Some(schema_id) {
                     use datafusion::datasource::physical_plan::parquet::ParquetFileReaderFactory;
@@ -331,10 +347,17 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
                         footer.file_metadata().schema_descr(),
                         footer.file_metadata().key_value_metadata(),
                     )?;
-                    adapter.create(self.schema.clone(), Arc::new(physical))?;
+                    let physical = Arc::new(physical);
+                    let binding = crate::schemaadapter::OtmpAdapterFactory::new(
+                        query.clone(),
+                        schemas[&schema_id].clone(),
+                    )
+                    .create(self.schema.clone(), physical.clone())?;
+                    bindings.push((physical, binding));
                     trace.validation_us += elapsed_micros(validation_started);
                 }
             }
+            let adapter = Arc::new(crate::schemaadapter::ValidatedAdapterFactory::new(bindings));
             let mut source = ParquetSource::new(self.schema.clone())
                 .with_parquet_file_reader_factory(factory.clone());
             if let Some(predicate) = &predicate {
@@ -372,6 +395,7 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
         &self,
         cursor: Option<otmp::FileCursor>,
         fields: &[u32],
+        ranges: &[otmp::FileMetricRange],
         known: std::collections::BTreeSet<u32>,
     ) -> datafusion::error::Result<(
         otmp::FileBatch,
@@ -379,7 +403,7 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
     )> {
         let batch = self
             .reader
-            .files(cursor, fields, 256)
+            .files_matching(cursor, fields, ranges, 256)
             .await
             .map_err(external)?;
         #[cfg(test)]
@@ -404,61 +428,93 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
         }
         Ok((batch, schemas))
     }
+    #[allow(clippy::too_many_arguments)] // The cache key components stay explicit at this trust boundary.
     async fn preflight_object(
         &self,
+        file_id: otmp_protocol::Id,
         uri: otmp_protocol::RelativeUri,
         hash: Option<otmp_protocol::Sha256>,
         length: u64,
-        schemas: Vec<std::sync::Arc<otmp_protocol::Schema>>,
+        schema_id: u32,
+        schema: std::sync::Arc<otmp_protocol::Schema>,
         _permit: tokio::sync::OwnedSemaphorePermit,
         query: std::sync::Arc<otmp_protocol::Schema>,
-    ) -> datafusion::error::Result<(crate::store::ImmutableObject, u64)> {
+    ) -> datafusion::error::Result<(std::sync::Arc<crate::footer::ValidatedFileEntry>, u64)> {
         use datafusion::datasource::physical_plan::parquet::ParquetFileReaderFactory;
         use datafusion::physical_expr_adapter::PhysicalExprAdapterFactory;
         use std::sync::Arc;
-        let bridge = Arc::new(
-            crate::store::ReadOnlyStore::with_counters(
-                self.reader.store().clone(),
-                [(uri.clone(), hash, length)],
-                self.io.clone(),
-            )
-            .await
-            .map_err(external)?,
-        );
-        #[cfg(test)]
-        tests::pause(&self.hooks.after_pin).await;
-        let factory =
-            crate::footer::FooterReaderFactory::new(bridge.clone(), self.footer_cache.clone())
-                .for_preflight();
-        let mut reader = factory.create_reader(
-            0,
-            datafusion::datasource::listing::PartitionedFile::new(uri.as_str(), length),
-            None,
-            &datafusion::physical_plan::metrics::ExecutionPlanMetricsSet::new(),
-        )?;
-        let metadata = reader
-            .get_metadata(None)
-            .await
-            .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+        let key = crate::footer::ValidatedFileKey {
+            file_id,
+            uri: uri.to_string(),
+            sha256: hash,
+            length,
+            schema_id,
+        };
         let validation_started = std::time::Instant::now();
+        let load_key = key.clone();
+        let reader = self.reader.clone();
+        let footer_cache = self.footer_cache.clone();
+        let io = self.io.clone();
+        let table_schema = self.schema.clone();
         #[cfg(test)]
-        tests::pause(&self.hooks.validation).await;
-        let physical = Arc::new(datafusion::parquet::arrow::parquet_to_arrow_schema(
-            metadata.file_metadata().schema_descr(),
-            metadata.file_metadata().key_value_metadata(),
-        )?);
-        for schema in schemas {
-            crate::schemaadapter::OtmpAdapterFactory::new(query.clone(), schema)
-                .create(self.schema.clone(), physical.clone())?;
-        }
-        Ok((
-            bridge
-                .pinned_objects()
-                .next()
-                .expect("one pinned object")
-                .clone(),
-            elapsed_micros(validation_started),
-        ))
+        let after_pin = self.hooks.after_pin.clone();
+        #[cfg(test)]
+        let validation = self.hooks.validation.clone();
+        let entry = self
+            .footer_cache
+            .validated_or_load(key, async move {
+                let bridge = Arc::new(
+                    crate::store::ReadOnlyStore::with_counters(
+                        reader.store().clone(),
+                        [(uri.clone(), hash, length)],
+                        io,
+                    )
+                    .await
+                    .map_err(external)?,
+                );
+                #[cfg(test)]
+                tests::pause(&after_pin).await;
+                let factory =
+                    crate::footer::FooterReaderFactory::new(bridge.clone(), footer_cache.clone())
+                        .for_preflight();
+                let mut reader = factory.create_reader(
+                    0,
+                    datafusion::datasource::listing::PartitionedFile::new(uri.as_str(), length),
+                    None,
+                    &datafusion::physical_plan::metrics::ExecutionPlanMetricsSet::new(),
+                )?;
+                let metadata = reader.get_metadata(None).await.map_err(|error| {
+                    datafusion::error::DataFusionError::External(Box::new(error))
+                })?;
+                #[cfg(test)]
+                tests::pause(&validation).await;
+                let physical = Arc::new(datafusion::parquet::arrow::parquet_to_arrow_schema(
+                    metadata.file_metadata().schema_descr(),
+                    metadata.file_metadata().key_value_metadata(),
+                )?);
+                let binding_charge = crate::schemaadapter::binding_charge(&query)?;
+                let binding = crate::schemaadapter::OtmpAdapterFactory::new(query, schema)
+                    .create(table_schema, physical.clone())?;
+                let object = bridge
+                    .pinned_objects()
+                    .next()
+                    .expect("one pinned object")
+                    .clone();
+                let footer_key =
+                    bridge.footer_identity(&object_store::path::Path::from(uri.as_str()))?;
+                footer_cache
+                    .insert_validated(
+                        load_key,
+                        object,
+                        &footer_key,
+                        physical,
+                        binding,
+                        binding_charge,
+                    )
+                    .await
+            })
+            .await?;
+        Ok((entry, elapsed_micros(validation_started)))
     }
 }
 
@@ -634,12 +690,17 @@ fn field_to_arrow(
 struct ProviderCounters {
     considered: std::sync::atomic::AtomicU64,
     pruned: std::sync::atomic::AtomicU64,
+    catalog_pruning_scans: std::sync::atomic::AtomicU64,
     planning_micros: std::sync::atomic::AtomicU64,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProviderStatistics {
+    /// File descriptors returned across the authenticated metadata-reader boundary.
     pub files_considered: u64,
+    /// Additional files rejected by the provider's conservative client-side oracle.
     pub files_pruned: u64,
+    /// Scans that supplied at least one supported range to catalog selection.
+    pub catalog_pruning_scans: u64,
     pub planning_micros: u64,
     /// Validated data-object bytes, including Parquet footers during planning.
     pub parquet_bytes: u64,
@@ -649,6 +710,8 @@ pub struct ProviderStatistics {
     pub footer_cache_bytes: usize,
     pub peak_footer_cache_bytes: usize,
     pub footer_cache_hits: u64,
+    /// Files whose stat, footer, physical schema, and binding were reused.
+    pub validated_file_cache_hits: u64,
 }
 impl<S> OtmpTableProvider<S> {
     pub fn metrics(&self) -> ProviderStatistics {
@@ -658,6 +721,7 @@ impl<S> OtmpTableProvider<S> {
         ProviderStatistics {
             files_considered: self.metrics.considered.load(Relaxed),
             files_pruned: self.metrics.pruned.load(Relaxed),
+            catalog_pruning_scans: self.metrics.catalog_pruning_scans.load(Relaxed),
             planning_micros: self.metrics.planning_micros.load(Relaxed),
             parquet_bytes: self.io.bytes.load(Relaxed),
             parquet_requests: self.io.requests.load(Relaxed),
@@ -665,6 +729,7 @@ impl<S> OtmpTableProvider<S> {
             footer_cache_bytes,
             peak_footer_cache_bytes,
             footer_cache_hits,
+            validated_file_cache_hits: self.footer_cache.validated_hits(),
         }
     }
 }

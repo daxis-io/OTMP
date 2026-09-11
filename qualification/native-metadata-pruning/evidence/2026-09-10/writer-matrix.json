@@ -1,0 +1,91 @@
+{
+  "source_base": "9a4e09baecf7c536618dd716b12377b7e0cda10f",
+  "source_head": "363c57ad21619d88d8cc4fe971a01f71bd324dcc",
+  "source_status": "committed, locally reconciled final source",
+  "source_diff_sha256": "c929a5df5a4576d86df8e061ab5291539e749196d6c988ea358362f2f0722bcd",
+  "evidence_root": "/private/tmp/otmp-native-writer-363.84iyfX",
+  "writer_binary_sha256": "7e514124d383235662222f1466f84a68bc9864cdbc899bed45bd8067671c2119",
+  "observed_origin_main": "9a4e09baecf7c536618dd716b12377b7e0cda10f",
+  "append": {
+    "bytes": 1705,
+    "sha256": "427cc3a1b8834cdfa1da1779a74885f40e3cc6f121f5827e5bf3a1ef4efda42c"
+  },
+  "baseline_parent_sqlite_bytes": 73827422,
+  "release_limit_parent_sqlite_bytes": 7382742,
+  "results": [
+    {
+      "files_before": 256,
+      "files_after": 257,
+      "changed_pages": 33,
+      "page_map_bytes": 0,
+      "uploaded_artifact_bytes": 677833,
+      "full_materializations": 1,
+      "temporary_full_image_bytes": 671744,
+      "checkpoint_fallback": true,
+      "parent_sqlite_bytes": 405504,
+      "parent_sqlite_requests": 99,
+      "parent_sqlite_pages": 297,
+      "parent_sqlite_cache_hits": 470,
+      "page_map_read_bytes": 33765,
+      "page_map_read_requests": 1,
+      "elapsed_ns": 130687000,
+      "verified": true
+    },
+    {
+      "files_before": 4096,
+      "files_after": 4097,
+      "changed_pages": 35,
+      "page_map_bytes": 43675,
+      "uploaded_artifact_bytes": 189339,
+      "full_materializations": 0,
+      "temporary_full_image_bytes": 0,
+      "checkpoint_fallback": false,
+      "parent_sqlite_bytes": 490291,
+      "parent_sqlite_requests": 130,
+      "parent_sqlite_pages": 207,
+      "parent_sqlite_cache_hits": 520,
+      "page_map_read_bytes": 43412,
+      "page_map_read_requests": 3,
+      "elapsed_ns": 108158625,
+      "verified": true
+    },
+    {
+      "files_before": 16384,
+      "files_after": 16385,
+      "changed_pages": 30,
+      "page_map_bytes": 102075,
+      "uploaded_artifact_bytes": 226939,
+      "full_materializations": 0,
+      "temporary_full_image_bytes": 0,
+      "checkpoint_fallback": false,
+      "parent_sqlite_bytes": 5236415,
+      "parent_sqlite_requests": 1318,
+      "parent_sqlite_pages": 1291,
+      "parent_sqlite_cache_hits": 4785,
+      "page_map_read_bytes": 1162101,
+      "page_map_read_requests": 70,
+      "elapsed_ns": 357826375,
+      "verified": true
+    }
+  ],
+  "preserved_failed_samples": [
+    {
+      "label": "pre-index targeted validation",
+      "files_before": 16384,
+      "parent_sqlite_bytes": 11609815,
+      "parent_sqlite_pages": 1291,
+      "full_materializations": 0,
+      "checkpoint_fallback": false,
+      "failure": "parent SQLite bytes exceeded release limit"
+    },
+    {
+      "label": "indexed validation with 64 KiB page window",
+      "files_before": 16384,
+      "parent_sqlite_bytes": 8344754,
+      "parent_sqlite_pages": 409,
+      "full_materializations": 0,
+      "checkpoint_fallback": false,
+      "failure": "parent SQLite bytes exceeded release limit"
+    }
+  ]
+}

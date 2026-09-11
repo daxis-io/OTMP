@@ -47,6 +47,8 @@ struct Context<S> {
     inflight: tokio::sync::Semaphore,
     bytes: AtomicU64,
     requests: AtomicU64,
+    page_map_bytes: AtomicU64,
+    page_map_requests: AtomicU64,
     pages: AtomicU64,
     hits: AtomicU64,
 }
@@ -88,6 +90,8 @@ impl<S: ObjectStore> ReadContext<S> {
                 options,
                 bytes: AtomicU64::new(0),
                 requests: AtomicU64::new(0),
+                page_map_bytes: AtomicU64::new(0),
+                page_map_requests: AtomicU64::new(0),
                 pages: AtomicU64::new(0),
                 hits: AtomicU64::new(0),
             }),
@@ -115,6 +119,13 @@ impl<S: ObjectStore> ReadContext<S> {
             peak_cache_bytes: self.inner.cache.peak(),
         }
     }
+    pub(crate) fn writer_statistics(&self) -> super::WriterReadStatistics {
+        super::WriterReadStatistics {
+            total: self.statistics(),
+            page_map_bytes: self.inner.page_map_bytes.load(Ordering::Relaxed),
+            page_map_requests: self.inner.page_map_requests.load(Ordering::Relaxed),
+        }
+    }
     #[tracing::instrument(name = "otmp.load", skip_all, fields(kind = "metadata_stat", uri = uri.as_str()))]
     pub(crate) async fn stat(
         &self,
@@ -128,6 +139,9 @@ impl<S: ObjectStore> ReadContext<S> {
             .await
             .map_err(|_| RuntimeError::Cancelled)?;
         self.inner.requests.fetch_add(1, Ordering::Relaxed);
+        if is_page_map(uri) {
+            self.inner.page_map_requests.fetch_add(1, Ordering::Relaxed);
+        }
         trace.requests = 1;
         let result = self.inner.store.stat(uri).await;
         trace.outcome = if result.is_ok() { "success" } else { "error" };
@@ -146,6 +160,9 @@ impl<S: ObjectStore> ReadContext<S> {
             .await
             .map_err(|_| RuntimeError::Cancelled)?;
         self.inner.requests.fetch_add(1, Ordering::Relaxed);
+        if is_page_map(uri) {
+            self.inner.page_map_requests.fetch_add(1, Ordering::Relaxed);
+        }
         let range = 0..metadata.length;
         let response = self
             .inner
@@ -156,6 +173,11 @@ impl<S: ObjectStore> ReadContext<S> {
         self.inner
             .bytes
             .fetch_add(response.bytes.len() as u64, Ordering::Relaxed);
+        if is_page_map(uri) {
+            self.inner
+                .page_map_bytes
+                .fetch_add(response.bytes.len() as u64, Ordering::Relaxed);
+        }
         Ok(response.bytes)
     }
     async fn range(
@@ -268,6 +290,9 @@ impl<S: ObjectStore> ReadContext<S> {
                 .map_err(|_| RuntimeError::Cancelled)?;
             trace.requests = 1;
             self.inner.requests.fetch_add(1, Ordering::Relaxed);
+            if is_page_map(&reference.uri) {
+                self.inner.page_map_requests.fetch_add(1, Ordering::Relaxed);
+            }
             let result = self
                 .inner
                 .store
@@ -277,6 +302,11 @@ impl<S: ObjectStore> ReadContext<S> {
             self.inner
                 .bytes
                 .fetch_add(result.bytes.len() as u64, Ordering::Relaxed);
+            if is_page_map(&reference.uri) {
+                self.inner
+                    .page_map_bytes
+                    .fetch_add(result.bytes.len() as u64, Ordering::Relaxed);
+            }
             trace.bytes = result.bytes.len();
             self.inner
                 .cache
@@ -376,6 +406,10 @@ impl<S: ObjectStore> ReadContext<S> {
             base_only: false,
         })
     }
+}
+
+fn is_page_map(uri: &otmp_protocol::RelativeUri) -> bool {
+    uri.as_str().starts_with("_otmp/page-maps/")
 }
 
 #[derive(Clone)]
@@ -883,6 +917,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn writer_statistics_separate_page_map_reads() {
+        let store = InMemoryObjectStore::default();
+        let uri = "_otmp/page-maps/test.json".parse().unwrap();
+        let created = store.create_bytes(&uri, b"map").await.unwrap();
+        let context = ReadContext::new(store, ReaderOptions::default()).unwrap();
+        let metadata = context.stat(&uri).await.unwrap();
+        let reference = PageObjectReference {
+            uri,
+            sha256: created.sha256,
+            length: otmp_protocol::JsonU64(3),
+        };
+        context.range(&reference, &metadata, 0..3).await.unwrap();
+
+        let statistics = context.writer_statistics();
+        assert_eq!(statistics.page_map_requests, 2);
+        assert_eq!(statistics.page_map_bytes, 3);
+        assert_eq!(statistics.total.requests, 2);
+        assert_eq!(statistics.total.bytes, 3);
+    }
+
+    #[tokio::test]
     async fn authenticated_pages_match_the_materialized_oracle() {
         let store = InMemoryObjectStore::default();
         let table = Table::new(store.clone());
@@ -1320,7 +1375,7 @@ mod tests {
                 .bytes,
         )
         .unwrap();
-        let generation: Generation = otmp_protocol::canonical_json::from_slice_canonical(
+        let mut generation: Generation = otmp_protocol::canonical_json::from_slice_canonical(
             &store
                 .read(&head.metadata_generation.uri)
                 .await
@@ -1328,6 +1383,7 @@ mod tests {
                 .bytes,
         )
         .unwrap();
+        generation.metadata_image.checkpoint_page_index = None;
         let context = ReadContext::new(store, ReaderOptions::default()).unwrap();
         assert!(matches!(
             context.image(&generation).await,

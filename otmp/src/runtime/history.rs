@@ -1,8 +1,8 @@
 use super::{
     BTreeMap, BTreeSet, CanonicalValue, GENERATION_MEDIA_TYPE, Generation, Head, Id, JsonU64,
-    LiveFile, ObjectReference, ObjectStore, PinnedTable, RefType, RuntimeError, SemanticCommit,
-    Serialize, Sha256, StoredObject, Table, canonical_json, hash_from_blob, id_from_blob, image,
-    nonnegative, string, transactions, verified_read,
+    LiveFile, ObjectReference, ObjectStore, PinnedTable, RuntimeError, SemanticCommit, Serialize,
+    Sha256, StoredObject, Table, canonical_json, hash_from_blob, id_from_blob, image, nonnegative,
+    transactions, verified_read,
 };
 use rusqlite::{Connection, OptionalExtension};
 
@@ -123,7 +123,7 @@ impl PinnedTable {
         let connection = image::open_readonly(&self.image.path)?;
         let id = match selection {
             SnapshotSelection::Ref(name) => {
-                transactions::ref_row(&connection, &name)?
+                transactions::ref_row(&crate::sql_writer::Writer::Sqlite(&connection), &name)?
                     .ok_or(RuntimeError::RefNotFound(name))?
                     .1
             }
@@ -212,58 +212,6 @@ pub(crate) fn ancestry(
     }
     Ok(chain)
 }
-pub(super) fn validate_append_rebase(
-    parent: &PinnedTable,
-    name: &str,
-    original: Option<(RefType, Option<Id>)>,
-    version: u64,
-) -> Result<(), RuntimeError> {
-    let connection = image::open_readonly(&parent.image.path)?;
-    let Some((RefType::Branch, old)) = original else {
-        return Err(RuntimeError::SemanticConflict(
-            "append target was not a branch".into(),
-        ));
-    };
-    let Some((RefType::Branch, current)) = transactions::ref_row(&connection, name)? else {
-        return Err(RuntimeError::SemanticConflict(
-            "append target removed".into(),
-        ));
-    };
-    let chain = ancestry(&connection, current)?;
-    if old.is_some_and(|id| !chain.contains(&id)) {
-        return Err(RuntimeError::SemanticConflict(
-            "target is not an append descendant".into(),
-        ));
-    }
-    // Even moving away and back to the same tip invalidates the prepared append.
-    let mut stmt = connection
-        .prepare("SELECT operation_summary_json FROM otmp_commits WHERE table_version>?1")?;
-    for row in stmt.query_map(
-        [i64::try_from(version).map_err(|_| RuntimeError::Corrupt("version overflow".into()))?],
-        |r| r.get::<_, String>(0),
-    )? {
-        let operations: Vec<CanonicalValue> =
-            canonical_json::from_slice_canonical(row?.as_bytes())?;
-        for operation in operations {
-            if let CanonicalValue::Object(fields) = operation {
-                if fields.get("ref") == Some(&string(name))
-                    && fields.get("type") != Some(&string("commit_snapshot"))
-                {
-                    return Err(RuntimeError::SemanticConflict(
-                        "target ref changed during append".into(),
-                    ));
-                }
-                if fields.get("type") == Some(&string("set_current_schema")) {
-                    return Err(RuntimeError::SemanticConflict(
-                        "current schema changed during append".into(),
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationScope {
@@ -807,27 +755,26 @@ mod tests {
             // Equal contents deliberately get distinct URIs: hashes are not identities.
             std::fs::write(source.path(), b"same bytes").unwrap();
             for index in 0..count {
-                table
-                    .append_files(&crate::AppendRequest::new(
-                        format!("append-{index}"),
-                        vec![crate::AppendFile {
-                            source_path: source.path().into(),
-                            fingerprint: crate::SourceFingerprint {
-                                sha256: Sha256::digest(b"same bytes"),
-                                length: 10,
-                            },
-                            format: crate::FileFormat::Parquet,
-                            record_count: 1,
-                            schema_id: 1,
-                            partition_spec_id: 0,
-                            sort_order_id: 0,
-                            partition_values: BTreeMap::new(),
-                            metrics: vec![],
-                            metadata: BTreeMap::new(),
-                        }],
-                    ))
-                    .await
-                    .unwrap();
+                Box::pin(table.append_files(&crate::AppendRequest::new(
+                    format!("append-{index}"),
+                    vec![crate::AppendFile {
+                        source_path: source.path().into(),
+                        fingerprint: crate::SourceFingerprint {
+                            sha256: Sha256::digest(b"same bytes"),
+                            length: 10,
+                        },
+                        format: crate::FileFormat::Parquet,
+                        record_count: 1,
+                        schema_id: 1,
+                        partition_spec_id: 0,
+                        sort_order_id: 0,
+                        partition_values: BTreeMap::new(),
+                        metrics: vec![],
+                        metadata: BTreeMap::new(),
+                    }],
+                )))
+                .await
+                .unwrap();
             }
             DATA_HASHES.with(|c| c.set(0));
             SNAPSHOT_VISITS.with(|c| c.set(0));

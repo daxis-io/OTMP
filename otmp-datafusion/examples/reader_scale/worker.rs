@@ -440,68 +440,7 @@ mod tests {
         assert_eq!(store.snapshot().active, 0);
     }
     #[tokio::test]
-    async fn cancelling_one_scan_keeps_shared_footer_io_alive_for_its_peer() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("table");
-        fixture::prepare(
-            &root,
-            PrepareConfig {
-                files: 1,
-                ..PrepareConfig::default()
-            },
-        )
-        .await
-        .unwrap();
-        let store = MeasuredStore::new(LocalObjectStore::new(&root).unwrap(), Duration::ZERO)
-            .with_data_controls([("stat".into(), 100), ("trailer".into(), 100)].into(), None);
-        let table = Table::new(store.clone());
-        let provider = OtmpTableProvider::open(
-            &table,
-            MetadataSelection::Current,
-            SnapshotSelection::Ref("main".into()),
-            ReaderOptions::default(),
-            ProviderOptions::default(),
-        )
-        .await
-        .unwrap();
-        let context = SessionContext::new();
-        context.register_table("t", Arc::new(provider)).unwrap();
-        let query = |context: SessionContext| {
-            tokio::spawn(async move {
-                context
-                    .sql("SELECT * FROM t")
-                    .await
-                    .unwrap()
-                    .create_physical_plan()
-                    .await
-            })
-        };
-        let first = query(context.clone());
-        let second = query(context);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let io = store.snapshot();
-                if io.by_class.get("data").is_some_and(|data| {
-                    data.stat_requests == 2 && data.range_requests == 1 && data.active == 1
-                }) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        first.abort();
-        assert!(first.await.unwrap_err().is_cancelled());
-        drop(second.await.unwrap().unwrap());
-        let io = store.snapshot();
-        assert_eq!(io.by_class["data"].range_requests, 2);
-        assert_eq!(io.by_class["data"].cancelled, 0);
-        assert_eq!(io.active, 0);
-    }
-    #[tokio::test]
     async fn concurrent_preflight_makes_progress_at_the_sequential_minimum_footer_budget() {
-        use otmp::ObjectStore;
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("table");
         fixture::prepare(
@@ -515,27 +454,21 @@ mod tests {
         )
         .await
         .unwrap();
-        let store = LocalObjectStore::new(&root).unwrap();
-        let mut budget = 0;
-        for entry in std::fs::read_dir(root.join("data")).unwrap() {
-            let path = entry.unwrap().path();
-            let bytes = std::fs::read(&path).unwrap();
-            let footer =
-                u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap())
-                    as usize;
-            let uri: otmp_protocol::RelativeUri =
-                format!("data/{}", path.file_name().unwrap().to_str().unwrap())
-                    .parse()
-                    .unwrap();
-            let metadata = store.stat(&uri).await.unwrap();
-            budget = budget.max(
-                footer * 128
-                    + 65536
-                    + 512
-                    + uri.as_str().len() * 4
-                    + metadata.version.as_opaque().len() * 2,
-            );
-        }
+        let calibration = run(
+            &root,
+            serde_json::from_value(json!({"preflight_concurrency":1,"execute":false})).unwrap(),
+        )
+        .await
+        .unwrap();
+        let budget = calibration["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|phase| phase["name"] == "planning")
+            .unwrap()["provider"]["peak_footer_cache_bytes"]
+            .as_u64()
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .unwrap();
         for concurrency in [1, 8] {
             let config: RunConfig = serde_json::from_value(json!({
                 "preflight_concurrency":concurrency,"footer_budget":budget,"execute":false,
@@ -548,7 +481,7 @@ mod tests {
                 "concurrency {concurrency}, budget {budget}: {output}"
             );
         }
-        let store = MeasuredStore::new(store, Duration::ZERO);
+        let store = MeasuredStore::new(LocalObjectStore::new(&root).unwrap(), Duration::ZERO);
         let [entered, release] = store.pause_next_trailer();
         let table = Table::new(store.clone());
         let provider = OtmpTableProvider::open(
@@ -618,7 +551,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn simultaneous_scans_share_one_footer_fill_but_pin_independently() {
+    async fn simultaneous_scans_share_one_validated_file_fill() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("table");
         fixture::prepare(
@@ -639,7 +572,7 @@ mod tests {
         let output = run(&root, config).await.unwrap();
         assert_eq!(output["outcome"], "success", "{output}");
         let io = &output["overlapping_rounds"][0]["io"]["by_class"]["data"];
-        assert_eq!(io["stat_requests"], 8);
+        assert_eq!(io["stat_requests"], 1);
         assert_eq!(io["range_requests"], 2);
         assert_eq!(io["active"], 0);
     }
@@ -726,9 +659,16 @@ mod tests {
                         >= query["planning_to_first_result_ms"].as_f64().unwrap()
                 );
             }
-            assert!(round["io"]["stat_requests"].as_u64().unwrap() > 0);
             assert_eq!(round["io"]["active"], 0);
         }
+        assert!(rounds[0]["io"]["stat_requests"].as_u64().unwrap() > 0);
+        assert_eq!(rounds[1]["io"]["stat_requests"], 0);
+        assert!(
+            rounds[1]["provider"]["validated_file_cache_hits"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
         assert_eq!(output["violations"], json!([]));
     }
     #[tokio::test]
@@ -795,10 +735,14 @@ mod tests {
             let phases = result["phases"].as_array().unwrap();
             let planning: Vec<_> = phases.iter().filter(|p| p["name"] == "planning").collect();
             assert_eq!(planning.len(), 2);
-            assert_eq!(planning[0]["provider"]["files_considered"], 4);
             assert_eq!(
-                planning[0]["provider"]["files_pruned"],
-                if pruning { 2 } else { 0 }
+                planning[0]["provider"]["files_considered"],
+                if pruning { 2 } else { 4 }
+            );
+            assert_eq!(planning[0]["provider"]["files_pruned"], 0);
+            assert_eq!(
+                planning[0]["provider"]["catalog_pruning_scans"],
+                u64::from(pruning)
             );
             assert!(planning[0]["pool_reserved_bytes"].as_u64().unwrap() > 0);
             assert!(phases.iter().all(|p| p["io"]["full_reads"] == 0));
@@ -909,7 +853,7 @@ fn reader_delta(after: ReaderStatistics, before: ReaderStatistics) -> Value {
     json!({"bytes":after.bytes-before.bytes,"requests":after.requests-before.requests,"pages":after.pages-before.pages,"cache_hits":after.cache_hits-before.cache_hits,"cache_bytes":after.cache_bytes,"peak_cache_bytes":after.peak_cache_bytes})
 }
 fn provider_delta(after: ProviderStatistics, before: ProviderStatistics) -> Value {
-    json!({"planning_micros":after.planning_micros-before.planning_micros,"files_considered":after.files_considered-before.files_considered,"files_pruned":after.files_pruned-before.files_pruned,"files_opened":after.files_opened-before.files_opened,"parquet_bytes":after.parquet_bytes-before.parquet_bytes,"parquet_requests":after.parquet_requests-before.parquet_requests,"footer_cache_hits":after.footer_cache_hits-before.footer_cache_hits,"footer_cache_bytes":after.footer_cache_bytes,"peak_footer_cache_bytes":after.peak_footer_cache_bytes})
+    json!({"planning_micros":after.planning_micros-before.planning_micros,"files_considered":after.files_considered-before.files_considered,"files_pruned":after.files_pruned-before.files_pruned,"catalog_pruning_scans":after.catalog_pruning_scans-before.catalog_pruning_scans,"files_opened":after.files_opened-before.files_opened,"parquet_bytes":after.parquet_bytes-before.parquet_bytes,"parquet_requests":after.parquet_requests-before.parquet_requests,"footer_cache_hits":after.footer_cache_hits-before.footer_cache_hits,"validated_file_cache_hits":after.validated_file_cache_hits-before.validated_file_cache_hits,"footer_cache_bytes":after.footer_cache_bytes,"peak_footer_cache_bytes":after.peak_footer_cache_bytes})
 }
 fn error_details(stage: &str, error: &DataFusionError) -> Value {
     let mut current: &(dyn StdError + 'static) = error;

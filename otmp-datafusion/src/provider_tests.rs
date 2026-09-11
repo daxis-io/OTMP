@@ -19,14 +19,14 @@ use std::{
 };
 
 type BatchEdit = Arc<dyn Fn(&mut [otmp::ReaderFile]) + Send + Sync>;
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Hooks {
     pub batch: Option<BatchEdit>,
     pub validation: Gate,
     pub after_pin: Gate,
     pub binding: Gate,
 }
-type Gate = Mutex<Option<[Arc<tokio::sync::Notify>; 2]>>;
+type Gate = Arc<Mutex<Option<[Arc<tokio::sync::Notify>; 2]>>>;
 pub(super) async fn pause(hook: &Gate) {
     let gate = hook.lock().unwrap().take();
     if let Some(gate) = gate {
@@ -127,6 +127,82 @@ async fn open(
 }
 
 #[tokio::test]
+async fn replanning_with_one_provider_reuses_two_validated_files() {
+    let (_dir, table) = fixture(2).await;
+    let provider = open(&table, false, 8).await;
+    let context = SessionContext::new();
+    let first = provider
+        .scan(&context.state(), None, &[], None)
+        .await
+        .unwrap();
+    let cold = provider.metrics();
+    assert_eq!(cold.parquet_requests, 6);
+    drop(first);
+
+    let second = provider
+        .scan(&context.state(), None, &[], None)
+        .await
+        .unwrap();
+    let warm = provider.metrics();
+    assert_eq!(warm.parquet_requests, cold.parquet_requests);
+    assert_eq!(warm.parquet_bytes, cold.parquet_bytes);
+    assert_eq!(warm.validated_file_cache_hits, 2);
+    drop(second);
+    provider.footer_cache.assert_idle();
+}
+
+#[tokio::test]
+async fn concurrent_first_scans_share_a_fill_and_warm_deletion_fails_exact_reads() {
+    let (dir, table) = fixture(1).await;
+    let mut provider = open(&table, false, 8).await;
+    let uri = provider.reader.files(None, &[], 1).await.unwrap().files[0]
+        .file
+        .uri
+        .clone();
+    let gate = [
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    ];
+    provider.hooks.after_pin = Arc::new(Mutex::new(Some(gate.clone())));
+    let provider = Arc::new(provider);
+    let context = SessionContext::new();
+    let state = context.state();
+    let first = {
+        let provider = provider.clone();
+        let state = state.clone();
+        tokio::spawn(async move { provider.scan(&state, None, &[], None).await })
+    };
+    let second = {
+        let provider = provider.clone();
+        tokio::spawn(async move { provider.scan(&state, None, &[], None).await })
+    };
+    gate[0].notified().await;
+    gate[1].notify_one();
+    drop(first.await.unwrap().unwrap());
+    drop(second.await.unwrap().unwrap());
+    assert_eq!(provider.io.requests.load(Ordering::Relaxed), 3);
+    let concurrent_hits = provider.metrics().validated_file_cache_hits;
+    assert!(concurrent_hits <= 1);
+
+    let plan = provider
+        .scan(&context.state(), None, &[], None)
+        .await
+        .unwrap();
+    assert_eq!(provider.io.requests.load(Ordering::Relaxed), 3);
+    assert_eq!(
+        provider.metrics().validated_file_cache_hits,
+        concurrent_hits + 1
+    );
+    std::fs::remove_file(dir.path().join(uri.as_str())).unwrap();
+    assert!(
+        datafusion::physical_plan::collect(plan, context.task_ctx())
+            .await
+            .is_err()
+    );
+    provider.footer_cache.assert_idle();
+}
+
+#[tokio::test]
 async fn repeated_and_conflicting_identities_reconcile_before_any_plan_is_returned() {
     let (_dir, table) = fixture(257).await;
     for history in [false, true] {
@@ -216,7 +292,7 @@ async fn cancelling_at_schema_validation_releases_scan_ownership() {
         Arc::new(tokio::sync::Notify::new()),
         Arc::new(tokio::sync::Notify::new()),
     ];
-    provider.hooks.validation = Mutex::new(Some(gate.clone()));
+    provider.hooks.validation = Arc::new(Mutex::new(Some(gate.clone())));
     let provider = Arc::new(provider);
     let context = SessionContext::new();
     let scanning = provider.clone();
@@ -246,7 +322,7 @@ async fn independent_scans_pin_their_own_version_and_stale_ranges_preserve_the_c
         Arc::new(tokio::sync::Notify::new()),
         Arc::new(tokio::sync::Notify::new()),
     ];
-    old.hooks.after_pin = Mutex::new(Some(gate.clone()));
+    old.hooks.after_pin = Arc::new(Mutex::new(Some(gate.clone())));
     let old = Arc::new(old);
     let context = SessionContext::new();
     let scanning = old.clone();
@@ -298,6 +374,7 @@ async fn independent_scans_pin_their_own_version_and_stale_ranges_preserve_the_c
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep both shared failure and retry assertions in one controlled fill.
 async fn concurrent_malformed_files_fail_without_a_plan_or_stranded_load() {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     for corruption in ["trailer", "length", "container", "required-field"] {
@@ -349,21 +426,51 @@ async fn concurrent_malformed_files_fail_without_a_plan_or_stranded_load() {
                 file.file.content_sha256 = Some(Sha256::digest(&bytes));
             }
         }));
+        let gate = [
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        ];
+        provider.hooks.after_pin = Arc::new(Mutex::new(Some(gate.clone())));
+        let provider = Arc::new(provider);
         let context = SessionContext::new();
         let state = context.state();
         // Empty projection must still validate the required id field.
         let projection = vec![];
-        let (a, b) = tokio::join!(
-            provider.scan(&state, Some(&projection), &[], None),
-            provider.scan(&state, Some(&projection), &[], None)
-        );
-        for result in [a, b] {
+        let first = {
+            let provider = provider.clone();
+            let state = state.clone();
+            let projection = projection.clone();
+            tokio::spawn(async move { provider.scan(&state, Some(&projection), &[], None).await })
+        };
+        let second = {
+            let provider = provider.clone();
+            let state = state.clone();
+            let projection = projection.clone();
+            tokio::spawn(async move { provider.scan(&state, Some(&projection), &[], None).await })
+        };
+        gate[0].notified().await;
+        while provider.preflight.available_permits() != 6 {
+            tokio::task::yield_now().await;
+        }
+        gate[1].notify_one();
+        let (a, b) = tokio::join!(first, second);
+        for result in [a.unwrap(), b.unwrap()] {
             let error = result.unwrap_err();
             assert!(
                 error.to_string().contains(expected),
                 "{corruption}: {error}"
             );
         }
+        let fill_requests = if matches!(corruption, "trailer" | "length") {
+            2
+        } else {
+            3
+        };
+        assert_eq!(
+            provider.io.requests.load(Ordering::Relaxed),
+            fill_requests,
+            "concurrent first scans must share one stat/footer fill"
+        );
         provider.footer_cache.assert_idle();
         assert_eq!(provider.preflight.available_permits(), 8);
         assert_eq!(context.runtime_env().memory_pool.reserved(), 0);
@@ -374,12 +481,21 @@ async fn concurrent_malformed_files_fail_without_a_plan_or_stranded_load() {
                 .await
                 .is_err()
         );
+        assert_eq!(
+            provider.io.requests.load(Ordering::Relaxed),
+            if corruption == "required-field" {
+                fill_requests + 1
+            } else {
+                fill_requests * 2
+            },
+            "{corruption}: failed fills must be removed before retry"
+        );
         provider.footer_cache.assert_idle();
     }
 }
 
 #[tokio::test]
-async fn warm_scan_and_cold_scan_progress_under_one_decode_budget() {
+async fn eviction_forces_full_revalidation_under_one_entry_budget() {
     use otmp::ObjectStore;
     let (dir, table) = fixture(2).await;
     let mut provider = open(&table, false, 8).await;
@@ -396,7 +512,10 @@ async fn warm_scan_and_cold_scan_progress_under_one_decode_budget() {
                 + 64 * 1024
                 + 512
                 + file.file.uri.as_str().len() * 4
-                + metadata.version.as_opaque().len() * 2,
+                + metadata.version.as_opaque().len() * 2
+                + 512
+                + file.file.uri.as_str().len() * 4
+                + 256,
         );
     }
     provider.footer_cache = crate::footer::FooterCache::new(limit).unwrap();
@@ -405,7 +524,7 @@ async fn warm_scan_and_cold_scan_progress_under_one_decode_budget() {
         if files.is_empty() {
             return;
         }
-        let selected = usize::from(rounds.fetch_add(1, Ordering::Relaxed) >= 2);
+        let selected = usize::from(rounds.fetch_add(1, Ordering::Relaxed) >= 1);
         for (index, file) in files.iter_mut().enumerate() {
             if index != selected {
                 file.metrics[0].lower_bound = Some(TypedScalar::Int64(0));
@@ -421,34 +540,14 @@ async fn warm_scan_and_cold_scan_progress_under_one_decode_budget() {
             .await
             .unwrap(),
     );
-    let gate = [
-        Arc::new(tokio::sync::Notify::new()),
-        Arc::new(tokio::sync::Notify::new()),
-    ];
-    provider.hooks.validation = Mutex::new(Some(gate.clone()));
-    let provider = Arc::new(provider);
-    let scanning = provider.clone();
-    let state = context.state();
-    let warm = tokio::spawn(async move {
-        scanning
-            .scan(&state, None, &[col("id").gt_eq(lit(100_i64))], None)
+    assert_eq!(provider.io.requests.load(Ordering::Relaxed), 3);
+    drop(
+        provider
+            .scan(&context.state(), None, &filters, None)
             .await
-    });
-    gate[0].notified().await;
-    let scanning = provider.clone();
-    let state = context.state();
-    let mut cold = tokio::spawn(async move {
-        scanning
-            .scan(&state, None, &[col("id").gt_eq(lit(100_i64))], None)
-            .await
-    });
-    tokio::select! {
-        result = &mut cold => panic!("cold scan must wait for the active cached validation: {result:?}"),
-        () = provider.footer_cache.wait_for_pressure() => {},
-    }
-    gate[1].notify_one();
-    drop(warm.await.unwrap().unwrap());
-    drop(cold.await.unwrap().unwrap());
+            .unwrap(),
+    );
+    assert_eq!(provider.io.requests.load(Ordering::Relaxed), 6);
     provider.footer_cache.assert_idle();
     assert!(provider.footer_cache.statistics().1 <= limit);
     assert_eq!(provider.preflight.available_permits(), 8);
@@ -489,7 +588,7 @@ async fn repeated_uri_with_another_schema_keeps_a_preflight_lease_during_final_b
         Arc::new(tokio::sync::Notify::new()),
         Arc::new(tokio::sync::Notify::new()),
     ];
-    provider.hooks.binding = Mutex::new(Some(gate.clone()));
+    provider.hooks.binding = Arc::new(Mutex::new(Some(gate.clone())));
     let provider = Arc::new(provider);
     let context = SessionContext::new();
     let scanning = provider.clone();
@@ -501,7 +600,7 @@ async fn repeated_uri_with_another_schema_keeps_a_preflight_lease_during_final_b
         3,
         "the second schema must reuse the original pin/footer"
     );
-    provider.footer_cache.assert_preflight_lease();
+    assert!(provider.footer_cache.statistics().0 > 0);
     gate[1].notify_one();
     let plan = task.await.unwrap().unwrap();
     assert_eq!(

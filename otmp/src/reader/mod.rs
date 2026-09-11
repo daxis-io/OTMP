@@ -7,7 +7,7 @@ mod pages;
 mod schema;
 mod selection;
 mod snapshot;
-pub use metadata::{FileBatch, FileCursor, MetadataReader, ReaderFile};
+pub use metadata::{FileBatch, FileCursor, FileMetricRange, MetadataReader, ReaderFile};
 pub(crate) use pages::{AuthenticatedImage, ReadContext, WeakReadContext};
 
 /// Budgets shared by readers opened through a cloned table instance.
@@ -61,4 +61,11 @@ pub struct ReaderStatistics {
     pub cache_hits: u64,
     pub cache_bytes: usize,
     pub peak_cache_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct WriterReadStatistics {
+    pub(crate) total: ReaderStatistics,
+    pub(crate) page_map_bytes: u64,
+    pub(crate) page_map_requests: u64,
 }

@@ -205,7 +205,7 @@ pub async fn run(root: &Path, config: &Path) -> Result<RunOutput, WorkerError> {
     let source_head_sha256 = actual.head_sha256.clone();
     let table = Table::new(QualificationStore::new(LocalObjectStore::new(root)?));
     let pinned = if config.mode == "pre_pinned" {
-        Some(table.pin().await?)
+        Some(table.qualification_write_pin().await?)
     } else {
         None
     };
@@ -217,7 +217,7 @@ pub async fn run(root: &Path, config: &Path) -> Result<RunOutput, WorkerError> {
     );
     let session = super::start()?;
     let transaction = match pinned {
-        Some(pinned) => table.transact_pre_pinned(&request, pinned).await,
+        Some(pinned) => Box::pin(table.transact_pre_pinned(&request, pinned)).await,
         None => table.transact(&request).await,
     };
     let probe = session.finish()?;

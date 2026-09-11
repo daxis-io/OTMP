@@ -9,13 +9,61 @@ use crate::{
 use async_trait::async_trait;
 use otmp_protocol::{FeatureSet, Id, Schema, SemanticCommit, Sha256, canonical_json};
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::Arc;
 use turso_core::{Numeric, Value};
+
+#[cfg(not(test))]
+const COMMIT_OPERATION_PAGE_ROWS: usize = 4096;
+#[cfg(test)]
+const COMMIT_OPERATION_PAGE_ROWS: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileCursor {
     pub(crate) pin: Id,
+    pub(crate) ranges: Vec<CanonicalRange>,
     pub(crate) state: CursorState,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileMetricRange {
+    Int32 {
+        field_id: u32,
+        lower: Bound<i32>,
+        upper: Bound<i32>,
+    },
+    Int64 {
+        field_id: u32,
+        lower: Bound<i64>,
+        upper: Bound<i64>,
+    },
+    /// Signed days from the Unix epoch, matching Arrow `Date32`.
+    Date {
+        field_id: u32,
+        lower: Bound<i32>,
+        upper: Bound<i32>,
+    },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RangeType {
+    Int32,
+    Int64,
+    Date,
+}
+impl RangeType {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Int32 => "int32",
+            Self::Int64 => "int64",
+            Self::Date => "date",
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CanonicalRange {
+    pub(crate) field_id: u32,
+    pub(crate) range_type: RangeType,
+    pub(crate) lower: Bound<i64>,
+    pub(crate) upper: Bound<i64>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CursorState {
@@ -35,9 +83,10 @@ pub struct ReaderFile {
     pub metrics: Vec<FileMetric>,
 }
 pub struct FileBatch {
+    /// Files retained by catalog pruning. Callers may apply another conservative
+    /// metric-pruning pass before opening the corresponding data objects.
     pub files: Vec<ReaderFile>,
-    /// Derived from the metadata batch before file pruning. Always follow it,
-    /// including after an empty candidate batch.
+    /// Continuation for the catalog query, including historical ancestry.
     pub next_cursor: Option<FileCursor>,
     pub(crate) _reservations: Vec<Reservation>,
 }
@@ -51,7 +100,13 @@ pub struct MetadataReader<S> {
     schema: Arc<Schema>,
     schemas: tokio::sync::Mutex<BTreeMap<u32, RetainedSchema>>,
     coordinates: MetadataCoordinates,
+    pub(crate) last_sequence: u64,
     anchor: HeadAnchor,
+    pub(crate) head: otmp_protocol::Head,
+    pub(crate) raw_head: Vec<u8>,
+    pub(crate) head_version: crate::ObjectVersion,
+    pub(crate) generation: otmp_protocol::Generation,
+    pub(crate) image: Arc<AuthenticatedImage<S>>,
     pub(crate) snapshot: Option<SnapshotDescriptor>,
     pub(crate) branch: Option<String>,
     pub(crate) pin_id: Id,
@@ -75,13 +130,122 @@ impl<S: ObjectStore> PageSource for AuthenticatedImage<S> {
 }
 
 impl<S: ObjectStore> MetadataReader<S> {
+    pub(crate) async fn idempotency(
+        &self,
+        key: &str,
+    ) -> Result<Option<(Sha256, String, Sha256)>, RuntimeError> {
+        let rows = self
+            .engine
+            .query(
+                "SELECT i.intent_sha256,i.result_json,c.semantic_state_sha256 FROM otmp_idempotency i JOIN otmp_commits c ON c.commit_id=i.commit_id AND c.table_version=i.table_version WHERE i.idempotency_key=?1",
+                vec![Value::build_text(key.to_owned())],
+                1,
+                1024 * 1024,
+            )
+            .await?;
+        rows.first()
+            .map(|row| Ok((hash(&row[0])?, text(&row[1])?, hash(&row[2])?)))
+            .transpose()
+    }
+
+    pub(crate) async fn ref_row(
+        &self,
+        name: &str,
+    ) -> Result<Option<(crate::RefType, Option<Id>)>, RuntimeError> {
+        let rows = self
+            .engine
+            .query(
+                "SELECT ref_type,snapshot_id FROM otmp_refs WHERE ref_name=?1",
+                vec![Value::build_text(name.to_owned())],
+                1,
+                4096,
+            )
+            .await?;
+        rows.first()
+            .map(|row| {
+                Ok((
+                    match text(&row[0])?.as_str() {
+                        "branch" => crate::RefType::Branch,
+                        "tag" => crate::RefType::Tag,
+                        _ => return Err(corrupt("invalid ref type")),
+                    },
+                    if matches!(row[1], Value::Null) {
+                        None
+                    } else {
+                        Some(id(&row[1])?)
+                    },
+                ))
+            })
+            .transpose()
+    }
+
+    pub(crate) async fn commit_operations_page_after(
+        &self,
+        version: u64,
+    ) -> Result<Vec<(u64, String)>, RuntimeError> {
+        self.engine
+            .query(
+                "SELECT table_version,operation_summary_json FROM otmp_commits WHERE table_version>?1 AND table_version<=?2 ORDER BY table_version LIMIT ?3",
+                vec![
+                    sqlite(version)?,
+                    sqlite(self.coordinates.table_version)?,
+                    sqlite(COMMIT_OPERATION_PAGE_ROWS as u64)?,
+                ],
+                COMMIT_OPERATION_PAGE_ROWS,
+                8 * 1024 * 1024,
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((uint(&row[0])?, text(&row[1])?)))
+            .collect()
+    }
+
+    pub(crate) async fn snapshot_descends_from(
+        &self,
+        mut tip: Option<Id>,
+        ancestor: Id,
+    ) -> Result<bool, RuntimeError> {
+        if tip == Some(ancestor) {
+            return Ok(true);
+        }
+        let mut last_sequence = u64::MAX;
+        while let Some(snapshot_id) = tip {
+            let rows = self
+                .engine
+                .query(
+                    "SELECT parent_snapshot_id,sequence_number FROM otmp_snapshots WHERE snapshot_id=?1",
+                    vec![Value::Blob(snapshot_id.as_bytes().to_vec())],
+                    1,
+                    4096,
+                )
+                .await?;
+            let row = rows
+                .first()
+                .ok_or_else(|| corrupt("dangling snapshot ancestry"))?;
+            let sequence = uint(&row[1])?;
+            if sequence >= last_sequence {
+                return Err(corrupt("nondecreasing snapshot ancestry"));
+            }
+            last_sequence = sequence;
+            if snapshot_id == ancestor {
+                return Ok(true);
+            }
+            tip = if matches!(row[0], Value::Null) {
+                None
+            } else {
+                Some(id(&row[0])?)
+            };
+        }
+        Ok(false)
+    }
+
     pub(crate) async fn open(
         context: ReadContext<S>,
         metadata: MetadataSelection,
         snapshot: SnapshotSelection,
     ) -> Result<Self, RuntimeError> {
         let mut selected = super::selection::resolve(&context, metadata).await?;
-        let image = context.image(&selected.generation).await?;
+        let image = Arc::new(context.image(&selected.generation).await?);
         // An incremental checkpoint has its own table-version identity. Opening
         // this view checks only identity pages, never materializes the image.
         let checkpoint = Engine::open(
@@ -102,8 +266,7 @@ impl<S: ObjectStore> MetadataReader<S> {
             return Err(corrupt("checkpoint table or version identity mismatch"));
         }
         drop(checkpoint);
-        let engine =
-            Engine::open(Arc::new(image), context.options().engine_page_cache_bytes).await?;
+        let engine = Engine::open(image.clone(), context.options().engine_page_cache_bytes).await?;
         let meta = read_meta(&engine).await?;
         if meta.table != selected.generation.table_id
             || meta.version != selected.generation.table_version.0
@@ -155,7 +318,13 @@ impl<S: ObjectStore> MetadataReader<S> {
             schema,
             schemas: tokio::sync::Mutex::new(schemas),
             coordinates: selected.coordinates,
+            last_sequence: meta.sequence,
             anchor: selected.anchor,
+            head: selected.head,
+            raw_head: selected.raw_head,
+            head_version: selected.head_version,
+            generation: selected.generation,
+            image,
             snapshot,
             branch,
             pin_id: Id::try_from_bytes(*uuid::Uuid::now_v7().as_bytes())?,
@@ -193,6 +362,9 @@ impl<S: ObjectStore> MetadataReader<S> {
     pub fn statistics(&self) -> ReaderStatistics {
         self.context.statistics()
     }
+    pub(crate) fn writer_statistics(&self) -> super::WriterReadStatistics {
+        self.context.writer_statistics()
+    }
     pub fn store(&self) -> &S {
         self.context.store()
     }
@@ -202,7 +374,16 @@ impl<S: ObjectStore> MetadataReader<S> {
         metric_fields: &[u32],
         limit: usize,
     ) -> Result<FileBatch, RuntimeError> {
-        super::files::enumerate(self, cursor, metric_fields, limit).await
+        self.files_matching(cursor, metric_fields, &[], limit).await
+    }
+    pub async fn files_matching(
+        &self,
+        cursor: Option<FileCursor>,
+        metric_fields: &[u32],
+        ranges: &[FileMetricRange],
+        limit: usize,
+    ) -> Result<FileBatch, RuntimeError> {
+        super::files::enumerate(self, cursor, metric_fields, ranges, limit).await
     }
 }
 
@@ -247,6 +428,7 @@ pub(crate) fn hash(v: &Value) -> Result<Sha256, RuntimeError> {
             .map_err(|_| corrupt("invalid metadata hash"))?,
     ))
 }
+
 pub(crate) fn sqlite(n: u64) -> Result<Value, RuntimeError> {
     Ok(integer(
         i64::try_from(n).map_err(|_| corrupt("metadata integer overflow"))?,
@@ -309,7 +491,7 @@ async fn validate_commit_row<S: ObjectStore>(
     reference: &otmp_protocol::ObjectReference,
 ) -> Result<(), RuntimeError> {
     let _reservation = context.reserve_bytes(4 * 1024 * 1024)?;
-    let rows = engine.query("SELECT commit_id,semantic_state_sha256,commit_object_uri,commit_object_sha256,parent_table_version,intent_count,operation_summary_json,result_json,metadata_json FROM otmp_commits WHERE table_version=?1", vec![sqlite(commit.table_version.0)?], 1, 1024*1024).await?;
+    let rows = engine.query("SELECT commit_id,semantic_state_sha256,commit_object_uri,commit_object_sha256,parent_table_version,intent_count,operation_summary_json,result_json,metadata_json FROM otmp_commits WHERE table_version=?1", vec![sqlite(commit.table_version.0)?], 1, context.options().maximum_record_bytes).await?;
     let [r] = rows.as_slice() else {
         return Err(corrupt("selected relational commit is missing"));
     };
@@ -339,4 +521,87 @@ async fn validate_commit_row<S: ObjectStore>(
     // and previous state. Historical selection checks those explicit links.
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        CommitMetadata, InMemoryObjectStore, InitializeRequest, OperationRequest, ReaderOptions,
+        Requirement, Table, TransactionRequest,
+    };
+    use otmp_protocol::CanonicalValue;
+    use std::str::FromStr;
+
+    #[tokio::test]
+    async fn commit_operations_are_paged_beyond_one_query_budget() {
+        let table = Table::new(InMemoryObjectStore::default());
+        let schema =
+            serde_json::from_slice(include_bytes!("../../../conformance/sources/schema.json"))
+                .unwrap();
+        table
+            .initialize(InitializeRequest::new(schema))
+            .await
+            .unwrap();
+        for index in 0..3 {
+            let property = format!("property-{index}");
+            table
+                .transact(&TransactionRequest {
+                    idempotency_key: format!("metadata-{index}"),
+                    requirements: vec![Requirement::PropertyIs {
+                        key: property.clone(),
+                        value: CanonicalValue::Null,
+                    }],
+                    operations: vec![OperationRequest::SetProperties {
+                        operation_id: "set".into(),
+                        updates: [(property, CanonicalValue::Bool(true))].into(),
+                        removals: Vec::new(),
+                    }],
+                    commit_metadata: CommitMetadata::default(),
+                })
+                .await
+                .unwrap();
+        }
+        let reader = table
+            .open_metadata_reader(
+                MetadataSelection::Current,
+                SnapshotSelection::Ref("main".into()),
+                ReaderOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        let first = reader.commit_operations_page_after(0).await.unwrap();
+        assert_eq!(first.len(), COMMIT_OPERATION_PAGE_ROWS);
+        let second = reader
+            .commit_operations_page_after(first.last().unwrap().0)
+            .await
+            .unwrap();
+        assert_eq!(second.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn matching_tip_does_not_walk_snapshot_history() {
+        let store = InMemoryObjectStore::default();
+        let table = Table::new(store.clone());
+        let schema =
+            serde_json::from_slice(include_bytes!("../../../conformance/sources/schema.json"))
+                .unwrap();
+        table
+            .initialize(InitializeRequest::new(schema))
+            .await
+            .unwrap();
+        let reader = MetadataReader::open(
+            ReadContext::new(store, ReaderOptions::default()).unwrap(),
+            MetadataSelection::Current,
+            SnapshotSelection::Ref("main".into()),
+        )
+        .await
+        .unwrap();
+        let tip = Id::from_str("018f31f4-2bbd-7e47-a8bd-e5c9b36d8b0c").unwrap();
+        let queries = reader.engine.query_count();
+
+        assert!(reader.snapshot_descends_from(Some(tip), tip).await.unwrap());
+        assert_eq!(reader.engine.query_count(), queries);
+    }
 }

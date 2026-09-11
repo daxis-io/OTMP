@@ -285,10 +285,10 @@ fn small_candidate_borrows_parent_and_compares_only_touched_pages() {
     drop(sqlite);
     let parent: Arc<[u8]> = std::fs::read(path).unwrap().into();
     let candidate = super::CandidateWriter::new(parent.clone(), None).unwrap();
-    assert!(
-        Arc::ptr_eq(&parent, &candidate.storage.parent),
-        "candidate borrows the resolved parent allocation"
-    );
+    let super::Parent::Bytes(candidate_parent) = &candidate.storage.parent else {
+        panic!("byte-backed candidate changed parent kind")
+    };
+    assert!(Arc::ptr_eq(&parent, candidate_parent));
     candidate
         .sql()
         .execute(
@@ -310,7 +310,7 @@ fn small_candidate_borrows_parent_and_compares_only_touched_pages() {
         frozen.pages_compared,
         frozen.changed.len()
     );
-    let bytes = frozen.materialize();
+    let bytes = frozen.materialize().unwrap();
     assert!(bytes.len() <= parent.len() + 4096);
     let export = directory.path().join("export.sqlite3");
     std::fs::write(&export, bytes).unwrap();

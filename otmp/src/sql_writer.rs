@@ -29,6 +29,23 @@ impl Row {
 }
 
 impl Writer<'_> {
+    fn row(values: impl IntoIterator<Item = turso_core::Value>) -> Result<Row, RuntimeError> {
+        Ok(Row(values
+            .into_iter()
+            .map(|value| match value {
+                turso_core::Value::Null => Ok(Value::Null),
+                turso_core::Value::Numeric(turso_core::Numeric::Integer(value)) => {
+                    Ok(Value::Integer(value))
+                }
+                turso_core::Value::Numeric(turso_core::Numeric::Float(_)) => Err(
+                    RuntimeError::Turso("unexpected float in metadata query".into()),
+                ),
+                turso_core::Value::Text(value) => Ok(Value::Text(value.to_string())),
+                turso_core::Value::Blob(value) => Ok(Value::Blob(value)),
+            })
+            .collect::<Result<Vec<_>, _>>()?))
+    }
+
     pub(crate) fn ancestry(
         &self,
         mut tip: Option<otmp_protocol::Id>,
@@ -121,34 +138,65 @@ impl Writer<'_> {
         parameters: &[&dyn ToSql],
         read: impl FnOnce(&Row) -> rusqlite::Result<T>,
     ) -> Result<T, RuntimeError> {
-        let values = match self {
-            Self::Sqlite(connection) => connection.query_row(sql, parameters, |row| {
-                (0..row.as_ref().column_count())
-                    .map(|i| row.get(i))
-                    .collect::<rusqlite::Result<Vec<Value>>>()
-            })?,
-            Self::Turso(connection) => {
-                let mut rows =
-                    Self::prepare_turso(connection, sql, parameters)?.run_collect_rows()?;
-                if rows.is_empty() {
-                    return Err(rusqlite::Error::QueryReturnedNoRows.into());
+        self.query_optional(sql, parameters, read)?
+            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into())
+    }
+
+    pub(crate) fn query_optional<T>(
+        &self,
+        sql: &str,
+        parameters: &[&dyn ToSql],
+        read: impl FnOnce(&Row) -> rusqlite::Result<T>,
+    ) -> Result<Option<T>, RuntimeError> {
+        let mut read = Some(read);
+        Ok(self
+            .query_all(sql, parameters, 1, |row| {
+                read.take().expect("one optional row")(row)
+            })?
+            .pop())
+    }
+
+    pub(crate) fn query_all<T>(
+        &self,
+        sql: &str,
+        parameters: &[&dyn ToSql],
+        max_rows: usize,
+        mut read: impl FnMut(&Row) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>, RuntimeError> {
+        if max_rows == 0 {
+            return Err(RuntimeError::ResourceExhausted(
+                "SQL row query budget must be positive".into(),
+            ));
+        }
+        let mut output = Vec::new();
+        match self {
+            Self::Sqlite(connection) => {
+                let mut statement = connection.prepare(sql)?;
+                let mut rows = statement.query(parameters)?;
+                while let Some(row) = rows.next()? {
+                    if output.len() == max_rows {
+                        return Err(RuntimeError::ResourceExhausted(
+                            "SQL row query budget exhausted".into(),
+                        ));
+                    }
+                    let row = Row((0..row.as_ref().column_count())
+                        .map(|index| row.get(index))
+                        .collect::<rusqlite::Result<Vec<Value>>>()?);
+                    output.push(read(&row)?);
                 }
-                rows.remove(0)
-                    .into_iter()
-                    .map(|value| match value {
-                        turso_core::Value::Null => Ok(Value::Null),
-                        turso_core::Value::Numeric(turso_core::Numeric::Integer(value)) => {
-                            Ok(Value::Integer(value))
-                        }
-                        turso_core::Value::Numeric(turso_core::Numeric::Float(_)) => Err(
-                            RuntimeError::Turso("unexpected float in metadata query".into()),
-                        ),
-                        turso_core::Value::Text(value) => Ok(Value::Text(value.to_string())),
-                        turso_core::Value::Blob(value) => Ok(Value::Blob(value)),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
             }
-        };
-        Ok(read(&Row(values))?)
+            Self::Turso(connection) => {
+                let mut statement = Self::prepare_turso(connection, sql, parameters)?;
+                while let Some(row) = statement.run_one_step_blocking(|| Ok(()), || Ok(()))? {
+                    if output.len() == max_rows {
+                        return Err(RuntimeError::ResourceExhausted(
+                            "SQL row query budget exhausted".into(),
+                        ));
+                    }
+                    output.push(read(&Self::row(row.get_values().cloned())?)?);
+                }
+            }
+        }
+        Ok(output)
     }
 }

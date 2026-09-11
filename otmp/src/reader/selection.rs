@@ -10,6 +10,9 @@ use otmp_protocol::{
 use std::collections::BTreeSet;
 
 pub(crate) struct Selection {
+    pub head: Head,
+    pub raw_head: Vec<u8>,
+    pub head_version: crate::ObjectVersion,
     pub generation: Generation,
     pub coordinates: MetadataCoordinates,
     pub anchor: HeadAnchor,
@@ -33,7 +36,7 @@ async fn read_json<S: ObjectStore, T: serde::de::DeserializeOwned>(
     let raw = context.object(reference).await?;
     let size = raw.as_ref().as_ref().len();
     let reservation = context.reserve_bytes(
-        size.checked_mul(32)
+        size.checked_mul(8)
             .and_then(|n| n.checked_add(4096))
             .ok_or_else(|| {
                 RuntimeError::ResourceExhausted("metadata envelope allocation overflow".into())
@@ -224,7 +227,11 @@ pub(crate) async fn resolve<S: ObjectStore>(
         semantic_state_sha256: generation.semantic_state_sha256,
         main_snapshot_id: None, // Filled from the selected image's authenticated main ref.
     };
+    let head_version = crate::ObjectVersion::from_sha256(otmp_protocol::Sha256::digest(&raw));
     Ok(Selection {
+        head,
+        raw_head: raw,
+        head_version,
         generation,
         coordinates,
         anchor,

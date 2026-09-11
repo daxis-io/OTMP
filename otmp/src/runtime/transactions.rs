@@ -557,9 +557,17 @@ impl<S: ObjectStore> Table<S> {
         pinned: PinnedTable,
     ) -> Result<TransactionResult, RuntimeError> {
         let logical_hash = intent_hash(&canonical_json::to_vec(request)?);
+        crate::write_latency_qualification::skipped_phase("parent_pin", 0);
+        crate::write_latency_qualification::skipped_phase("parent_validation", 1);
+        crate::write_latency_qualification::skipped_phase("generation_resolution", 2);
+        crate::write_latency_qualification::skipped_phase("logical_image_materialization", 2);
+        crate::write_latency_qualification::add_bytes(
+            "parent_logical_bytes",
+            pinned.resolved.len() as u64,
+        );
         let (result, semantic_state_sha256) = self
-            .publish_transaction_from(
-                Some(pinned),
+            .publish_transaction_from_parent(
+                pinned,
                 &request.idempotency_key,
                 logical_hash,
                 &[],

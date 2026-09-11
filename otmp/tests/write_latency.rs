@@ -5,6 +5,11 @@ use std::fs;
 use otmp::write_latency_qualification::{self as qualification, worker};
 
 #[test]
+fn write_latency_phase_guard_stays_compact_for_async_callers() {
+    assert!(std::mem::size_of::<qualification::PhaseGuard>() <= 2 * std::mem::size_of::<usize>());
+}
+
+#[test]
 fn write_latency_probe_rejects_overlap_and_unfinished_phases() {
     let session = qualification::start().unwrap();
     assert!(qualification::start().is_err());

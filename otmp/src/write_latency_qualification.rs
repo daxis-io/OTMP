@@ -49,11 +49,17 @@ impl std::error::Error for ProbeError {}
 
 struct ActiveSession {
     started: Instant,
-    active_phases: Vec<String>,
+    active_phases: Vec<ActivePhase>,
     phases: Vec<PhaseMeasurement>,
     counters: BTreeMap<String, u64>,
     object_store: BTreeMap<String, ObjectIo>,
     nesting_error: Option<String>,
+}
+
+struct ActivePhase {
+    name: &'static str,
+    started: Instant,
+    depth: u32,
 }
 
 fn state() -> &'static Mutex<Option<ActiveSession>> {
@@ -76,7 +82,12 @@ impl ProbeSession {
         if !active.active_phases.is_empty() {
             return Err(ProbeError(format!(
                 "unfinished probe phases: {}",
-                active.active_phases.join(", ")
+                active
+                    .active_phases
+                    .iter()
+                    .map(|phase| phase.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )));
         }
         if let Some(error) = active.nesting_error {
@@ -141,45 +152,43 @@ pub fn start() -> Result<ProbeSession, ProbeError> {
 
 #[must_use]
 pub struct PhaseGuard {
-    name: &'static str,
-    started: Option<Instant>,
-    depth: u32,
+    name: Option<&'static str>,
 }
 
 pub fn phase(name: &'static str) -> PhaseGuard {
     let mut slot = state().lock().unwrap();
     let Some(active) = slot.as_mut() else {
-        return PhaseGuard {
-            name,
-            started: None,
-            depth: 0,
-        };
+        return PhaseGuard { name: None };
     };
     let depth = u32::try_from(active.active_phases.len()).unwrap_or(u32::MAX);
-    active.active_phases.push(name.into());
-    PhaseGuard {
+    active.active_phases.push(ActivePhase {
         name,
-        started: Some(Instant::now()),
+        started: Instant::now(),
         depth,
-    }
+    });
+    PhaseGuard { name: Some(name) }
 }
 
 impl Drop for PhaseGuard {
     fn drop(&mut self) {
-        let Some(started) = self.started else {
+        let Some(name) = self.name else {
             return;
         };
         let mut slot = state().lock().unwrap();
         let Some(active) = slot.as_mut() else {
             return;
         };
-        if active.active_phases.pop().as_deref() != Some(self.name) {
-            active.nesting_error = Some(format!("probe phase nesting error at {}", self.name));
+        let Some(phase) = active.active_phases.pop() else {
+            active.nesting_error = Some(format!("probe phase nesting error at {name}"));
+            return;
+        };
+        if phase.name != name {
+            active.nesting_error = Some(format!("probe phase nesting error at {name}"));
         }
         active.phases.push(PhaseMeasurement {
-            name: self.name.into(),
-            duration_ns: nanos(started.elapsed()),
-            depth: self.depth,
+            name: name.into(),
+            duration_ns: nanos(phase.started.elapsed()),
+            depth: phase.depth,
             performed: true,
         });
     }

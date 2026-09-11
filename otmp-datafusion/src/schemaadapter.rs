@@ -29,6 +29,29 @@ impl OtmpAdapterFactory {
     }
 }
 
+pub(crate) fn binding_charge(schema: &OtmpSchema) -> Result<usize> {
+    fn field_count(items: &[OtmpField]) -> usize {
+        items
+            .iter()
+            .map(|field| {
+                let children = match &field.field_type {
+                    LogicalType::Struct { fields: children } => field_count(children),
+                    LogicalType::List { element } => field_count(std::slice::from_ref(element)),
+                    LogicalType::Map { key, value } => field_count(std::slice::from_ref(key))
+                        .saturating_add(field_count(std::slice::from_ref(value))),
+                    _ => 0,
+                };
+                1_usize.saturating_add(children)
+            })
+            .sum()
+    }
+    let encoded = otmp_protocol::canonical_json::to_vec(schema)
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+    Ok(512_usize
+        .saturating_add(encoded.len().saturating_mul(4))
+        .saturating_add(field_count(&schema.fields).saturating_mul(512)))
+}
+
 #[derive(Debug)]
 struct Adapter {
     columns: Vec<(String, Arc<dyn PhysicalExpr>)>,

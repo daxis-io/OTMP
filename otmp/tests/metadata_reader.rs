@@ -132,7 +132,7 @@ async fn metric_ranges_filter_before_descriptors_and_metric_reads() {
         .unwrap();
     let source = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(source.path(), b"metric-range-fixture").unwrap();
-    let files = [(0, 9), (100, 109)]
+    let mut files: Vec<_> = [(0, 9), (100, 109)]
         .into_iter()
         .map(|(lower, upper)| otmp::AppendFile {
             source_path: source.path().into(),
@@ -163,6 +163,39 @@ async fn metric_ranges_filter_before_descriptors_and_metric_reads() {
             )]),
         })
         .collect();
+    let sparse = |key: &str, metrics| otmp::AppendFile {
+        source_path: source.path().into(),
+        fingerprint: otmp::SourceFingerprint {
+            sha256: otmp_protocol::Sha256::digest(b"metric-range-fixture"),
+            length: 20,
+        },
+        format: otmp::FileFormat::Parquet,
+        record_count: 10,
+        schema_id: 1,
+        partition_spec_id: 0,
+        sort_order_id: 0,
+        partition_values: BTreeMap::new(),
+        metrics,
+        metadata: BTreeMap::from([(
+            "lower".into(),
+            otmp_protocol::CanonicalValue::String(key.into()),
+        )]),
+    };
+    files.push(sparse("missing", vec![]));
+    files.push(sparse(
+        "one-sided",
+        vec![otmp::FileMetric {
+            field_id: 1,
+            column_size_bytes: None,
+            value_count: None,
+            null_count: None,
+            nan_count: None,
+            distinct_count: None,
+            lower_bound: Some(otmp_protocol::TypedScalar::Int64(0)),
+            upper_bound: None,
+            metadata: BTreeMap::new(),
+        }],
+    ));
     table
         .append_files(&otmp::AppendRequest::new("ranges", files))
         .await
@@ -188,11 +221,12 @@ async fn metric_ranges_filter_before_descriptors_and_metric_reads() {
         )
         .await
         .unwrap();
-    assert_eq!(batch.files.len(), 1);
-    assert_eq!(
-        batch.files[0].metrics[0].lower_bound,
-        Some(otmp_protocol::TypedScalar::Int64(100))
-    );
+    assert_eq!(batch.files.len(), 3);
+    assert!(batch.files.iter().any(|file| {
+        file.metrics.first().is_some_and(|metric| {
+            metric.lower_bound == Some(otmp_protocol::TypedScalar::Int64(100))
+        })
+    }));
 
     let mismatched = reader
         .files_matching(
@@ -207,7 +241,7 @@ async fn metric_ranges_filter_before_descriptors_and_metric_reads() {
         )
         .await
         .unwrap();
-    assert_eq!(mismatched.files.len(), 2, "type mismatch must retain files");
+    assert_eq!(mismatched.files.len(), 4, "type mismatch must retain files");
 
     let impossible = reader
         .files_matching(
@@ -237,6 +271,19 @@ async fn metric_ranges_filter_before_descriptors_and_metric_reads() {
         panic!("cursor accepted a changed range set");
     };
     assert!(changed_range.to_string().contains("range set changed"));
+
+    let excessive = vec![
+        FileMetricRange::Int64 {
+            field_id: 1,
+            lower: Bound::Unbounded,
+            upper: Bound::Included(1),
+        };
+        4097
+    ];
+    assert!(matches!(
+        reader.files_matching(None, &[], &excessive, 256).await,
+        Err(RuntimeError::ResourceExhausted(_))
+    ));
 }
 
 async fn append_many(table: &Table<InMemoryObjectStore>, count: usize, key: &str, branch: &str) {

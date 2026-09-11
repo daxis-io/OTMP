@@ -287,7 +287,7 @@ pub(super) fn build_transaction_candidate<S: ObjectStore>(
     request: &TransactionRequest,
     logical_hash: Sha256,
 ) -> Result<Candidate<DurableResult>, RuntimeError> {
-    let reads_before = base.reader.statistics();
+    let reads_before = base.reader.writer_statistics();
     let writer = crate::cow_writer::CandidateWriter::from_pages(
         base.reader.image.clone(),
         tokio::runtime::Handle::try_current()
@@ -372,7 +372,11 @@ pub(super) fn build_transaction_candidate<S: ObjectStore>(
     }
     let checkpoint = image::finish_turso(writer, false)?;
     let candidate = finish_candidate(base, &commit, commit_uri, commit_bytes, checkpoint, result);
-    super::trace_writer_reads(reads_before, base.reader.statistics());
+    super::trace_writer_reads(
+        reads_before,
+        base.reader.writer_statistics(),
+        base.page_map_reads,
+    );
     candidate
 }
 fn validate_ref_name<'a>(name: &'a str, refs: &mut BTreeSet<&'a str>) -> Result<(), RuntimeError> {

@@ -252,7 +252,7 @@ fn ranged_historical_sql(range_count: usize) -> String {
     let cursor = snapshot + 1;
     let limit = snapshot + 2;
     format!(
-        "{} SELECT c.change_kind,f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,f.created_snapshot_id,f.created_version FROM otmp_snapshot_file_changes c LEFT JOIN otmp_files f ON f.file_id=c.file_id WHERE c.snapshot_id=?{snapshot} AND (?{cursor} IS NULL OR c.file_id>?{cursor}) AND {RANGE_REJECTION_SQL} ORDER BY c.file_id LIMIT ?{limit}",
+        "{} SELECT c.change_kind,f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,f.created_snapshot_id,f.created_version FROM otmp_snapshot_file_changes c LEFT JOIN otmp_files f ON f.file_id=c.file_id WHERE c.snapshot_id=?{snapshot} AND (?{cursor} IS NULL OR c.file_id>?{cursor}) AND (c.change_kind<>'add' OR {RANGE_REJECTION_SQL}) ORDER BY c.file_id LIMIT ?{limit}",
         range_cte(range_count)
     )
 }
@@ -759,6 +759,48 @@ mod tests {
             .expect("malformed membership must reach descriptor validation");
         let bytes: Vec<u8> = row.get(0).unwrap();
         assert!(super::id(&turso_core::Value::Blob(bytes)).is_err());
+    }
+
+    #[test]
+    fn ranged_historical_query_keeps_remove_rows() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!(
+                "../../../spec/OTMP-0.0.2-alpha-table-schema.sql"
+            ))
+            .unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 INSERT INTO otmp_files(file_id,file_kind,uri,file_format,file_size_bytes,record_count,schema_id,partition_spec_id,partition_values_cbor,partition_hash,data_sequence_number,file_sequence_number,created_snapshot_id,created_version)
+                 VALUES(X'01010101010101010101010101010101','data','data/remove.parquet','parquet',1,1,1,0,X'A0',zeroblob(32),0,1,X'02020202020202020202020202020202',1);
+                 INSERT INTO otmp_snapshot_file_changes(snapshot_id,file_id,change_kind)
+                 VALUES(X'02020202020202020202020202020202',X'01010101010101010101010101010101','remove');
+                 INSERT INTO otmp_file_metrics(file_id,field_id,ordered_bound_type,ordered_lower_i64,ordered_upper_i64,metadata_json)
+                 VALUES(X'01010101010101010101010101010101',1,'int64',0,1,'{}');",
+            )
+            .unwrap();
+        let mut statement = connection
+            .prepare(&super::ranged_historical_sql(1))
+            .unwrap();
+        let mut rows = statement
+            .query(rusqlite::params![
+                1_i64,
+                "int64",
+                50_i64,
+                1_i64,
+                rusqlite::types::Null,
+                1_i64,
+                vec![2_u8; 16],
+                rusqlite::types::Null,
+                256_i64,
+            ])
+            .unwrap();
+
+        assert_eq!(
+            rows.next().unwrap().unwrap().get::<_, String>(0).unwrap(),
+            "remove"
+        );
     }
 
     #[tokio::test]

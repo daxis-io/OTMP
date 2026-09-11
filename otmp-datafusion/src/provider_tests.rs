@@ -127,8 +127,8 @@ async fn open(
 }
 
 #[tokio::test]
-async fn replanning_with_one_provider_reuses_the_validated_file() {
-    let (_dir, table) = fixture(1).await;
+async fn replanning_with_one_provider_reuses_two_validated_files() {
+    let (_dir, table) = fixture(2).await;
     let provider = open(&table, false, 8).await;
     let context = SessionContext::new();
     let first = provider
@@ -136,7 +136,7 @@ async fn replanning_with_one_provider_reuses_the_validated_file() {
         .await
         .unwrap();
     let cold = provider.metrics();
-    assert_eq!(cold.parquet_requests, 3);
+    assert_eq!(cold.parquet_requests, 6);
     drop(first);
 
     let second = provider
@@ -146,8 +146,54 @@ async fn replanning_with_one_provider_reuses_the_validated_file() {
     let warm = provider.metrics();
     assert_eq!(warm.parquet_requests, cold.parquet_requests);
     assert_eq!(warm.parquet_bytes, cold.parquet_bytes);
-    assert_eq!(warm.validated_file_cache_hits, 1);
+    assert_eq!(warm.validated_file_cache_hits, 2);
     drop(second);
+    provider.footer_cache.assert_idle();
+}
+
+#[tokio::test]
+async fn concurrent_first_scans_share_a_fill_and_warm_deletion_fails_exact_reads() {
+    let (dir, table) = fixture(1).await;
+    let mut provider = open(&table, false, 8).await;
+    let uri = provider.reader.files(None, &[], 1).await.unwrap().files[0]
+        .file
+        .uri
+        .clone();
+    let gate = [
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    ];
+    provider.hooks.after_pin = Mutex::new(Some(gate.clone()));
+    let provider = Arc::new(provider);
+    let context = SessionContext::new();
+    let state = context.state();
+    let first = {
+        let provider = provider.clone();
+        let state = state.clone();
+        tokio::spawn(async move { provider.scan(&state, None, &[], None).await })
+    };
+    let second = {
+        let provider = provider.clone();
+        tokio::spawn(async move { provider.scan(&state, None, &[], None).await })
+    };
+    gate[0].notified().await;
+    gate[1].notify_one();
+    drop(first.await.unwrap().unwrap());
+    drop(second.await.unwrap().unwrap());
+    assert_eq!(provider.io.requests.load(Ordering::Relaxed), 3);
+
+    let plan = provider
+        .scan(&context.state(), None, &[], None)
+        .await
+        .unwrap();
+    assert_eq!(provider.io.requests.load(Ordering::Relaxed), 3);
+    assert_eq!(provider.metrics().validated_file_cache_hits, 1);
+    std::fs::remove_file(dir.path().join(uri.as_str())).unwrap();
+    assert!(
+        datafusion::physical_plan::collect(plan, context.task_ctx())
+            .await
+            .is_err()
+    );
     provider.footer_cache.assert_idle();
 }
 

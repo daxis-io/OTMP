@@ -486,6 +486,7 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
                     metadata.file_metadata().schema_descr(),
                     metadata.file_metadata().key_value_metadata(),
                 )?);
+                let binding_charge = crate::schemaadapter::binding_charge(&query)?;
                 let binding = crate::schemaadapter::OtmpAdapterFactory::new(query, schema)
                     .create(self.schema.clone(), physical.clone())?;
                 let object = bridge
@@ -496,7 +497,14 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
                 let footer_key =
                     bridge.footer_identity(&object_store::path::Path::from(uri.as_str()))?;
                 self.footer_cache
-                    .insert_validated(load_key, object, &footer_key, physical, binding)
+                    .insert_validated(
+                        load_key,
+                        object,
+                        &footer_key,
+                        physical,
+                        binding,
+                        binding_charge,
+                    )
                     .await
             })
             .await?;

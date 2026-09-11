@@ -22,10 +22,15 @@ pub(crate) struct Tree {
     max: u64,
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PageMapReadStatistics {
+    pub(crate) bytes: u64,
+    pub(crate) requests: u64,
+}
+
 pub(crate) struct ResolvedGeneration {
     pub checkpoint: Arc<StoredObject>,
     pub bytes: Arc<[u8]>,
-    pub tree: Option<Arc<Tree>>,
 }
 
 pub(crate) struct Artifact {
@@ -55,7 +60,7 @@ impl<S: ObjectStore> Table<S> {
     pub(crate) async fn load_page_tree(
         &self,
         generation: &Generation,
-    ) -> Result<Option<Arc<Tree>>, RuntimeError> {
+    ) -> Result<(Option<Arc<Tree>>, PageMapReadStatistics), RuntimeError> {
         let image = &generation.metadata_image;
         if image_root_hash(
             generation.table_id,
@@ -68,7 +73,8 @@ impl<S: ObjectStore> Table<S> {
         {
             return Err(corrupt("metadata image root mismatch"));
         }
-        Ok(if let Some(root) = &image.page_map {
+        let mut statistics = PageMapReadStatistics::default();
+        let tree = if let Some(root) = &image.page_map {
             Some(
                 self.load_tree(
                     root.reference(),
@@ -76,12 +82,14 @@ impl<S: ObjectStore> Table<S> {
                     0,
                     image.page_count.0,
                     &mut BTreeSet::new(),
+                    &mut statistics,
                 )
                 .await?,
             )
         } else {
             None
-        })
+        };
+        Ok((tree, statistics))
     }
 
     async fn verify_checkpoint_index_node(
@@ -185,6 +193,7 @@ impl<S: ObjectStore> Table<S> {
         lower: u64,
         upper: u64,
         seen: &mut BTreeSet<String>,
+        statistics: &mut PageMapReadStatistics,
     ) -> Result<Arc<Tree>, RuntimeError> {
         if level > 64
             || !seen.insert(reference.uri.as_str().to_owned())
@@ -197,6 +206,8 @@ impl<S: ObjectStore> Table<S> {
         let bytes = self
             .read_metadata(&object(&reference, PAGE_MAP_MEDIA_TYPE))
             .await?;
+        statistics.requests = statistics.requests.saturating_add(1);
+        statistics.bytes = statistics.bytes.saturating_add(bytes.bytes.len() as u64);
         let node = decode_page_map(&bytes.bytes)?;
         if node.level() != level {
             return Err(corrupt("page-map level mismatch"));
@@ -219,6 +230,7 @@ impl<S: ObjectStore> Table<S> {
                         previous,
                         entry.max_page,
                         seen,
+                        statistics,
                     ))
                     .await?;
                     if child.max != entry.max_page {
@@ -305,6 +317,7 @@ impl<S: ObjectStore> Table<S> {
             return Err(corrupt("empty metadata image"));
         }
         let tree = if let Some(root) = &image.page_map {
+            let mut statistics = PageMapReadStatistics::default();
             Some(
                 self.load_tree(
                     root.reference(),
@@ -312,6 +325,7 @@ impl<S: ObjectStore> Table<S> {
                     0,
                     image.page_count.0,
                     &mut BTreeSet::new(),
+                    &mut statistics,
                 )
                 .await?,
             )
@@ -406,7 +420,6 @@ impl<S: ObjectStore> Table<S> {
         Ok(ResolvedGeneration {
             checkpoint,
             bytes: bytes.into(),
-            tree,
         })
     }
 }
@@ -783,7 +796,14 @@ mod tests {
             .unwrap();
         assert!(
             Table::new(store)
-                .load_tree(reference, 1, 0, 256, &mut BTreeSet::new())
+                .load_tree(
+                    reference,
+                    1,
+                    0,
+                    256,
+                    &mut BTreeSet::new(),
+                    &mut PageMapReadStatistics::default(),
+                )
                 .await
                 .is_err()
         );

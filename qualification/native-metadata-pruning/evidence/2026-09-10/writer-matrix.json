@@ -1,5 +1,8 @@
 {
-  "source_base": "10ceea0d3543c2c288df09d6887f83820143e413",
+  "source_base": "6c33b49d98c668d23e77ffb70575995c3b26f893",
+  "source_status": "uncommitted review-repair candidate",
+  "source_diff_sha256": "1b60e5384633e7a7c4cd4d1baf2b531aa6d74e1ea6005fc71d62eac8edc319b9",
+  "observed_origin_main": "9a4e09baecf7c536618dd716b12377b7e0cda10f",
   "append": {
     "bytes": 1705,
     "sha256": "427cc3a1b8834cdfa1da1779a74885f40e3cc6f121f5827e5bf3a1ef4efda42c"
@@ -20,7 +23,9 @@
       "parent_sqlite_requests": 99,
       "parent_sqlite_pages": 297,
       "parent_sqlite_cache_hits": 470,
-      "elapsed_ns": 919409375,
+      "page_map_read_bytes": 33765,
+      "page_map_read_requests": 1,
+      "elapsed_ns": 129273458,
       "verified": true
     },
     {
@@ -36,7 +41,9 @@
       "parent_sqlite_requests": 130,
       "parent_sqlite_pages": 207,
       "parent_sqlite_cache_hits": 520,
-      "elapsed_ns": 677557917,
+      "page_map_read_bytes": 43412,
+      "page_map_read_requests": 3,
+      "elapsed_ns": 114773458,
       "verified": true
     },
     {
@@ -48,11 +55,13 @@
       "full_materializations": 0,
       "temporary_full_image_bytes": 0,
       "checkpoint_fallback": false,
-      "parent_sqlite_bytes": 2323634,
-      "parent_sqlite_requests": 489,
+      "parent_sqlite_bytes": 1647803,
+      "parent_sqlite_requests": 437,
       "parent_sqlite_pages": 409,
       "parent_sqlite_cache_hits": 1237,
-      "elapsed_ns": 1446926333,
+      "page_map_read_bytes": 1434448,
+      "page_map_read_requests": 82,
+      "elapsed_ns": 191321417,
       "verified": true
     }
   ],

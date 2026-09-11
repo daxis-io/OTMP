@@ -62,3 +62,10 @@ pub struct ReaderStatistics {
     pub cache_bytes: usize,
     pub peak_cache_bytes: usize,
 }
+
+#[derive(Clone, Copy)]
+pub(crate) struct WriterReadStatistics {
+    pub(crate) total: ReaderStatistics,
+    pub(crate) page_map_bytes: u64,
+    pub(crate) page_map_requests: u64,
+}

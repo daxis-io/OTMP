@@ -352,6 +352,9 @@ impl<S: ObjectStore> MetadataReader<S> {
     pub fn statistics(&self) -> ReaderStatistics {
         self.context.statistics()
     }
+    pub(crate) fn writer_statistics(&self) -> super::WriterReadStatistics {
+        self.context.writer_statistics()
+    }
     pub fn store(&self) -> &S {
         self.context.store()
     }

@@ -289,7 +289,6 @@ pub struct PinnedTable {
     generation: Generation,
     current_main: Option<Id>,
     _checkpoint: std::sync::Arc<StoredObject>,
-    page_tree: Option<std::sync::Arc<crate::physical::Tree>>,
     image: MaterializedImage,
 }
 
@@ -747,7 +746,6 @@ impl<S: ObjectStore> Table<S> {
             commit,
             generation,
             _checkpoint: physical.checkpoint,
-            page_tree: physical.tree,
             image,
         })
     }
@@ -913,8 +911,12 @@ impl<S: ObjectStore> Table<S> {
             ));
         }
         reader.head_version = head.version;
-        let page_tree = self.load_page_tree(&reader.generation).await?;
-        Ok(WritePin { reader, page_tree })
+        let (page_tree, page_map_reads) = self.load_page_tree(&reader.generation).await?;
+        Ok(WritePin {
+            reader,
+            page_tree,
+            page_map_reads,
+        })
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1239,45 +1241,26 @@ struct Candidate<R = AppendResult> {
 pub(crate) struct WritePin<S> {
     reader: crate::MetadataReader<S>,
     page_tree: Option<std::sync::Arc<crate::physical::Tree>>,
+    page_map_reads: crate::physical::PageMapReadStatistics,
 }
 
-trait CandidateBase {
-    fn head(&self) -> &Head;
-    fn generation(&self) -> &Generation;
-    fn page_tree(&self) -> Option<&std::sync::Arc<crate::physical::Tree>>;
-}
-
-impl CandidateBase for PinnedTable {
-    fn head(&self) -> &Head {
-        &self.head
-    }
-    fn generation(&self) -> &Generation {
-        &self.generation
-    }
-    fn page_tree(&self) -> Option<&std::sync::Arc<crate::physical::Tree>> {
-        self.page_tree.as_ref()
-    }
-}
-
-impl<S> CandidateBase for WritePin<S> {
-    fn head(&self) -> &Head {
-        &self.reader.head
-    }
-    fn generation(&self) -> &Generation {
-        &self.reader.generation
-    }
-    fn page_tree(&self) -> Option<&std::sync::Arc<crate::physical::Tree>> {
-        self.page_tree.as_ref()
-    }
-}
-
-fn trace_writer_reads(before: crate::ReaderStatistics, after: crate::ReaderStatistics) {
+fn trace_writer_reads(
+    before: crate::reader::WriterReadStatistics,
+    after: crate::reader::WriterReadStatistics,
+    pinned_page_map: crate::physical::PageMapReadStatistics,
+) {
+    let lazy_page_map_bytes = after.page_map_bytes.saturating_sub(before.page_map_bytes);
+    let lazy_page_map_requests = after
+        .page_map_requests
+        .saturating_sub(before.page_map_requests);
     tracing::info!(
         target: "otmp.writer",
-        parent_sqlite_bytes = after.bytes.saturating_sub(before.bytes),
-        parent_sqlite_requests = after.requests.saturating_sub(before.requests),
-        parent_sqlite_pages = after.pages.saturating_sub(before.pages),
-        parent_sqlite_cache_hits = after.cache_hits.saturating_sub(before.cache_hits),
+        parent_sqlite_bytes = after.total.bytes.saturating_sub(before.total.bytes).saturating_sub(lazy_page_map_bytes),
+        parent_sqlite_requests = after.total.requests.saturating_sub(before.total.requests).saturating_sub(lazy_page_map_requests),
+        parent_sqlite_pages = after.total.pages.saturating_sub(before.total.pages),
+        parent_sqlite_cache_hits = after.total.cache_hits.saturating_sub(before.total.cache_hits),
+        page_map_read_bytes = lazy_page_map_bytes.saturating_add(pinned_page_map.bytes),
+        page_map_read_requests = lazy_page_map_requests.saturating_add(pinned_page_map.requests),
         "writer parent-read summary"
     );
 }
@@ -1480,7 +1463,7 @@ fn build_candidate<S: ObjectStore>(
             })
         })
         .collect::<Result<Vec<_>, RuntimeError>>()?;
-    let reads_before = parent.reader.statistics();
+    let reads_before = parent.reader.writer_statistics();
     let checkpoint = image::turso_append_pages(
         parent.reader.image.clone(),
         tokio::runtime::Handle::try_current()
@@ -1515,13 +1498,17 @@ fn build_candidate<S: ObjectStore>(
         checkpoint,
         result,
     );
-    trace_writer_reads(reads_before, parent.reader.statistics());
+    trace_writer_reads(
+        reads_before,
+        parent.reader.writer_statistics(),
+        parent.page_map_reads,
+    );
     candidate
 }
 
 #[allow(clippy::too_many_lines)]
-fn finish_candidate<R>(
-    parent: &impl CandidateBase,
+fn finish_candidate<S: ObjectStore, R>(
+    parent: &WritePin<S>,
     commit: &SemanticCommit,
     commit_uri: RelativeUri,
     commit_bytes: Vec<u8>,
@@ -1533,7 +1520,7 @@ fn finish_candidate<R>(
     let commit_id = commit.commit_id;
     let created_at_ms = commit.created_at_ms.0;
     let commit_hash = object_hash(&commit_bytes);
-    let parent_head = parent.head();
+    let parent_head = &parent.reader.head;
     let candidate_length = checkpoint
         .page_count
         .checked_mul(u64::from(image::PAGE_SIZE))
@@ -1566,7 +1553,7 @@ fn finish_candidate<R>(
         image::validate_commit_projection(&checkpoint.path, commit)?;
     }
     let incremental = crate::physical::persist(
-        parent.page_tree(),
+        parent.page_tree.as_ref(),
         &checkpoint.changed_pages,
         checkpoint.page_count,
     )?;
@@ -1646,10 +1633,11 @@ fn finish_candidate<R>(
         )
     } else {
         (
-            parent.generation().metadata_image.checkpoint.clone(),
+            parent.reader.generation.metadata_image.checkpoint.clone(),
             incremental.root,
             parent
-                .generation()
+                .reader
+                .generation
                 .metadata_image
                 .checkpoint_page_index
                 .clone(),

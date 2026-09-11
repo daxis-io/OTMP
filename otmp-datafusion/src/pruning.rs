@@ -451,6 +451,107 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn lowers_every_ordered_type_operator_and_operand_order() {
+        use datafusion::logical_expr::{Expr, Operator};
+        use datafusion::prelude::{col, lit};
+        let schema = otmp_protocol::Schema {
+            schema_id: 1,
+            parent_schema_id: None,
+            fields: vec![
+                otmp_protocol::Field {
+                    field_id: 1,
+                    name: "i32".into(),
+                    required: false,
+                    field_type: otmp_protocol::LogicalType::Int32,
+                    doc: None,
+                    initial_default: None,
+                    write_default: None,
+                },
+                otmp_protocol::Field {
+                    field_id: 2,
+                    name: "i64".into(),
+                    required: false,
+                    field_type: otmp_protocol::LogicalType::Int64,
+                    doc: None,
+                    initial_default: None,
+                    write_default: None,
+                },
+                otmp_protocol::Field {
+                    field_id: 3,
+                    name: "day".into(),
+                    required: false,
+                    field_type: otmp_protocol::LogicalType::Date,
+                    doc: None,
+                    initial_default: None,
+                    write_default: None,
+                },
+            ],
+            identifier_field_ids: vec![],
+            doc: None,
+        };
+        let compare = |left: Expr, operator, right: Expr| match operator {
+            Operator::Lt => left.lt(right),
+            Operator::LtEq => left.lt_eq(right),
+            Operator::Gt => left.gt(right),
+            Operator::GtEq => left.gt_eq(right),
+            _ => unreachable!(),
+        };
+        let reverse = |operator| match operator {
+            Operator::Lt => Operator::Gt,
+            Operator::LtEq => Operator::GtEq,
+            Operator::Gt => Operator::Lt,
+            Operator::GtEq => Operator::LtEq,
+            _ => unreachable!(),
+        };
+        for (name, literal, field_id) in [
+            ("i32", lit(7_i32), 1),
+            ("i64", lit(7_i64), 2),
+            ("day", lit(ScalarValue::Date32(Some(7))), 3),
+        ] {
+            for operator in [Operator::Lt, Operator::LtEq, Operator::Gt, Operator::GtEq] {
+                for reversed in [false, true] {
+                    let expression = if reversed {
+                        compare(literal.clone(), operator, col(name))
+                    } else {
+                        compare(col(name), operator, literal.clone())
+                    };
+                    let normalized = if reversed {
+                        reverse(operator)
+                    } else {
+                        operator
+                    };
+                    let expected = comparison_bounds(normalized, 7_i64);
+                    let actual = lower_ranges(&[expression], &schema);
+                    let bounds = match &actual[0] {
+                        otmp::FileMetricRange::Int32 {
+                            field_id: id,
+                            lower,
+                            upper,
+                        }
+                        | otmp::FileMetricRange::Date {
+                            field_id: id,
+                            lower,
+                            upper,
+                        } => {
+                            assert_eq!(*id, field_id);
+                            ((*lower).map(i64::from), (*upper).map(i64::from))
+                        }
+                        otmp::FileMetricRange::Int64 {
+                            field_id: id,
+                            lower,
+                            upper,
+                        } => {
+                            assert_eq!(*id, field_id);
+                            (*lower, *upper)
+                        }
+                    };
+                    assert_eq!(bounds, expected, "{name} {operator:?} reversed={reversed}");
+                }
+            }
+        }
+    }
     #[test]
     fn scalar_preserves_exact_view_fixed_uuid_and_decimal_types() {
         assert!(matches!(

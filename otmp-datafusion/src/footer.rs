@@ -106,6 +106,47 @@ pub(crate) struct ValidatedFileEntry {
     _reservation: Reservation,
 }
 
+fn nested_field_count(fields: &datafusion::arrow::datatypes::Fields) -> usize {
+    use datafusion::arrow::datatypes::DataType;
+    fields
+        .iter()
+        .map(|field| {
+            let children = match field.data_type() {
+                DataType::Struct(fields) => nested_field_count(fields),
+                DataType::List(child)
+                | DataType::ListView(child)
+                | DataType::FixedSizeList(child, _)
+                | DataType::LargeList(child)
+                | DataType::LargeListView(child)
+                | DataType::Map(child, _) => nested_field_count(&vec![child.clone()].into()),
+                DataType::Union(fields, _) => {
+                    nested_field_count(&fields.iter().map(|(_, field)| field.clone()).collect())
+                }
+                DataType::RunEndEncoded(run_ends, values) => {
+                    nested_field_count(&vec![run_ends.clone(), values.clone()].into())
+                }
+                _ => 0,
+            };
+            1_usize.saturating_add(children)
+        })
+        .sum()
+}
+
+fn validated_entry_charge(
+    key: &ValidatedFileKey,
+    object: &crate::store::ImmutableObject,
+    physical: &datafusion::arrow::datatypes::Schema,
+    binding_charge: usize,
+) -> usize {
+    512_usize
+        .saturating_add(key.uri.len().saturating_mul(4))
+        .saturating_add(object.uri.as_str().len().saturating_mul(4))
+        .saturating_add(object.version.as_opaque().len().saturating_mul(4))
+        .saturating_add(format!("{physical:?}").len().saturating_mul(4))
+        .saturating_add(nested_field_count(physical.fields()).saturating_mul(512))
+        .saturating_add(binding_charge)
+}
+
 #[derive(Clone)]
 enum CacheKey {
     Footer(FooterIdentity),
@@ -493,6 +534,7 @@ impl FooterCache {
         footer_key: &FooterIdentity,
         physical: datafusion::arrow::datatypes::SchemaRef,
         binding: Arc<dyn PhysicalExprAdapter>,
+        binding_charge: usize,
     ) -> datafusion::error::Result<Arc<ValidatedFileEntry>> {
         let footer = self
             .entries
@@ -508,9 +550,7 @@ impl FooterCache {
                     "validated Parquet footer is absent from its cache".into(),
                 )
             })?;
-        let amount = 512usize
-            .saturating_add(key.uri.len() * 4)
-            .saturating_add(physical.fields().len() * 256);
+        let amount = validated_entry_charge(&key, &object, &physical, binding_charge);
         let reservation = self
             .admit(amount, None, 0)
             .await
@@ -1000,6 +1040,43 @@ impl Drop for LoadTrace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validated_charge_counts_nested_schema_and_object_version() {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use std::str::FromStr;
+        let key = ValidatedFileKey {
+            file_id: otmp_protocol::Id::from_str("018f31f4-2bbd-7e47-a8bd-e5c9b36d8b0a").unwrap(),
+            uri: "data/nested.parquet".into(),
+            sha256: None,
+            length: 1,
+            schema_id: 1,
+        };
+        let object = crate::store::ImmutableObject {
+            uri: key.uri.parse().unwrap(),
+            sha256: None,
+            length: 1,
+            version: otmp::ObjectVersion::from_opaque("provider-version-token"),
+        };
+        let flat = Schema::new(vec![Field::new("root", DataType::Int64, false)]);
+        let nested = Schema::new(vec![Field::new(
+            "root",
+            DataType::Struct(
+                (0..32)
+                    .map(|index| {
+                        Arc::new(Field::new(format!("child-{index}"), DataType::Int64, false))
+                    })
+                    .collect(),
+            ),
+            false,
+        )]);
+
+        let flat = super::validated_entry_charge(&key, &object, &flat, 0);
+        let nested = super::validated_entry_charge(&key, &object, &nested, 0);
+        assert!(nested >= flat + 32 * 512);
+        assert!(flat >= object.version.as_opaque().len() * 4);
+    }
+
     #[tokio::test]
     async fn optioned_reader_waits_for_a_peer_cached_preflight_at_its_sequential_budget() {
         let (measured, first_length) = real_factory(false, 4096).await;

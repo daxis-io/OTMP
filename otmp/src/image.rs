@@ -2097,6 +2097,113 @@ mod tests {
     }
 
     #[test]
+    fn metadata_projection_rejects_incomplete_branch_membership() {
+        let (image, mut commit) = static_append_projection();
+        let connection = Connection::open(&image.path).unwrap();
+        let snapshot_id: Vec<u8> = connection
+            .query_row(
+                "SELECT snapshot_id FROM otmp_refs WHERE ref_name='main'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let snapshot_id = id_from_blob(snapshot_id).unwrap();
+        let operation = crate::OperationRequest::CreateRef {
+            operation_id: "audit".into(),
+            name: "audit".into(),
+            ref_type: crate::RefType::Branch,
+            snapshot_id: Some(snapshot_id),
+        };
+        commit.operations = vec![canonical_json::to_value(&operation).unwrap()];
+        let writer = Writer::Sqlite(&connection);
+        crate::runtime::transactions::apply_operations(
+            &writer,
+            std::slice::from_ref(&operation),
+            commit.table_version.0,
+        )
+        .unwrap();
+        writer
+            .execute(
+                "DELETE FROM otmp_ref_live_files WHERE ref_name='audit'",
+                params![],
+            )
+            .unwrap();
+
+        let error = validate_metadata_projection(&writer, &commit).unwrap_err();
+        assert!(error.to_string().contains("metadata operation"), "{error}");
+    }
+
+    #[test]
+    fn metadata_projection_rejects_schema_provenance_divergence() {
+        for mutation in [
+            "UPDATE otmp_schemas SET created_version=0 WHERE schema_id=2",
+            "UPDATE otmp_field_ids SET created_version=0 WHERE field_id=2",
+            "UPDATE otmp_field_ids SET first_schema_id=1 WHERE field_id=2",
+        ] {
+            let (image, mut commit) = static_append_projection();
+            let connection = Connection::open(&image.path).unwrap();
+            let mut next = schema();
+            next.schema_id = 2;
+            next.parent_schema_id = Some(1);
+            next.fields.push(Field {
+                field_id: 2,
+                name: "note".into(),
+                required: false,
+                field_type: LogicalType::String,
+                doc: None,
+                initial_default: None,
+                write_default: None,
+            });
+            let operation = crate::OperationRequest::AddSchema {
+                operation_id: "schema".into(),
+                schema: next,
+            };
+            commit.operations = vec![canonical_json::to_value(&operation).unwrap()];
+            let writer = Writer::Sqlite(&connection);
+            crate::runtime::transactions::apply_operations(
+                &writer,
+                std::slice::from_ref(&operation),
+                commit.table_version.0,
+            )
+            .unwrap();
+            writer.execute(mutation, params![]).unwrap();
+
+            let error = validate_metadata_projection(&writer, &commit).unwrap_err();
+            assert!(error.to_string().contains("metadata operation"), "{error}");
+        }
+    }
+
+    #[test]
+    fn ref_creation_provenance_requires_a_branch() {
+        let (image, commit) = static_append_projection();
+        let connection = Connection::open(&image.path).unwrap();
+        let operation = crate::OperationRequest::CreateRef {
+            operation_id: "tag".into(),
+            name: "audit".into(),
+            ref_type: crate::RefType::Tag,
+            snapshot_id: None,
+        };
+        connection
+            .execute(
+                "UPDATE otmp_commits SET operation_summary_json=?1 WHERE table_version=?2",
+                params![
+                    canonical_string(&vec![canonical_json::to_value(&operation).unwrap()]).unwrap(),
+                    commit.table_version.0,
+                ],
+            )
+            .unwrap();
+
+        assert!(
+            !ref_creation_matches(
+                &Writer::Sqlite(&connection),
+                "audit",
+                i64::try_from(commit.table_version.0).unwrap(),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
     fn validation_rejects_v2_images() {
         let (checkpoint, table_id, commit_id, state, commit_hash) = genesis();
         let connection = Connection::open(&checkpoint.path).unwrap();
@@ -2779,27 +2886,45 @@ fn validate_metadata_projection(
                 ..
             } => {
                 let row = ref_row_with(transaction, &name)?;
-                let created: Option<i64> = transaction.query_optional(
-                    "SELECT created_version FROM otmp_refs WHERE ref_name=?1",
+                let versions: Option<(i64, i64)> = transaction.query_optional(
+                    "SELECT created_version,updated_version FROM otmp_refs WHERE ref_name=?1",
                     params![name],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
-                row == Some((ref_type, snapshot_id)) && created == Some(version)
+                row == Some((ref_type, snapshot_id))
+                    && versions == Some((version, version))
+                    && validate_ref_live_files(transaction, &name, ref_type, snapshot_id)?
             }
             OperationRequest::ReplaceRef {
                 name, snapshot_id, ..
             } => {
                 let row = ref_row_with(transaction, &name)?;
-                let updated: Option<i64> = transaction.query_optional(
-                    "SELECT updated_version FROM otmp_refs WHERE ref_name=?1",
+                let versions: Option<(i64, i64)> = transaction.query_optional(
+                    "SELECT created_version,updated_version FROM otmp_refs WHERE ref_name=?1",
                     params![name],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
-                row == Some((crate::RefType::Branch, Some(snapshot_id))) && updated == Some(version)
+                let versions_valid = match versions {
+                    Some((created, updated)) if created < version && updated == version => {
+                        ref_creation_matches(transaction, &name, created)?
+                    }
+                    _ => false,
+                };
+                row == Some((crate::RefType::Branch, Some(snapshot_id)))
+                    && versions_valid
+                    && validate_ref_live_files(
+                        transaction,
+                        &name,
+                        crate::RefType::Branch,
+                        Some(snapshot_id),
+                    )?
             }
-            OperationRequest::DropRef { name, .. } => ref_row_with(transaction, &name)?.is_none(),
+            OperationRequest::DropRef { name, .. } => {
+                ref_row_with(transaction, &name)?.is_none()
+                    && ref_live_file_count(transaction, &name)? == 0
+            }
             OperationRequest::AddSchema { schema, .. } => {
-                read_schema_with(transaction, schema.schema_id)? == schema
+                validate_added_schema(transaction, &schema, version)?
             }
             OperationRequest::SetCurrentSchema { schema_id, .. } => transaction.query_row(
                 "SELECT current_schema_id=?1 FROM otmp_meta",
@@ -2814,6 +2939,114 @@ fn validate_metadata_projection(
         }
     }
     Ok(())
+}
+
+fn ref_creation_matches(
+    transaction: &Writer<'_>,
+    name: &str,
+    created_version: i64,
+) -> Result<bool, RuntimeError> {
+    if name == "main" && created_version == 0 {
+        return Ok(true);
+    }
+    let operations: Option<String> = transaction.query_optional(
+        "SELECT operation_summary_json FROM otmp_commits WHERE table_version=?1",
+        params![created_version],
+        |row| row.get(0),
+    )?;
+    let Some(operations) = operations else {
+        return Ok(false);
+    };
+    let operations: Vec<CanonicalValue> =
+        canonical_json::from_slice_canonical(operations.as_bytes())?;
+    Ok(operations.iter().any(|operation| {
+        matches!(operation, CanonicalValue::Object(fields)
+            if matches!(fields.get("type"), Some(CanonicalValue::String(kind)) if kind == "create_ref")
+                && matches!(fields.get("ref"), Some(CanonicalValue::String(reference)) if reference == name)
+                && matches!(fields.get("ref_type"), Some(CanonicalValue::String(kind)) if kind == "branch"))
+    }))
+}
+
+fn ref_live_file_count(transaction: &Writer<'_>, name: &str) -> Result<i64, RuntimeError> {
+    transaction.query_row(
+        "SELECT count(*) FROM otmp_ref_live_files WHERE ref_name=?1",
+        params![name],
+        |row| row.get(0),
+    )
+}
+
+fn validate_ref_live_files(
+    transaction: &Writer<'_>,
+    name: &str,
+    ref_type: crate::RefType,
+    snapshot: Option<Id>,
+) -> Result<bool, RuntimeError> {
+    if ref_type == crate::RefType::Tag {
+        return Ok(ref_live_file_count(transaction, name)? == 0);
+    }
+    let mut expected_total = 0_i64;
+    for snapshot_id in transaction.ancestry(snapshot)? {
+        let expected: i64 = transaction.query_row(
+            "SELECT count(*) FROM otmp_snapshot_file_changes WHERE snapshot_id=?1 AND change_kind='add'",
+            params![snapshot_id.as_bytes().as_slice()],
+            |row| row.get(0),
+        )?;
+        let projected: i64 = transaction.query_row(
+            "SELECT count(*) FROM otmp_ref_live_files rf JOIN otmp_snapshot_file_changes c ON c.file_id=rf.file_id AND c.snapshot_id=rf.added_snapshot_id JOIN otmp_snapshots s ON s.snapshot_id=c.snapshot_id WHERE rf.ref_name=?1 AND c.snapshot_id=?2 AND c.change_kind='add' AND rf.data_sequence_number=s.sequence_number AND rf.file_sequence_number=s.sequence_number",
+            params![name, snapshot_id.as_bytes().as_slice()],
+            |row| row.get(0),
+        )?;
+        if projected != expected {
+            return Ok(false);
+        }
+        expected_total = expected_total.checked_add(expected).ok_or_else(|| {
+            RuntimeError::ResourceExhausted("branch membership count overflow".into())
+        })?;
+    }
+    Ok(ref_live_file_count(transaction, name)? == expected_total)
+}
+
+fn validate_added_schema(
+    transaction: &Writer<'_>,
+    schema: &Schema,
+    version: i64,
+) -> Result<bool, RuntimeError> {
+    if read_schema_with(transaction, schema.schema_id)? != *schema {
+        return Ok(false);
+    }
+    let created: i64 = transaction.query_row(
+        "SELECT created_version FROM otmp_schemas WHERE schema_id=?1",
+        params![schema.schema_id],
+        |row| row.get(0),
+    )?;
+    if created != version {
+        return Ok(false);
+    }
+    let mut expected = BTreeSet::new();
+    for field in &schema.fields {
+        collect_field_ids(field, &mut expected);
+    }
+    if let Some(parent_id) = schema.parent_schema_id {
+        let parent = read_schema_with(transaction, parent_id)?;
+        for field in &parent.fields {
+            let mut inherited = BTreeSet::new();
+            collect_field_ids(field, &mut inherited);
+            expected.retain(|id| !inherited.contains(id));
+        }
+    }
+    let projected = transaction
+        .query_all(
+            "SELECT field_id,created_version FROM otmp_field_ids WHERE first_schema_id=?1 ORDER BY field_id",
+            params![schema.schema_id],
+            4096,
+            |row| Ok((row.get::<u32>(0)?, row.get::<i64>(1)?)),
+        )?
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    Ok(projected.len() == expected.len()
+        && expected
+            .iter()
+            .all(|field_id| projected.get(field_id) == Some(&version)))
 }
 
 fn ref_row_with(

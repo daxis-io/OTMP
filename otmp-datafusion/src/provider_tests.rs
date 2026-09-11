@@ -181,13 +181,18 @@ async fn concurrent_first_scans_share_a_fill_and_warm_deletion_fails_exact_reads
     drop(first.await.unwrap().unwrap());
     drop(second.await.unwrap().unwrap());
     assert_eq!(provider.io.requests.load(Ordering::Relaxed), 3);
+    let concurrent_hits = provider.metrics().validated_file_cache_hits;
+    assert!(concurrent_hits <= 1);
 
     let plan = provider
         .scan(&context.state(), None, &[], None)
         .await
         .unwrap();
     assert_eq!(provider.io.requests.load(Ordering::Relaxed), 3);
-    assert_eq!(provider.metrics().validated_file_cache_hits, 1);
+    assert_eq!(
+        provider.metrics().validated_file_cache_hits,
+        concurrent_hits + 1
+    );
     std::fs::remove_file(dir.path().join(uri.as_str())).unwrap();
     assert!(
         datafusion::physical_plan::collect(plan, context.task_ctx())

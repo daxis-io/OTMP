@@ -1,0 +1,464 @@
+{
+  "expected_samples": 160,
+  "successful_samples": 159,
+  "failed_samples": 1,
+  "cases": [
+    {
+      "count": 20,
+      "min_ns": 39935375,
+      "p50_ns": 116713500,
+      "p95_ns": 240918083,
+      "max_ns": 273426459,
+      "failures": 0,
+      "property_bytes": 0,
+      "mode": "fresh",
+      "logical_image_bytes": 266240,
+      "phases": {
+        "parent_pin": {
+          "count": 20,
+          "min_ns": 4175750,
+          "p50_ns": 4443875,
+          "p95_ns": 9616167,
+          "max_ns": 28116000
+        },
+        "idempotency": {
+          "count": 20,
+          "min_ns": 318917,
+          "p50_ns": 357875,
+          "p95_ns": 471166,
+          "max_ns": 7024292
+        },
+        "candidate_build": {
+          "count": 20,
+          "min_ns": 3673875,
+          "p50_ns": 4058083,
+          "p95_ns": 7953333,
+          "max_ns": 26671000
+        },
+        "immutable_publication": {
+          "count": 20,
+          "min_ns": 22043042,
+          "p50_ns": 43265083,
+          "p95_ns": 221164208,
+          "max_ns": 253903000
+        },
+        "head_cas": {
+          "count": 20,
+          "min_ns": 7917292,
+          "p50_ns": 8949667,
+          "p95_ns": 10119250,
+          "max_ns": 13993958
+        }
+      }
+    },
+    {
+      "count": 20,
+      "min_ns": 37124250,
+      "p50_ns": 189114416,
+      "p95_ns": 269426958,
+      "max_ns": 355807583,
+      "failures": 0,
+      "property_bytes": 0,
+      "mode": "pre_pinned",
+      "logical_image_bytes": 266240,
+      "phases": {
+        "parent_pin": {
+          "count": 20,
+          "min_ns": 0,
+          "p50_ns": 0,
+          "p95_ns": 0,
+          "max_ns": 0
+        },
+        "idempotency": {
+          "count": 20,
+          "min_ns": 311917,
+          "p50_ns": 330958,
+          "p95_ns": 406208,
+          "max_ns": 825667
+        },
+        "candidate_build": {
+          "count": 20,
+          "min_ns": 3523625,
+          "p50_ns": 4033500,
+          "p95_ns": 6400625,
+          "max_ns": 29273834
+        },
+        "immutable_publication": {
+          "count": 20,
+          "min_ns": 23156459,
+          "p50_ns": 176204000,
+          "p95_ns": 254820750,
+          "max_ns": 336183542
+        },
+        "head_cas": {
+          "count": 20,
+          "min_ns": 7895916,
+          "p50_ns": 9521625,
+          "p95_ns": 13012333,
+          "max_ns": 14111208
+        }
+      }
+    },
+    {
+      "count": 20,
+      "min_ns": 42496042,
+      "p50_ns": 175109833,
+      "p95_ns": 219838250,
+      "max_ns": 284493542,
+      "failures": 0,
+      "property_bytes": 131072,
+      "mode": "fresh",
+      "logical_image_bytes": 528384,
+      "phases": {
+        "parent_pin": {
+          "count": 20,
+          "min_ns": 6152667,
+          "p50_ns": 6400209,
+          "p95_ns": 9553334,
+          "max_ns": 12084166
+        },
+        "idempotency": {
+          "count": 20,
+          "min_ns": 302458,
+          "p50_ns": 355083,
+          "p95_ns": 436625,
+          "max_ns": 568250
+        },
+        "candidate_build": {
+          "count": 20,
+          "min_ns": 3822625,
+          "p50_ns": 4129834,
+          "p95_ns": 4432083,
+          "max_ns": 4796125
+        },
+        "immutable_publication": {
+          "count": 20,
+          "min_ns": 23499000,
+          "p50_ns": 155121708,
+          "p95_ns": 200019041,
+          "max_ns": 263879625
+        },
+        "head_cas": {
+          "count": 20,
+          "min_ns": 7817500,
+          "p50_ns": 9866958,
+          "p95_ns": 9961042,
+          "max_ns": 9968875
+        }
+      }
+    },
+    {
+      "count": 20,
+      "min_ns": 35578708,
+      "p50_ns": 161067500,
+      "p95_ns": 219598875,
+      "max_ns": 232330042,
+      "failures": 0,
+      "property_bytes": 131072,
+      "mode": "pre_pinned",
+      "logical_image_bytes": 528384,
+      "phases": {
+        "parent_pin": {
+          "count": 20,
+          "min_ns": 0,
+          "p50_ns": 0,
+          "p95_ns": 0,
+          "max_ns": 0
+        },
+        "idempotency": {
+          "count": 20,
+          "min_ns": 311000,
+          "p50_ns": 351041,
+          "p95_ns": 981125,
+          "max_ns": 8943292
+        },
+        "candidate_build": {
+          "count": 20,
+          "min_ns": 3777417,
+          "p50_ns": 4111375,
+          "p95_ns": 4630833,
+          "max_ns": 32362750
+        },
+        "immutable_publication": {
+          "count": 20,
+          "min_ns": 21779167,
+          "p50_ns": 146600333,
+          "p95_ns": 197721459,
+          "max_ns": 217968125
+        },
+        "head_cas": {
+          "count": 20,
+          "min_ns": 7826417,
+          "p50_ns": 8981542,
+          "p95_ns": 10306292,
+          "max_ns": 14089416
+        }
+      }
+    },
+    {
+      "count": 20,
+      "min_ns": 60980583,
+      "p50_ns": 119297709,
+      "p95_ns": 193476875,
+      "max_ns": 235587125,
+      "failures": 0,
+      "property_bytes": 2097152,
+      "mode": "fresh",
+      "logical_image_bytes": 4460544,
+      "phases": {
+        "parent_pin": {
+          "count": 20,
+          "min_ns": 21732375,
+          "p50_ns": 22060625,
+          "p95_ns": 25044500,
+          "max_ns": 39175834
+        },
+        "idempotency": {
+          "count": 20,
+          "min_ns": 316167,
+          "p50_ns": 371625,
+          "p95_ns": 508125,
+          "max_ns": 6305042
+        },
+        "candidate_build": {
+          "count": 20,
+          "min_ns": 4632625,
+          "p50_ns": 5232750,
+          "p95_ns": 5755584,
+          "max_ns": 31574459
+        },
+        "immutable_publication": {
+          "count": 20,
+          "min_ns": 24020333,
+          "p50_ns": 54271334,
+          "p95_ns": 155237208,
+          "max_ns": 195192042
+        },
+        "head_cas": {
+          "count": 20,
+          "min_ns": 7877125,
+          "p50_ns": 8991875,
+          "p95_ns": 11083083,
+          "max_ns": 13850792
+        }
+      }
+    },
+    {
+      "count": 20,
+      "min_ns": 40437834,
+      "p50_ns": 70921000,
+      "p95_ns": 119251000,
+      "max_ns": 164232459,
+      "failures": 0,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned",
+      "logical_image_bytes": 4460544,
+      "phases": {
+        "parent_pin": {
+          "count": 20,
+          "min_ns": 0,
+          "p50_ns": 0,
+          "p95_ns": 0,
+          "max_ns": 0
+        },
+        "idempotency": {
+          "count": 20,
+          "min_ns": 320375,
+          "p50_ns": 384417,
+          "p95_ns": 571584,
+          "max_ns": 6704875
+        },
+        "candidate_build": {
+          "count": 20,
+          "min_ns": 4835750,
+          "p50_ns": 5282708,
+          "p95_ns": 13892625,
+          "max_ns": 31230291
+        },
+        "immutable_publication": {
+          "count": 20,
+          "min_ns": 25806792,
+          "p50_ns": 39251000,
+          "p95_ns": 104389625,
+          "max_ns": 149021708
+        },
+        "head_cas": {
+          "count": 20,
+          "min_ns": 7911833,
+          "p50_ns": 8909583,
+          "p95_ns": 9969334,
+          "max_ns": 14098166
+        }
+      }
+    },
+    {
+      "count": 20,
+      "min_ns": 192508708,
+      "p50_ns": 206840708,
+      "p95_ns": 310519334,
+      "max_ns": 391775542,
+      "failures": 0,
+      "property_bytes": 16777216,
+      "mode": "fresh",
+      "logical_image_bytes": 33853440,
+      "phases": {
+        "parent_pin": {
+          "count": 20,
+          "min_ns": 141767417,
+          "p50_ns": 143653375,
+          "p95_ns": 199671250,
+          "max_ns": 226644792
+        },
+        "idempotency": {
+          "count": 20,
+          "min_ns": 304958,
+          "p50_ns": 426958,
+          "p95_ns": 4752500,
+          "max_ns": 9111083
+        },
+        "candidate_build": {
+          "count": 20,
+          "min_ns": 12158875,
+          "p50_ns": 13347625,
+          "p95_ns": 50971750,
+          "max_ns": 79766750
+        },
+        "immutable_publication": {
+          "count": 20,
+          "min_ns": 27673542,
+          "p50_ns": 37551708,
+          "p95_ns": 59845000,
+          "max_ns": 67038209
+        },
+        "head_cas": {
+          "count": 20,
+          "min_ns": 7883084,
+          "p50_ns": 9011667,
+          "p95_ns": 11868708,
+          "max_ns": 14878625
+        }
+      }
+    },
+    {
+      "count": 19,
+      "min_ns": 50739584,
+      "p50_ns": 64866791,
+      "p95_ns": 118676334,
+      "max_ns": 118676334,
+      "failures": 1,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned",
+      "logical_image_bytes": 33853440,
+      "phases": {
+        "parent_pin": {
+          "count": 19,
+          "min_ns": 0,
+          "p50_ns": 0,
+          "p95_ns": 0,
+          "max_ns": 0
+        },
+        "idempotency": {
+          "count": 19,
+          "min_ns": 328334,
+          "p50_ns": 403167,
+          "p95_ns": 8967292,
+          "max_ns": 8967292
+        },
+        "candidate_build": {
+          "count": 19,
+          "min_ns": 12907750,
+          "p50_ns": 13675541,
+          "p95_ns": 57595167,
+          "max_ns": 57595167
+        },
+        "immutable_publication": {
+          "count": 19,
+          "min_ns": 28249917,
+          "p50_ns": 37520458,
+          "p95_ns": 68220167,
+          "max_ns": 68220167
+        },
+        "head_cas": {
+          "count": 19,
+          "min_ns": 7879917,
+          "p50_ns": 8927833,
+          "p95_ns": 13026875,
+          "max_ns": 13026875
+        }
+      }
+    }
+  ],
+  "scaling": {
+    "modes": {
+      "fresh": {
+        "large_minus_small_p50_ns": {
+          "parent_pin": 139209500,
+          "idempotency": 69083,
+          "candidate_build": 9289542,
+          "immutable_publication": -5713375,
+          "head_cas": 62000
+        },
+        "ranked": [
+          {
+            "phase": "parent_pin",
+            "delta_ns": 139209500
+          },
+          {
+            "phase": "candidate_build",
+            "delta_ns": 9289542
+          },
+          {
+            "phase": "idempotency",
+            "delta_ns": 69083
+          },
+          {
+            "phase": "head_cas",
+            "delta_ns": 62000
+          },
+          {
+            "phase": "immutable_publication",
+            "delta_ns": -5713375
+          }
+        ],
+        "positive_phase_delta_ns": 148630125
+      },
+      "pre_pinned": {
+        "large_minus_small_p50_ns": {
+          "parent_pin": 0,
+          "idempotency": 72209,
+          "candidate_build": 9642041,
+          "immutable_publication": -138683542,
+          "head_cas": -593792
+        },
+        "ranked": [
+          {
+            "phase": "candidate_build",
+            "delta_ns": 9642041
+          },
+          {
+            "phase": "idempotency",
+            "delta_ns": 72209
+          },
+          {
+            "phase": "parent_pin",
+            "delta_ns": 0
+          },
+          {
+            "phase": "head_cas",
+            "delta_ns": -593792
+          },
+          {
+            "phase": "immutable_publication",
+            "delta_ns": -138683542
+          }
+        ],
+        "positive_phase_delta_ns": 9714250
+      }
+    },
+    "classification": {
+      "kind": "distributed",
+      "phase": null
+    }
+  },
+  "recommendation": "Treat write scaling as distributed; do not optimize one phase until a follow-up profile identifies a stable shared leader."
+}

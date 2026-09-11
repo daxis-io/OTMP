@@ -49,6 +49,8 @@ impl std::error::Error for ProbeError {}
 
 struct ActiveSession {
     started: Instant,
+    last_top_end: Option<Instant>,
+    last_top_phase: Option<usize>,
     active_phases: Vec<ActivePhase>,
     phases: Vec<PhaseMeasurement>,
     counters: BTreeMap<String, u64>,
@@ -75,7 +77,8 @@ pub struct ProbeSession {
 impl ProbeSession {
     pub fn finish(mut self) -> Result<ProbeReport, ProbeError> {
         let mut slot = state().lock().unwrap();
-        let active = slot
+        let finished_at = Instant::now();
+        let mut active = slot
             .take()
             .ok_or_else(|| ProbeError("probe session is not active".into()))?;
         self.finished = true;
@@ -93,8 +96,15 @@ impl ProbeSession {
         if let Some(error) = active.nesting_error {
             return Err(ProbeError(error));
         }
+        if let (Some(last_top_end), Some(last_top_phase)) =
+            (active.last_top_end, active.last_top_phase)
+        {
+            active.phases[last_top_phase].duration_ns = active.phases[last_top_phase]
+                .duration_ns
+                .saturating_add(nanos(finished_at.duration_since(last_top_end)));
+        }
         Ok(ProbeReport {
-            acknowledged_latency_ns: nanos(active.started.elapsed()),
+            acknowledged_latency_ns: nanos(finished_at.duration_since(active.started)),
             phases: active.phases,
             counters: active.counters,
             object_store: active.object_store,
@@ -141,6 +151,8 @@ pub fn start() -> Result<ProbeSession, ProbeError> {
     .collect();
     *slot = Some(ActiveSession {
         started: Instant::now(),
+        last_top_end: None,
+        last_top_phase: None,
         active_phases: Vec::new(),
         phases: Vec::new(),
         counters,
@@ -161,9 +173,14 @@ pub fn phase(name: &'static str) -> PhaseGuard {
         return PhaseGuard { name: None };
     };
     let depth = u32::try_from(active.active_phases.len()).unwrap_or(u32::MAX);
+    let now = Instant::now();
     active.active_phases.push(ActivePhase {
         name,
-        started: Instant::now(),
+        started: if depth == 0 {
+            active.last_top_end.unwrap_or(active.started)
+        } else {
+            now
+        },
         depth,
     });
     PhaseGuard { name: Some(name) }
@@ -185,12 +202,18 @@ impl Drop for PhaseGuard {
         if phase.name != name {
             active.nesting_error = Some(format!("probe phase nesting error at {name}"));
         }
+        let ended = Instant::now();
+        let measurement = active.phases.len();
         active.phases.push(PhaseMeasurement {
             name: name.into(),
-            duration_ns: nanos(phase.started.elapsed()),
+            duration_ns: nanos(ended.duration_since(phase.started)),
             depth: phase.depth,
             performed: true,
         });
+        if phase.depth == 0 {
+            active.last_top_end = Some(ended);
+            active.last_top_phase = Some(measurement);
+        }
     }
 }
 

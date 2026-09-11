@@ -276,6 +276,19 @@ impl ObjectStore for FailingArtifactStore {
         self.inner.read(key).await
     }
 
+    async fn stat(&self, key: &RelativeUri) -> Result<otmp::ObjectMetadata, StorageError> {
+        self.inner.stat(key).await
+    }
+
+    async fn read_range(
+        &self,
+        key: &RelativeUri,
+        range: std::ops::Range<u64>,
+        expected: &otmp::ObjectMetadata,
+    ) -> Result<otmp::StoredRange, StorageError> {
+        self.inner.read_range(key, range, expected).await
+    }
+
     async fn create_from_reader(
         &self,
         key: &RelativeUri,
@@ -364,6 +377,19 @@ impl TwoWriterStore {
 impl ObjectStore for TwoWriterStore {
     async fn read(&self, key: &RelativeUri) -> Result<otmp::storage::StoredObject, StorageError> {
         self.inner.read(key).await
+    }
+
+    async fn stat(&self, key: &RelativeUri) -> Result<otmp::ObjectMetadata, StorageError> {
+        self.inner.stat(key).await
+    }
+
+    async fn read_range(
+        &self,
+        key: &RelativeUri,
+        range: std::ops::Range<u64>,
+        expected: &otmp::ObjectMetadata,
+    ) -> Result<otmp::StoredRange, StorageError> {
+        self.inner.read_range(key, range, expected).await
     }
 
     async fn create_from_reader(
@@ -593,6 +619,19 @@ impl PauseAfterDataCreateStore {
 impl ObjectStore for PauseAfterDataCreateStore {
     async fn read(&self, key: &RelativeUri) -> Result<otmp::storage::StoredObject, StorageError> {
         self.inner.read(key).await
+    }
+
+    async fn stat(&self, key: &RelativeUri) -> Result<otmp::ObjectMetadata, StorageError> {
+        self.inner.stat(key).await
+    }
+
+    async fn read_range(
+        &self,
+        key: &RelativeUri,
+        range: std::ops::Range<u64>,
+        expected: &otmp::ObjectMetadata,
+    ) -> Result<otmp::StoredRange, StorageError> {
+        self.inner.read_range(key, range, expected).await
     }
 
     async fn create_from_reader(

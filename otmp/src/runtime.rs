@@ -290,7 +290,6 @@ pub struct PinnedTable {
     current_main: Option<Id>,
     _checkpoint: std::sync::Arc<StoredObject>,
     page_tree: Option<std::sync::Arc<crate::physical::Tree>>,
-    resolved: std::sync::Arc<[u8]>,
     image: MaterializedImage,
 }
 
@@ -304,6 +303,26 @@ impl PinnedTable {
             semantic_state_sha256: self.head.semantic_state_sha256,
             current_snapshot_id: self.current_main,
         }
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "write-latency-qualification")]
+    pub fn qualification_property(
+        &self,
+        key: &str,
+    ) -> Result<Option<CanonicalValue>, RuntimeError> {
+        use rusqlite::OptionalExtension;
+        let connection = image::open_readonly(&self.image.path)?;
+        let value = connection
+            .query_row(
+                "SELECT value_json FROM otmp_properties WHERE property_key=?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        value
+            .map(|value| canonical_json::parse_canonical(value.as_bytes()).map_err(Into::into))
+            .transpose()
     }
 
     pub fn files(&self, reference: &str) -> Result<Vec<LiveFile>, RuntimeError> {
@@ -370,26 +389,6 @@ impl PinnedTable {
             })
         })
         .collect()
-    }
-
-    #[doc(hidden)]
-    #[cfg(feature = "write-latency-qualification")]
-    pub fn qualification_property(
-        &self,
-        key: &str,
-    ) -> Result<Option<CanonicalValue>, RuntimeError> {
-        use rusqlite::OptionalExtension;
-        let connection = image::open_readonly(&self.image.path)?;
-        let value = connection
-            .query_row(
-                "SELECT value_json FROM otmp_properties WHERE property_key=?1",
-                [key],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        value
-            .map(|value| canonical_json::parse_canonical(value.as_bytes()).map_err(Into::into))
-            .transpose()
     }
 }
 
@@ -686,8 +685,6 @@ impl<S: ObjectStore> Table<S> {
         commit: SemanticCommit,
         generation: Generation,
     ) -> Result<PinnedTable, RuntimeError> {
-        #[cfg(feature = "write-latency-qualification")]
-        let _parent_validation = crate::write_latency_qualification::phase("parent_validation");
         Self::validate_head_features(&head)?;
         commit.validate_runtime_profile()?;
         if commit.table_id != head.table_id
@@ -720,16 +717,7 @@ impl<S: ObjectStore> Table<S> {
             ));
         }
         let physical = self.resolve_generation(&generation).await?;
-        #[cfg(feature = "write-latency-qualification")]
-        crate::write_latency_qualification::add_bytes(
-            "parent_logical_bytes",
-            physical.bytes.len() as u64,
-        );
-        let image = {
-            #[cfg(feature = "write-latency-qualification")]
-            let _phase = crate::write_latency_qualification::phase("logical_image_materialization");
-            image::materialize(&physical.bytes)?
-        };
+        let image = image::materialize(&physical.bytes)?;
         let reader_features_json = canonical_text(&head.required_reader_features)?;
         let writer_features_json = canonical_text(&head.required_writer_features)?;
         image::validate(
@@ -758,7 +746,6 @@ impl<S: ObjectStore> Table<S> {
             head,
             commit,
             generation,
-            resolved: physical.bytes,
             _checkpoint: physical.checkpoint,
             page_tree: physical.tree,
             image,
@@ -822,20 +809,29 @@ impl<S: ObjectStore> Table<S> {
         &self,
         request: &AppendRequest,
     ) -> Result<AppendResult, RuntimeError> {
+        Box::pin(self.append_files_inner(request)).await
+    }
+
+    async fn append_files_inner(
+        &self,
+        request: &AppendRequest,
+    ) -> Result<AppendResult, RuntimeError> {
         let logical = logical_intent(request)?;
         let logical_hash = intent_hash(&logical);
-        let first_pin = self.pin().await?;
-        if let Some(result) = check_idempotency(&first_pin, &request.idempotency_key, logical_hash)?
+        let first_pin = self.write_pin(&request.target_ref).await?;
+        if let Some((result, _)) =
+            replay_write(&first_pin, &request.idempotency_key, logical_hash).await?
         {
             return Ok(result);
         }
-        validate_request(request, &first_pin)?;
+        validate_request_for_write(request, &first_pin).await?;
+        let base_tip = first_pin.reader.ref_row(&request.target_ref).await?;
+        let base_version = first_pin.reader.head.table_version.0;
+        let table_id = first_pin.reader.head.table_id;
+        drop(first_pin);
         let mut staged = Vec::with_capacity(request.files.len());
         for (ordinal, file) in request.files.iter().enumerate() {
-            match self
-                .stage_file(first_pin.head.table_id, ordinal, file)
-                .await
-            {
+            match self.stage_file(table_id, ordinal, file).await {
                 Ok(value) => staged.push(value),
                 Err(error) => {
                     cleanup(&self.store, &staged).await;
@@ -843,38 +839,20 @@ impl<S: ObjectStore> Table<S> {
                 }
             }
         }
-        let second_pin = match self.pin().await {
-            Ok(pin) => pin,
-            Err(error) => {
-                cleanup(&self.store, &staged).await;
-                return Err(error);
-            }
-        };
-        if let Some(result) =
-            check_idempotency(&second_pin, &request.idempotency_key, logical_hash)?
-        {
+        let result = self
+            .publish_append_transaction(
+                request,
+                &staged,
+                logical_hash,
+                table_id,
+                base_tip,
+                base_version,
+            )
+            .await;
+        if result.is_err() {
             cleanup(&self.store, &staged).await;
-            return Ok(result);
         }
-        let base_tip = transactions::ref_row(
-            &image::open_readonly(&first_pin.image.path)?,
-            &request.target_ref,
-        )?;
-        if let Err(error) = history::validate_append_rebase(
-            &second_pin,
-            &request.target_ref,
-            base_tip,
-            first_pin.head.table_version.0,
-        ) {
-            cleanup(&self.store, &staged).await;
-            return Err(error);
-        }
-        if let Err(error) = validate_request(request, &second_pin) {
-            cleanup(&self.store, &staged).await;
-            return Err(error);
-        }
-        self.commit_staged_from_base(request, &staged, &first_pin)
-            .await
+        result
     }
 
     pub async fn commit_staged_files(
@@ -882,74 +860,247 @@ impl<S: ObjectStore> Table<S> {
         request: &AppendRequest,
         staged: &[VerifiedStagedFile],
     ) -> Result<AppendResult, RuntimeError> {
-        let pinned = self.pin().await?;
-        self.commit_staged_from_base(request, staged, &pinned).await
+        Box::pin(self.commit_staged_files_inner(request, staged)).await
     }
 
-    async fn commit_staged_from_base(
+    async fn commit_staged_files_inner(
         &self,
         request: &AppendRequest,
         staged: &[VerifiedStagedFile],
-        pinned: &PinnedTable,
     ) -> Result<AppendResult, RuntimeError> {
         let logical_hash = intent_hash(&logical_intent(request)?);
-        validate_staged(request, staged, pinned.head.table_id)?;
-        let base_tip = transactions::ref_row(
-            &image::open_readonly(&pinned.image.path)?,
-            &request.target_ref,
-        )?;
-        let base_version = pinned.head.table_version.0;
-        let (result, _) = self
-            .publish_transaction(&request.idempotency_key, logical_hash, staged, |parent| {
-                if parent.head.table_id != pinned.head.table_id {
-                    return Err(RuntimeError::SemanticConflict(
-                        "table identity changed".into(),
-                    ));
+        let base = self.write_pin(&request.target_ref).await?;
+        let table_id = base.reader.head.table_id;
+        validate_staged(request, staged, table_id)?;
+        validate_request_for_write(request, &base).await?;
+        let base_tip = base.reader.ref_row(&request.target_ref).await?;
+        self.publish_append_transaction(
+            request,
+            staged,
+            logical_hash,
+            table_id,
+            base_tip,
+            base.reader.head.table_version.0,
+        )
+        .await
+    }
+
+    async fn write_pin(&self, target_ref: &str) -> Result<WritePin<S>, RuntimeError> {
+        #[cfg(feature = "write-latency-qualification")]
+        let _validation = crate::write_latency_qualification::phase("parent_validation");
+        let options = crate::ReaderOptions {
+            checkpoint_window_bytes: crate::image::PAGE_SIZE as usize,
+            maximum_record_bytes: 4 * 1024 * 1024,
+            ..crate::ReaderOptions::default()
+        };
+        let context = crate::reader::ReadContext::new(self.store.clone(), options)?;
+        let mut reader = {
+            #[cfg(feature = "write-latency-qualification")]
+            let _resolution = crate::write_latency_qualification::phase("generation_resolution");
+            crate::MetadataReader::open(
+                context,
+                MetadataSelection::Current,
+                SnapshotSelection::Ref(target_ref.to_owned()),
+            )
+            .await?
+        };
+        #[cfg(feature = "write-latency-qualification")]
+        crate::write_latency_qualification::skipped_phase("logical_image_materialization", 2);
+        let head = self.store.read(&head_key()?).await?;
+        if head.bytes != reader.raw_head {
+            return Err(RuntimeError::SemanticConflict(
+                "HEAD changed while obtaining the write pin".into(),
+            ));
+        }
+        reader.head_version = head.version;
+        let page_tree = self.load_page_tree(&reader.generation).await?;
+        Ok(WritePin { reader, page_tree })
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    async fn publish_append_transaction(
+        &self,
+        request: &AppendRequest,
+        staged: &[VerifiedStagedFile],
+        logical_hash: Sha256,
+        table_id: Id,
+        base_tip: Option<(RefType, Option<Id>)>,
+        base_version: u64,
+    ) -> Result<AppendResult, RuntimeError> {
+        let mut parent = self.write_pin(&request.target_ref).await?;
+        let mut rebases = 0;
+        loop {
+            if parent.reader.head.table_id != table_id {
+                return Err(RuntimeError::SemanticConflict(
+                    "table identity changed during publication".into(),
+                ));
+            }
+            if let Some((result, _)) =
+                replay_write(&parent, &request.idempotency_key, logical_hash).await?
+            {
+                if !staged_match_result(staged, &result) {
+                    cleanup(&self.store, staged).await;
                 }
-                history::validate_append_rebase(
-                    parent,
-                    &request.target_ref,
-                    base_tip,
-                    base_version,
-                )?;
-                validate_request(request, parent)?;
-                build_candidate(request, staged, logical_hash, parent)
+                return Ok(result);
+            }
+            validate_append_rebase_write(&parent, &request.target_ref, base_tip, base_version)
+                .await?;
+            validate_request_for_write(request, &parent).await?;
+            let request_for_build = request.clone();
+            let staged_for_build = staged.to_vec();
+            let (returned_parent, candidate) = tokio::task::spawn_blocking(move || {
+                let candidate =
+                    build_candidate(&request_for_build, &staged_for_build, logical_hash, &parent);
+                (parent, candidate)
             })
+            .await
+            .map_err(|error| RuntimeError::Turso(format!("candidate worker failed: {error}")))?;
+            parent = returned_parent;
+            let candidate = candidate?;
+            for staged_file in staged {
+                let version = self
+                    .store
+                    .confirm_readable(&staged_file.uri, staged_file.sha256, staged_file.length)
+                    .await
+                    .map_err(|error| match error {
+                        StorageError::VerificationFailed(_) => RuntimeError::FingerprintMismatch,
+                        other => other.into(),
+                    })?;
+                if version != staged_file.version {
+                    return Err(RuntimeError::FingerprintMismatch);
+                }
+            }
+            put_immutable(&self.store, &candidate.commit_uri, &candidate.commit_bytes).await?;
+            for artifact in &candidate.image_artifacts {
+                failpoint("before_immutable_artifact_write");
+                put_immutable(&self.store, &artifact.uri, &artifact.bytes).await?;
+            }
+            failpoint("before_generation_write");
+            put_immutable(
+                &self.store,
+                &candidate.generation_uri,
+                &candidate.generation_bytes,
+            )
             .await?;
-        Ok(result)
+            failpoint("after_immutable_uploads");
+
+            let mut indeterminate = 0;
+            let mut reconciled_winner = None;
+            loop {
+                failpoint("before_head_cas");
+                match self
+                    .store
+                    .replace_head(&parent.reader.head_version, &candidate.head_bytes)
+                    .await
+                {
+                    ConditionalWriteOutcome::Applied { .. } => return Ok(candidate.result),
+                    ConditionalWriteOutcome::Conflict { .. } => break,
+                    ConditionalWriteOutcome::Indeterminate { source } => {
+                        indeterminate += 1;
+                        match self.write_pin(&request.target_ref).await {
+                            Ok(current) => {
+                                if current.reader.head.table_id != table_id {
+                                    return Err(RuntimeError::SemanticConflict(
+                                        "table identity changed during reconciliation".into(),
+                                    ));
+                                }
+                                if let Some((result, _)) =
+                                    replay_write(&current, &request.idempotency_key, logical_hash)
+                                        .await?
+                                {
+                                    if !staged_match_result(staged, &result) {
+                                        cleanup(&self.store, staged).await;
+                                    }
+                                    return Ok(result);
+                                }
+                                if current.reader.head_version == parent.reader.head_version
+                                    && current.reader.raw_head == parent.reader.raw_head
+                                {
+                                    if indeterminate
+                                        <= self.retry_policy.maximum_indeterminate_reconciliations
+                                    {
+                                        continue;
+                                    }
+                                    return Err(RuntimeError::PublicationIndeterminate);
+                                }
+                                reconciled_winner = Some(current);
+                                break;
+                            }
+                            Err(error)
+                                if indeterminate
+                                    <= self.retry_policy.maximum_indeterminate_reconciliations =>
+                            {
+                                tracing::warn!(%source, %error, "publication reconciliation failed");
+                            }
+                            Err(_) => return Err(RuntimeError::PublicationIndeterminate),
+                        }
+                    }
+                }
+            }
+            let winner = match reconciled_winner {
+                Some(winner) => winner,
+                None => self.write_pin(&request.target_ref).await.map_err(|error| {
+                    if indeterminate > 0 {
+                        RuntimeError::PublicationIndeterminate
+                    } else {
+                        error
+                    }
+                })?,
+            };
+            if winner.reader.head.table_id != table_id {
+                return Err(RuntimeError::SemanticConflict(
+                    "table identity changed after conflict".into(),
+                ));
+            }
+            if let Some((result, _)) =
+                replay_write(&winner, &request.idempotency_key, logical_hash).await?
+            {
+                if !staged_match_result(staged, &result) {
+                    cleanup(&self.store, staged).await;
+                }
+                return Ok(result);
+            }
+            rebases += 1;
+            if rebases > self.retry_policy.maximum_rebases {
+                return Err(RuntimeError::RebaseExhausted);
+            }
+            parent = winner;
+        }
     }
 
     #[allow(clippy::too_many_lines)] // Keep conditional outcomes and reconciliation in one state machine.
-    async fn publish_transaction<R: serde::de::DeserializeOwned>(
+    async fn publish_transaction(
         &self,
-        key: &str,
+        request: TransactionRequest,
         logical_hash: Sha256,
-        staged: &[VerifiedStagedFile],
-        build: impl Fn(&PinnedTable) -> Result<Candidate<R>, RuntimeError>,
-    ) -> Result<(R, Sha256), RuntimeError> {
+    ) -> Result<(transactions::DurableResult, Sha256), RuntimeError> {
         #[cfg(feature = "write-latency-qualification")]
         let parent_pin_phase = crate::write_latency_qualification::phase("parent_pin");
-        let parent = self.pin().await?;
+        let parent = self.write_pin("main").await?;
         #[cfg(feature = "write-latency-qualification")]
         drop(parent_pin_phase);
-        self.publish_transaction_from_parent(parent, key, logical_hash, staged, build)
+        self.publish_transaction_from_parent(request, logical_hash, parent)
             .await
     }
 
-    #[allow(clippy::too_many_lines)] // Keep conditional outcomes and probe boundaries together.
-    async fn publish_transaction_from_parent<R: serde::de::DeserializeOwned>(
+    #[allow(clippy::too_many_lines)] // Keep conditional outcomes and reconciliation in one state machine.
+    async fn publish_transaction_from_parent(
         &self,
-        mut parent: PinnedTable,
-        key: &str,
+        request: TransactionRequest,
         logical_hash: Sha256,
-        staged: &[VerifiedStagedFile],
-        build: impl Fn(&PinnedTable) -> Result<Candidate<R>, RuntimeError>,
-    ) -> Result<(R, Sha256), RuntimeError> {
-        let table_id = parent.head.table_id;
+        mut parent: WritePin<S>,
+    ) -> Result<(transactions::DurableResult, Sha256), RuntimeError> {
+        let key = request.idempotency_key.clone();
+        #[cfg(feature = "write-latency-qualification")]
+        crate::write_latency_qualification::add_bytes(
+            "parent_logical_bytes",
+            parent.reader.image.length(),
+        );
+        let table_id = parent.reader.head.table_id;
 
         let mut rebases = 0;
         loop {
-            if parent.head.table_id != table_id {
+            if parent.reader.head.table_id != table_id {
                 return Err(RuntimeError::SemanticConflict(
                     "table identity changed during publication".into(),
                 ));
@@ -957,37 +1108,36 @@ impl<S: ObjectStore> Table<S> {
             {
                 #[cfg(feature = "write-latency-qualification")]
                 let _phase = crate::write_latency_qualification::phase("idempotency");
-                if let Some(result) = replay::<R>(&parent, key, logical_hash)? {
+                if let Some(result) = replay_write(&parent, &key, logical_hash).await? {
                     return Ok(result);
                 }
             }
-            let candidate = {
+            let request_for_build = request.clone();
+            let (returned_parent, candidate) = {
                 #[cfg(feature = "write-latency-qualification")]
                 let _phase = crate::write_latency_qualification::phase("candidate_build");
-                build(&parent)?
+                tokio::task::spawn_blocking(move || {
+                    let candidate = transactions::build_transaction_candidate(
+                        &parent,
+                        &request_for_build,
+                        logical_hash,
+                    );
+                    (parent, candidate)
+                })
+                .await
+                .map_err(|error| RuntimeError::Turso(format!("candidate worker failed: {error}")))?
             };
+            parent = returned_parent;
+            let candidate = candidate?;
             {
                 #[cfg(feature = "write-latency-qualification")]
                 let _phase = crate::write_latency_qualification::phase("immutable_publication");
-                for staged_file in staged {
-                    let version = self
-                        .store
-                        .confirm_readable(&staged_file.uri, staged_file.sha256, staged_file.length)
-                        .await
-                        .map_err(|error| match error {
-                            StorageError::VerificationFailed(_) => {
-                                RuntimeError::FingerprintMismatch
-                            }
-                            other => other.into(),
-                        })?;
-                    if version != staged_file.version {
-                        return Err(RuntimeError::FingerprintMismatch);
-                    }
-                }
                 put_immutable(&self.store, &candidate.commit_uri, &candidate.commit_bytes).await?;
                 for artifact in &candidate.image_artifacts {
+                    failpoint("before_immutable_artifact_write");
                     put_immutable(&self.store, &artifact.uri, &artifact.bytes).await?;
                 }
+                failpoint("before_generation_write");
                 put_immutable(
                     &self.store,
                     &candidate.generation_uri,
@@ -999,11 +1149,12 @@ impl<S: ObjectStore> Table<S> {
 
             let mut indeterminate = 0;
             loop {
+                failpoint("before_head_cas");
                 let outcome = {
                     #[cfg(feature = "write-latency-qualification")]
                     let _phase = crate::write_latency_qualification::phase("head_cas");
                     self.store
-                        .replace_head(&parent.head_version, &candidate.head_bytes)
+                        .replace_head(&parent.reader.head_version, &candidate.head_bytes)
                         .await
                 };
                 match outcome {
@@ -1013,18 +1164,20 @@ impl<S: ObjectStore> Table<S> {
                     ConditionalWriteOutcome::Conflict { .. } => break,
                     ConditionalWriteOutcome::Indeterminate { source } => {
                         indeterminate += 1;
-                        match self.pin().await {
+                        match self.write_pin("main").await {
                             Ok(current) => {
-                                if current.head.table_id != table_id {
+                                if current.reader.head.table_id != table_id {
                                     return Err(RuntimeError::SemanticConflict(
                                         "table identity changed during reconciliation".into(),
                                     ));
                                 }
-                                if let Some(result) = replay::<R>(&current, key, logical_hash)? {
+                                if let Some(result) =
+                                    replay_write(&current, &key, logical_hash).await?
+                                {
                                     return Ok(result);
                                 }
-                                if current.head_version == parent.head_version
-                                    && current.raw_head == parent.raw_head
+                                if current.reader.head_version == parent.reader.head_version
+                                    && current.reader.raw_head == parent.reader.raw_head
                                 {
                                     if indeterminate
                                         <= self.retry_policy.maximum_indeterminate_reconciliations
@@ -1048,19 +1201,19 @@ impl<S: ObjectStore> Table<S> {
             }
             // A retry conflict does not resolve an earlier response loss. If the
             // winner cannot be pinned, this attempt may still have committed.
-            let winner = self.pin().await.map_err(|error| {
+            let winner = self.write_pin("main").await.map_err(|error| {
                 if indeterminate > 0 {
                     RuntimeError::PublicationIndeterminate
                 } else {
                     error
                 }
             })?;
-            if winner.head.table_id != table_id {
+            if winner.reader.head.table_id != table_id {
                 return Err(RuntimeError::SemanticConflict(
                     "table identity changed after conflict".into(),
                 ));
             }
-            if let Some(result) = replay::<R>(&winner, key, logical_hash)? {
+            if let Some(result) = replay_write(&winner, &key, logical_hash).await? {
                 return Ok(result);
             }
             rebases += 1;
@@ -1083,26 +1236,73 @@ struct Candidate<R = AppendResult> {
     result: R,
 }
 
+pub(crate) struct WritePin<S> {
+    reader: crate::MetadataReader<S>,
+    page_tree: Option<std::sync::Arc<crate::physical::Tree>>,
+}
+
+trait CandidateBase {
+    fn head(&self) -> &Head;
+    fn generation(&self) -> &Generation;
+    fn page_tree(&self) -> Option<&std::sync::Arc<crate::physical::Tree>>;
+}
+
+impl CandidateBase for PinnedTable {
+    fn head(&self) -> &Head {
+        &self.head
+    }
+    fn generation(&self) -> &Generation {
+        &self.generation
+    }
+    fn page_tree(&self) -> Option<&std::sync::Arc<crate::physical::Tree>> {
+        self.page_tree.as_ref()
+    }
+}
+
+impl<S> CandidateBase for WritePin<S> {
+    fn head(&self) -> &Head {
+        &self.reader.head
+    }
+    fn generation(&self) -> &Generation {
+        &self.reader.generation
+    }
+    fn page_tree(&self) -> Option<&std::sync::Arc<crate::physical::Tree>> {
+        self.page_tree.as_ref()
+    }
+}
+
+fn trace_writer_reads(before: crate::ReaderStatistics, after: crate::ReaderStatistics) {
+    tracing::info!(
+        target: "otmp.writer",
+        parent_sqlite_bytes = after.bytes.saturating_sub(before.bytes),
+        parent_sqlite_requests = after.requests.saturating_sub(before.requests),
+        parent_sqlite_pages = after.pages.saturating_sub(before.pages),
+        parent_sqlite_cache_hits = after.cache_hits.saturating_sub(before.cache_hits),
+        "writer parent-read summary"
+    );
+}
+
 #[allow(clippy::too_many_lines)]
-fn build_candidate(
+fn build_candidate<S: ObjectStore>(
     request: &AppendRequest,
     staged: &[VerifiedStagedFile],
     logical_hash: Sha256,
-    parent: &PinnedTable,
+    parent: &WritePin<S>,
 ) -> Result<Candidate, RuntimeError> {
     let table_version = parent
+        .reader
         .head
         .table_version
         .0
         .checked_add(1)
         .ok_or_else(|| RuntimeError::InvalidAppend("table version exhausted".into()))?;
-    let (_, _, last_sequence) = image::current_schema_and_snapshot(&parent.image.path)?;
-    let (_, parent_snapshot) = transactions::ref_row(
-        &image::open_readonly(&parent.image.path)?,
-        &request.target_ref,
-    )?
-    .ok_or_else(|| RuntimeError::RefNotFound(request.target_ref.clone()))?;
-    let sequence_number = last_sequence
+    let parent_snapshot = parent
+        .reader
+        .snapshot()
+        .map(|snapshot| snapshot.snapshot_id);
+    let sequence_number = parent
+        .reader
+        .last_sequence
         .checked_add(1)
         .ok_or_else(|| RuntimeError::InvalidAppend("sequence number exhausted".into()))?;
     let commit_id = new_id();
@@ -1196,11 +1396,11 @@ fn build_candidate(
     let mut commit = SemanticCommit {
         kind: "otmp.semantic-commit".into(),
         format_version: 1,
-        table_id: parent.head.table_id,
+        table_id: parent.reader.head.table_id,
         table_version: JsonU64(table_version),
-        parent_table_version: Some(parent.head.table_version),
+        parent_table_version: Some(parent.reader.head.table_version),
         commit_id,
-        parent_commit: Some(parent.head.semantic_commit.clone()),
+        parent_commit: Some(parent.reader.head.semantic_commit.clone()),
         created_at_ms: JsonI64(created_at_ms),
         intents: vec![IntentRecord {
             key: request.idempotency_key.clone(),
@@ -1223,14 +1423,16 @@ fn build_candidate(
             ]),
         ],
         operations: vec![operation],
-        required_reader_features_after_commit: parent.head.required_reader_features.clone(),
-        required_writer_features_after_commit: parent.head.required_writer_features.clone(),
-        previous_semantic_state_sha256: Some(parent.head.semantic_state_sha256),
+        required_reader_features_after_commit: parent.reader.head.required_reader_features.clone(),
+        required_writer_features_after_commit: parent.reader.head.required_writer_features.clone(),
+        previous_semantic_state_sha256: Some(parent.reader.head.semantic_state_sha256),
         semantic_state_sha256: Sha256::from_bytes([0; 32]),
         metadata: CanonicalValue::Object(request.commit_metadata.0.clone()),
     };
-    commit.semantic_state_sha256 =
-        next_state_hash(parent.head.semantic_state_sha256, &commit_body(&commit)?);
+    commit.semantic_state_sha256 = next_state_hash(
+        parent.reader.head.semantic_state_sha256,
+        &commit_body(&commit)?,
+    );
     let commit_bytes = canonical_json::to_vec(&commit)?;
     let commit_hash = object_hash(&commit_bytes);
     let commit_uri: RelativeUri =
@@ -1278,8 +1480,11 @@ fn build_candidate(
             })
         })
         .collect::<Result<Vec<_>, RuntimeError>>()?;
-    let checkpoint = image::turso_append(
-        parent.resolved.clone(),
+    let reads_before = parent.reader.statistics();
+    let checkpoint = image::turso_append_pages(
+        parent.reader.image.clone(),
+        tokio::runtime::Handle::try_current()
+            .map_err(|error| RuntimeError::Turso(format!("Tokio runtime is required: {error}")))?,
         &AppendImage {
             table_version,
             created_at_ms,
@@ -1300,20 +1505,23 @@ fn build_candidate(
             snapshot_metadata_json: &snapshot_metadata_json,
             files: &image_files,
         },
+        &commit,
     )?;
-    finish_candidate(
+    let candidate = finish_candidate(
         parent,
         &commit,
         commit_uri,
         commit_bytes,
         checkpoint,
         result,
-    )
+    );
+    trace_writer_reads(reads_before, parent.reader.statistics());
+    candidate
 }
 
 #[allow(clippy::too_many_lines)]
 fn finish_candidate<R>(
-    parent: &PinnedTable,
+    parent: &impl CandidateBase,
     commit: &SemanticCommit,
     commit_uri: RelativeUri,
     commit_bytes: Vec<u8>,
@@ -1325,44 +1533,95 @@ fn finish_candidate<R>(
     let commit_id = commit.commit_id;
     let created_at_ms = commit.created_at_ms.0;
     let commit_hash = object_hash(&commit_bytes);
+    let parent_head = parent.head();
+    let candidate_length = checkpoint
+        .page_count
+        .checked_mul(u64::from(image::PAGE_SIZE))
+        .ok_or_else(|| RuntimeError::Corrupt("candidate image length overflow".into()))?;
     #[cfg(feature = "write-latency-qualification")]
     {
-        crate::write_latency_qualification::add_bytes(
-            "candidate_logical_bytes",
-            checkpoint.bytes.len() as u64,
-        );
+        crate::write_latency_qualification::add_bytes("candidate_logical_bytes", candidate_length);
         crate::write_latency_qualification::add_bytes(
             "changed_pages",
             checkpoint.changed_pages.len() as u64,
         );
     }
-    {
+    if checkpoint.frozen.is_none() {
         #[cfg(feature = "write-latency-qualification")]
         let _phase = crate::write_latency_qualification::phase("exhaustive_validation");
         image::validate(
             &checkpoint.path,
             &ExpectedImage {
-                table_id: parent.head.table_id,
+                table_id: parent_head.table_id,
                 table_version,
                 semantic_state: commit.semantic_state_sha256,
                 commit_id,
                 commit_hash,
                 commit_uri: commit_uri.as_str(),
-                reader_features_json: &canonical_text(&parent.head.required_reader_features)?,
-                writer_features_json: &canonical_text(&parent.head.required_writer_features)?,
+                reader_features_json: &canonical_text(&parent_head.required_reader_features)?,
+                writer_features_json: &canonical_text(&parent_head.required_writer_features)?,
                 previous_semantic_state: commit.previous_semantic_state_sha256,
             },
         )?;
+        image::validate_commit_projection(&checkpoint.path, commit)?;
     }
     let incremental = crate::physical::persist(
-        parent.page_tree.as_ref(),
+        parent.page_tree(),
         &checkpoint.changed_pages,
         checkpoint.page_count,
     )?;
-    let (base_checkpoint, page_map, checkpoint_page_index, image_artifacts) = if incremental
-        .root
-        .is_none()
-        || incremental.reachable_bytes >= checkpoint.bytes.len() as u64
+    let lazy_candidate = checkpoint.frozen.is_some();
+    let changed_pages = checkpoint.changed_pages.len();
+    let checkpoint_fallback =
+        incremental.root.is_none() || incremental.reachable_bytes >= candidate_length;
+    if checkpoint_fallback && checkpoint.bytes.is_empty() {
+        checkpoint.bytes = {
+            #[cfg(feature = "write-latency-qualification")]
+            let _phase = crate::write_latency_qualification::phase("candidate_buffer_creation");
+            checkpoint
+                .frozen
+                .take()
+                .expect("lazy candidate retains its frozen overlay")
+                .materialize()?
+        };
+        {
+            #[cfg(feature = "write-latency-qualification")]
+            let _phase = crate::write_latency_qualification::phase("validation_file_write");
+            std::fs::write(&checkpoint.path, &checkpoint.bytes)?;
+            #[cfg(feature = "write-latency-qualification")]
+            crate::write_latency_qualification::add_bytes(
+                "temporary_file_bytes",
+                checkpoint.bytes.len() as u64,
+            );
+        }
+        {
+            #[cfg(feature = "write-latency-qualification")]
+            let _phase = crate::write_latency_qualification::phase("exhaustive_validation");
+            image::validate(
+                &checkpoint.path,
+                &ExpectedImage {
+                    table_id: parent_head.table_id,
+                    table_version,
+                    semantic_state: commit.semantic_state_sha256,
+                    commit_id,
+                    commit_hash,
+                    commit_uri: commit_uri.as_str(),
+                    reader_features_json: &canonical_text(&parent_head.required_reader_features)?,
+                    writer_features_json: &canonical_text(&parent_head.required_writer_features)?,
+                    previous_semantic_state: commit.previous_semantic_state_sha256,
+                },
+            )?;
+            image::validate_commit_projection(&checkpoint.path, commit)?;
+        }
+    } else if lazy_candidate {
+        #[cfg(feature = "write-latency-qualification")]
+        {
+            crate::write_latency_qualification::skipped_phase("candidate_buffer_creation", 1);
+            crate::write_latency_qualification::skipped_phase("validation_file_write", 1);
+            crate::write_latency_qualification::skipped_phase("exhaustive_validation", 1);
+        }
+    }
+    let (base_checkpoint, page_map, checkpoint_page_index, image_artifacts) = if checkpoint_fallback
     {
         let hash = object_hash(&checkpoint.bytes);
         let uri: RelativeUri =
@@ -1387,18 +1646,46 @@ fn finish_candidate<R>(
         )
     } else {
         (
-            parent.generation.metadata_image.checkpoint.clone(),
+            parent.generation().metadata_image.checkpoint.clone(),
             incremental.root,
             parent
-                .generation
+                .generation()
                 .metadata_image
                 .checkpoint_page_index
                 .clone(),
             incremental.artifacts,
         )
     };
+    let page_map_bytes = image_artifacts
+        .iter()
+        .filter(|artifact| artifact.uri.as_str().starts_with("_otmp/page-maps/"))
+        .map(|artifact| artifact.bytes.len())
+        .sum::<usize>();
+    let uploaded_artifact_bytes = image_artifacts
+        .iter()
+        .map(|artifact| artifact.bytes.len())
+        .sum::<usize>();
+    #[cfg(feature = "write-latency-qualification")]
+    crate::write_latency_qualification::add_bytes(
+        "published_image_artifact_bytes",
+        uploaded_artifact_bytes as u64,
+    );
+    tracing::info!(
+        target: "otmp.writer",
+        changed_pages,
+        page_map_bytes,
+        uploaded_artifact_bytes,
+        full_materializations = usize::from(lazy_candidate && checkpoint_fallback),
+        temporary_full_image_bytes = if lazy_candidate && checkpoint_fallback {
+            candidate_length
+        } else {
+            0
+        },
+        checkpoint_fallback,
+        "writer candidate summary"
+    );
     let image_root = image_root_hash(
-        parent.head.table_id,
+        parent_head.table_id,
         table_version,
         image::PAGE_SIZE,
         checkpoint.page_count,
@@ -1411,7 +1698,7 @@ fn finish_candidate<R>(
     let generation = Generation {
         kind: "otmp.metadata-generation".into(),
         format_version: 1,
-        table_id: parent.head.table_id,
+        table_id: parent_head.table_id,
         table_version: JsonU64(table_version),
         generation_id,
         created_at_ms: JsonI64(created_at_ms),
@@ -1422,7 +1709,7 @@ fn finish_candidate<R>(
             commit_bytes.len() as u64,
             COMMIT_MEDIA_TYPE,
         ),
-        physical_parent: Some(parent.head.metadata_generation.clone()),
+        physical_parent: Some(parent_head.metadata_generation.clone()),
         metadata_image: MetadataImage {
             codec: SQLITE_COW_FEATURE.into(),
             page_size: image::PAGE_SIZE,
@@ -1440,11 +1727,10 @@ fn finish_candidate<R>(
     let head = Head {
         protocol: "otmp".into(),
         protocol_version: "0.0.2-alpha".into(),
-        table_id: parent.head.table_id,
+        table_id: parent_head.table_id,
         table_version: JsonU64(table_version),
         root_revision: JsonU64(
-            parent
-                .head
+            parent_head
                 .root_revision
                 .0
                 .checked_add(1)
@@ -1458,29 +1744,11 @@ fn finish_candidate<R>(
             generation_bytes.len() as u64,
             GENERATION_MEDIA_TYPE,
         ),
-        required_reader_features: parent.head.required_reader_features.clone(),
-        required_writer_features: parent.head.required_writer_features.clone(),
+        required_reader_features: parent_head.required_reader_features.clone(),
+        required_writer_features: parent_head.required_writer_features.clone(),
     };
-    #[cfg(feature = "write-latency-qualification")]
-    crate::write_latency_qualification::add_bytes(
-        "published_image_artifact_bytes",
-        image_artifacts
-            .iter()
-            .map(|artifact| artifact.bytes.len() as u64)
-            .sum(),
-    );
-    {
-        #[cfg(feature = "write-latency-qualification")]
-        let _phase = crate::write_latency_qualification::phase("commit_projection_validation");
-        image::validate_commit_projection(&checkpoint.path, commit)?;
-    }
-    let committed_state = image::open_readonly(&checkpoint.path)?.query_row(
-        "SELECT semantic_state_sha256 FROM otmp_commits WHERE commit_id=?1",
-        [commit.commit_id.as_bytes().as_slice()],
-        |r| r.get(0),
-    )?;
     Ok(Candidate {
-        semantic_state: hash_from_blob(committed_state)?,
+        semantic_state: commit.semantic_state_sha256,
         commit_uri,
         commit_bytes,
         image_artifacts,
@@ -1572,7 +1840,45 @@ fn logical_intent(request: &AppendRequest) -> Result<Vec<u8>, RuntimeError> {
     Ok(canonical_json::to_vec(&logical)?)
 }
 
-fn validate_request(request: &AppendRequest, pinned: &PinnedTable) -> Result<(), RuntimeError> {
+async fn validate_request_for_write<S: ObjectStore>(
+    request: &AppendRequest,
+    pinned: &WritePin<S>,
+) -> Result<(), RuntimeError> {
+    if !matches!(
+        pinned.reader.ref_row(&request.target_ref).await?,
+        Some((RefType::Branch, _))
+    ) {
+        return Err(RuntimeError::InvalidAppend(
+            "target must exist and be a branch".into(),
+        ));
+    }
+    let mut field_types = BTreeMap::new();
+    collect_field_types(&pinned.reader.schema().fields, &mut field_types);
+    validate_request_against(request, pinned.reader.schema().schema_id, &field_types)
+}
+
+fn collect_field_types(fields: &[otmp_protocol::Field], output: &mut BTreeMap<u32, LogicalType>) {
+    for field in fields {
+        output.insert(field.field_id, field.field_type.clone());
+        match &field.field_type {
+            LogicalType::Struct { fields } => collect_field_types(fields, output),
+            LogicalType::List { element } => {
+                collect_field_types(std::slice::from_ref(element), output);
+            }
+            LogicalType::Map { key, value } => {
+                collect_field_types(std::slice::from_ref(key), output);
+                collect_field_types(std::slice::from_ref(value), output);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn validate_request_against(
+    request: &AppendRequest,
+    current_schema: u32,
+    field_types: &BTreeMap<u32, LogicalType>,
+) -> Result<(), RuntimeError> {
     if request.idempotency_key.is_empty() || request.idempotency_key == "otmp.genesis" {
         return Err(RuntimeError::InvalidAppend(
             "invalid idempotency key".into(),
@@ -1583,17 +1889,6 @@ fn validate_request(request: &AppendRequest, pinned: &PinnedTable) -> Result<(),
             "local/full-image profile requires one non-empty append batch to main".into(),
         ));
     }
-    let connection = image::open_readonly(&pinned.image.path)?;
-    if !matches!(
-        transactions::ref_row(&connection, &request.target_ref)?,
-        Some((RefType::Branch, _))
-    ) {
-        return Err(RuntimeError::InvalidAppend(
-            "target must exist and be a branch".into(),
-        ));
-    }
-    let (current_schema, _, _) = image::current_schema_and_snapshot(&pinned.image.path)?;
-    let field_types = image::field_types(&pinned.image.path, current_schema)?;
     let reserved = ["added-data-files", "added-records", "added-files-size"];
     if request
         .summary
@@ -1634,7 +1929,7 @@ fn validate_request(request: &AppendRequest, pinned: &PinnedTable) -> Result<(),
                 "duplicate logical file entry".into(),
             ));
         }
-        validate_metrics(&file.metrics, &field_types)?;
+        validate_metrics(&file.metrics, field_types)?;
     }
     derived_summary(request)?;
     Ok(())
@@ -1765,19 +2060,65 @@ fn derived_summary(
     Ok(summary)
 }
 
-fn check_idempotency(
-    pinned: &PinnedTable,
+async fn replay_write<R: serde::de::DeserializeOwned, S: ObjectStore>(
+    pinned: &WritePin<S>,
     key: &str,
     intent: Sha256,
-) -> Result<Option<AppendResult>, RuntimeError> {
-    let Some((stored_hash, result)) = image::idempotency(&pinned.image.path, key)? else {
+) -> Result<Option<(R, Sha256)>, RuntimeError> {
+    let Some((stored_hash, result, state)) = pinned.reader.idempotency(key).await? else {
         return Ok(None);
     };
     if stored_hash != intent {
         return Err(RuntimeError::IdempotencyConflict);
     }
-    let result = canonical_json::from_slice_canonical(result.as_bytes())?;
-    Ok(Some(result))
+    Ok(Some((
+        canonical_json::from_slice_canonical(result.as_bytes())?,
+        state,
+    )))
+}
+
+async fn validate_append_rebase_write<S: ObjectStore>(
+    pinned: &WritePin<S>,
+    name: &str,
+    original: Option<(RefType, Option<Id>)>,
+    version: u64,
+) -> Result<(), RuntimeError> {
+    let Some((RefType::Branch, old)) = original else {
+        return Err(RuntimeError::SemanticConflict(
+            "append target was not a branch".into(),
+        ));
+    };
+    let Some((RefType::Branch, current)) = pinned.reader.ref_row(name).await? else {
+        return Err(RuntimeError::SemanticConflict(
+            "append target removed".into(),
+        ));
+    };
+    let chain = pinned.reader.snapshot_ancestry(current).await?;
+    if old.is_some_and(|id| !chain.contains(&id)) {
+        return Err(RuntimeError::SemanticConflict(
+            "target is not an append descendant".into(),
+        ));
+    }
+    for row in pinned.reader.commit_operations_after(version).await? {
+        let operations: Vec<CanonicalValue> = canonical_json::from_slice_canonical(row.as_bytes())?;
+        for operation in operations {
+            if let CanonicalValue::Object(fields) = operation {
+                if fields.get("ref") == Some(&string(name))
+                    && fields.get("type") != Some(&string("commit_snapshot"))
+                {
+                    return Err(RuntimeError::SemanticConflict(
+                        "target ref changed during append".into(),
+                    ));
+                }
+                if fields.get("type") == Some(&string("set_current_schema")) {
+                    return Err(RuntimeError::SemanticConflict(
+                        "current schema changed during append".into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn cleanup<S: ObjectStore>(store: &S, staged: &[VerifiedStagedFile]) {
@@ -1786,6 +2127,13 @@ async fn cleanup<S: ObjectStore>(store: &S, staged: &[VerifiedStagedFile]) {
             tracing::warn!(%error, uri=%file.uri, "best-effort staging cleanup failed");
         }
     }
+}
+
+fn staged_match_result(staged: &[VerifiedStagedFile], result: &AppendResult) -> bool {
+    staged.len() == result.files.len()
+        && staged.iter().zip(&result.files).all(|(staged, committed)| {
+            staged.file_id == committed.file_id && staged.uri == committed.uri
+        })
 }
 
 async fn put_immutable<S: ObjectStore>(
@@ -1936,7 +2284,7 @@ fn scalar_is_nan(value: &TypedScalar) -> bool {
         || matches!(value, TypedScalar::Float64(number) if number.is_nan())
 }
 
-fn failpoint(name: &str) {
+pub(crate) fn failpoint(name: &str) {
     if std::env::var("OTMP_FAILPOINT").as_deref() == Ok(name) {
         std::process::exit(86);
     }
@@ -1967,23 +2315,4 @@ mod u64_string {
         }
         value.parse().map_err(serde::de::Error::custom)
     }
-}
-
-fn replay<R: serde::de::DeserializeOwned>(
-    pinned: &PinnedTable,
-    key: &str,
-    intent: Sha256,
-) -> Result<Option<(R, Sha256)>, RuntimeError> {
-    let Some((stored_hash, result)) = image::idempotency(&pinned.image.path, key)? else {
-        return Ok(None);
-    };
-    if stored_hash != intent {
-        return Err(RuntimeError::IdempotencyConflict);
-    }
-    let connection = image::open_readonly(&pinned.image.path)?;
-    let hash = connection.query_row("SELECT c.semantic_state_sha256 FROM otmp_commits c JOIN otmp_idempotency i ON i.commit_id=c.commit_id AND i.table_version=c.table_version WHERE i.idempotency_key=?1", [key], |r| r.get(0))?;
-    Ok(Some((
-        canonical_json::from_slice_canonical(result.as_bytes())?,
-        hash_from_blob(hash)?,
-    )))
 }

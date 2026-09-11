@@ -9,6 +9,11 @@ trap 'rm -rf "$scratch"' EXIT
 
 for failpoint in \
   after_staging_flush \
+  during_parent_page_read \
+  during_changed_page_freeze \
+  before_immutable_artifact_write \
+  before_generation_write \
+  before_head_cas \
   during_temporary_head_creation \
   after_immutable_uploads \
   after_final_head_rename
@@ -64,6 +69,6 @@ do
   fi
 done
 
-echo "process-crash reopen and upstream sqlite3 evidence passed for 4 failpoints"
+echo "process-crash reopen and upstream sqlite3 evidence passed for 9 failpoints"
 
 python3 "$repo_root/tests/run-metadata-crash.py"

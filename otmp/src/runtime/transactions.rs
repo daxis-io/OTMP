@@ -1,11 +1,11 @@
 use super::{
     BTreeMap, BTreeSet, Candidate, CanonicalValue, CommitMetadata, Deserialize, Id, IntentRecord,
-    JsonI64, JsonU64, LogicalType, ObjectStore, PinnedTable, RelativeUri, RuntimeError, Schema,
-    SemanticCommit, Serialize, Sha256, Table, canonical_json, canonical_text, commit_body,
+    JsonI64, JsonU64, LogicalType, ObjectStore, RelativeUri, RuntimeError, Schema, SemanticCommit,
+    Serialize, Sha256, Table, WritePin, canonical_json, canonical_text, commit_body,
     finish_candidate, id_from_blob, image, intent_hash, new_id, next_state_hash, now_ms,
 };
 use crate::sql_writer::Writer;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::params;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -184,16 +184,14 @@ fn required(request: &TransactionRequest, requirement: &Requirement) -> Result<(
 }
 
 pub(crate) fn ref_row(
-    connection: &Connection,
+    connection: &Writer<'_>,
     name: &str,
 ) -> Result<Option<(RefType, Option<Id>)>, RuntimeError> {
-    let row: Option<(String, Option<Vec<u8>>)> = connection
-        .query_row(
-            "SELECT ref_type, snapshot_id FROM otmp_refs WHERE ref_name=?1",
-            [name],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
+    let row: Option<(String, Option<Vec<u8>>)> = connection.query_optional(
+        "SELECT ref_type, snapshot_id FROM otmp_refs WHERE ref_name=?1",
+        params![name],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     row.map(|(kind, id)| {
         Ok((
             match kind.as_str() {
@@ -208,19 +206,17 @@ pub(crate) fn ref_row(
 }
 
 pub(crate) fn evaluate(
-    connection: &Connection,
+    connection: &Writer<'_>,
     requirements: &[Requirement],
 ) -> Result<(), RuntimeError> {
     for requirement in requirements {
         let matched = match requirement {
             Requirement::PropertyIs { key, value } => {
-                let actual: Option<String> = connection
-                    .query_row(
-                        "SELECT value_json FROM otmp_properties WHERE property_key=?1",
-                        [key],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
+                let actual: Option<String> = connection.query_optional(
+                    "SELECT value_json FROM otmp_properties WHERE property_key=?1",
+                    params![key],
+                    |r| r.get(0),
+                )?;
                 match actual {
                     None => *value == CanonicalValue::Null,
                     Some(actual) => canonical_json::parse_canonical(actual.as_bytes())? == *value,
@@ -235,18 +231,18 @@ pub(crate) fn evaluate(
             }
             Requirement::SnapshotExists { snapshot_id } => connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM otmp_snapshots WHERE snapshot_id=?1)",
-                [snapshot_id.as_bytes().as_slice()],
+                params![snapshot_id.as_bytes().as_slice()],
                 |r| r.get(0),
             )?,
             Requirement::CurrentSchemaIs { schema_id } => connection.query_row(
                 "SELECT current_schema_id=?1 FROM otmp_meta",
-                [schema_id],
+                params![schema_id],
                 |r| r.get(0),
             )?,
             Requirement::SchemaIdAbsent { schema_id } => !connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM otmp_schemas WHERE schema_id=?1)",
-                [schema_id],
-                |r| r.get::<_, bool>(0),
+                params![schema_id],
+                |r| r.get::<bool>(0),
             )?,
             Requirement::FieldIdsAbsent { field_ids } => {
                 let mut absent = BTreeSet::new();
@@ -255,8 +251,8 @@ pub(crate) fn evaluate(
                         || !absent.insert(id)
                         || connection.query_row(
                             "SELECT EXISTS(SELECT 1 FROM otmp_field_ids WHERE field_id=?1)",
-                            [id],
-                            |r| r.get::<_, bool>(0),
+                            params![id],
+                            |r| r.get::<bool>(0),
                         )?
                     {
                         return Err(RuntimeError::SemanticConflict(
@@ -268,12 +264,12 @@ pub(crate) fn evaluate(
             }
             Requirement::DefaultPartitionSpecIs { partition_spec_id } => connection.query_row(
                 "SELECT default_partition_spec_id=?1 FROM otmp_meta",
-                [partition_spec_id],
+                params![partition_spec_id],
                 |r| r.get(0),
             )?,
             Requirement::DefaultSortOrderIs { sort_order_id } => connection.query_row(
                 "SELECT default_sort_order_id=?1 FROM otmp_meta",
-                [sort_order_id],
+                params![sort_order_id],
                 |r| r.get(0),
             )?,
         };
@@ -286,103 +282,98 @@ pub(crate) fn evaluate(
     Ok(())
 }
 
-/// The base is borrowed for the complete preparation; no candidate pages are reused.
-struct PreparedTransaction<'a> {
-    base: &'a PinnedTable,
-    request: &'a TransactionRequest,
+pub(super) fn build_transaction_candidate<S: ObjectStore>(
+    base: &WritePin<S>,
+    request: &TransactionRequest,
     logical_hash: Sha256,
-    operation_results: Vec<OperationResult>,
-}
-impl<'a> PreparedTransaction<'a> {
-    fn new(
-        base: &'a PinnedTable,
-        request: &'a TransactionRequest,
-        logical_hash: Sha256,
-    ) -> Result<Self, RuntimeError> {
-        let connection = image::open_readonly(&base.image.path)?;
+) -> Result<Candidate<DurableResult>, RuntimeError> {
+    let reads_before = base.reader.statistics();
+    let writer = crate::cow_writer::CandidateWriter::from_pages(
+        base.reader.image.clone(),
+        tokio::runtime::Handle::try_current()
+            .map_err(|error| RuntimeError::Turso(format!("Tokio runtime is required: {error}")))?,
+    )?;
+    let operation_results = {
         #[cfg(feature = "write-latency-qualification")]
         let _phase = crate::write_latency_qualification::phase("operation_preparation");
-        let results = prepare_operations(&connection, request)?;
-        Ok(Self {
-            base,
-            request,
-            logical_hash,
-            operation_results: results,
-        })
-    }
-    fn build(self) -> Result<Candidate<DurableResult>, RuntimeError> {
-        let table_version = self
-            .base
-            .head
-            .table_version
-            .0
-            .checked_add(1)
-            .ok_or_else(|| invalid("version exhausted"))?;
-        let commit_id = new_id();
-        let result = DurableResult {
-            table_version,
-            commit_id,
-            operation_results: self.operation_results,
-        };
-        let result_value = canonical_json::to_value(&result)?;
-        let mut commit = SemanticCommit {
-            kind: "otmp.semantic-commit".into(),
-            format_version: 1,
-            table_id: self.base.head.table_id,
-            table_version: JsonU64(table_version),
-            parent_table_version: Some(self.base.head.table_version),
-            commit_id,
-            parent_commit: Some(self.base.head.semantic_commit.clone()),
-            created_at_ms: JsonI64(now_ms()?),
-            intents: vec![IntentRecord {
-                key: self.request.idempotency_key.clone(),
-                intent_sha256: self.logical_hash,
-                operation_ids: self
-                    .request
-                    .operations
-                    .iter()
-                    .map(|o| o.id().to_owned())
-                    .collect(),
-                result: result_value,
-            }],
-            requirements: self
-                .request
-                .requirements
-                .iter()
-                .map(canonical_json::to_value)
-                .collect::<Result<_, _>>()?,
-            operations: self
-                .request
+        prepare_operations(&writer.sql(), request)?
+    };
+    let table_version = base
+        .reader
+        .head
+        .table_version
+        .0
+        .checked_add(1)
+        .ok_or_else(|| invalid("version exhausted"))?;
+    let commit_id = new_id();
+    let result = DurableResult {
+        table_version,
+        commit_id,
+        operation_results,
+    };
+    let result_value = canonical_json::to_value(&result)?;
+    let mut commit = SemanticCommit {
+        kind: "otmp.semantic-commit".into(),
+        format_version: 1,
+        table_id: base.reader.head.table_id,
+        table_version: JsonU64(table_version),
+        parent_table_version: Some(base.reader.head.table_version),
+        commit_id,
+        parent_commit: Some(base.reader.head.semantic_commit.clone()),
+        created_at_ms: JsonI64(now_ms()?),
+        intents: vec![IntentRecord {
+            key: request.idempotency_key.clone(),
+            intent_sha256: logical_hash,
+            operation_ids: request
                 .operations
                 .iter()
-                .map(canonical_json::to_value)
-                .collect::<Result<_, _>>()?,
-            required_reader_features_after_commit: self.base.head.required_reader_features.clone(),
-            required_writer_features_after_commit: self.base.head.required_writer_features.clone(),
-            previous_semantic_state_sha256: Some(self.base.head.semantic_state_sha256),
-            semantic_state_sha256: Sha256::from_bytes([0; 32]),
-            metadata: canonical_json::to_value(&self.request.commit_metadata)?,
-        };
-        commit.semantic_state_sha256 =
-            next_state_hash(self.base.head.semantic_state_sha256, &commit_body(&commit)?);
-        let commit_bytes = canonical_json::to_vec(&commit)?;
-        let commit_uri: RelativeUri =
-            format!("_otmp/commits/{table_version}/{commit_id}.json").parse()?;
-        let checkpoint = image::turso_metadata(
-            self.base.resolved.clone(),
-            &commit,
-            &commit_uri,
-            &self.request.operations,
-        )?;
-        finish_candidate(
-            self.base,
-            &commit,
-            commit_uri,
-            commit_bytes,
-            checkpoint,
-            result,
-        )
+                .map(|o| o.id().to_owned())
+                .collect(),
+            result: result_value,
+        }],
+        requirements: request
+            .requirements
+            .iter()
+            .map(canonical_json::to_value)
+            .collect::<Result<_, _>>()?,
+        operations: request
+            .operations
+            .iter()
+            .map(canonical_json::to_value)
+            .collect::<Result<_, _>>()?,
+        required_reader_features_after_commit: base.reader.head.required_reader_features.clone(),
+        required_writer_features_after_commit: base.reader.head.required_writer_features.clone(),
+        previous_semantic_state_sha256: Some(base.reader.head.semantic_state_sha256),
+        semantic_state_sha256: Sha256::from_bytes([0; 32]),
+        metadata: canonical_json::to_value(&request.commit_metadata)?,
+    };
+    commit.semantic_state_sha256 = next_state_hash(
+        base.reader.head.semantic_state_sha256,
+        &commit_body(&commit)?,
+    );
+    let commit_bytes = canonical_json::to_vec(&commit)?;
+    let commit_hash = otmp_protocol::object_hash(&commit_bytes);
+    let commit_uri: RelativeUri =
+        format!("_otmp/commits/{table_version}/{commit_id}.json").parse()?;
+    {
+        #[cfg(feature = "write-latency-qualification")]
+        let _phase = crate::write_latency_qualification::phase("turso_sql");
+        image::mutate_metadata(&writer.sql(), &commit, &commit_uri, &request.operations)?;
     }
+    {
+        #[cfg(feature = "write-latency-qualification")]
+        let _phase = crate::write_latency_qualification::phase("commit_projection_validation");
+        image::validate_targeted_candidate(
+            &writer.sql(),
+            &commit,
+            commit_uri.as_str(),
+            commit_hash,
+        )?;
+    }
+    let checkpoint = image::finish_turso(writer, false)?;
+    let candidate = finish_candidate(base, &commit, commit_uri, commit_bytes, checkpoint, result);
+    super::trace_writer_reads(reads_before, base.reader.statistics());
+    candidate
 }
 fn validate_ref_name<'a>(name: &'a str, refs: &mut BTreeSet<&'a str>) -> Result<(), RuntimeError> {
     if name.is_empty() || name.chars().any(char::is_control) || !refs.insert(name) {
@@ -537,9 +528,7 @@ impl<S: ObjectStore> Table<S> {
     ) -> Result<TransactionResult, RuntimeError> {
         let logical_hash = intent_hash(&canonical_json::to_vec(request)?);
         let (result, semantic_state_sha256) = self
-            .publish_transaction(&request.idempotency_key, logical_hash, &[], |base| {
-                PreparedTransaction::new(base, request, logical_hash)?.build()
-            })
+            .publish_transaction(request.clone(), logical_hash)
             .await?;
         Ok(TransactionResult {
             table_version: result.table_version,
@@ -549,12 +538,16 @@ impl<S: ObjectStore> Table<S> {
         })
     }
 
-    #[doc(hidden)]
     #[cfg(feature = "write-latency-qualification")]
-    pub async fn transact_pre_pinned(
+    pub(crate) async fn qualification_write_pin(&self) -> Result<WritePin<S>, RuntimeError> {
+        self.write_pin("main").await
+    }
+
+    #[cfg(feature = "write-latency-qualification")]
+    pub(crate) async fn transact_pre_pinned(
         &self,
         request: &TransactionRequest,
-        pinned: PinnedTable,
+        pinned: WritePin<S>,
     ) -> Result<TransactionResult, RuntimeError> {
         let logical_hash = intent_hash(&canonical_json::to_vec(request)?);
         crate::write_latency_qualification::skipped_phase("parent_pin", 0);
@@ -563,16 +556,10 @@ impl<S: ObjectStore> Table<S> {
         crate::write_latency_qualification::skipped_phase("logical_image_materialization", 2);
         crate::write_latency_qualification::add_bytes(
             "parent_logical_bytes",
-            pinned.resolved.len() as u64,
+            pinned.reader.image.length(),
         );
         let (result, semantic_state_sha256) = self
-            .publish_transaction_from_parent(
-                pinned,
-                &request.idempotency_key,
-                logical_hash,
-                &[],
-                |base| PreparedTransaction::new(base, request, logical_hash)?.build(),
-            )
+            .publish_transaction_from_parent(request.clone(), logical_hash, pinned)
             .await?;
         Ok(TransactionResult {
             table_version: result.table_version,
@@ -611,7 +598,7 @@ mod id_numbers {
 
 #[allow(clippy::too_many_lines)] // One exhaustive operation/precondition matrix.
 pub(crate) fn prepare_operations(
-    connection: &Connection,
+    connection: &Writer<'_>,
     request: &TransactionRequest,
 ) -> Result<Vec<OperationResult>, RuntimeError> {
     if request.idempotency_key.is_empty()
@@ -759,7 +746,7 @@ pub(crate) fn prepare_operations(
                 }
                 let current: u32 =
                     connection
-                        .query_row("SELECT current_schema_id FROM otmp_meta", [], |r| r.get(0))?;
+                        .query_row("SELECT current_schema_id FROM otmp_meta", &[], |r| r.get(0))?;
                 required(
                     request,
                     &Requirement::CurrentSchemaIs { schema_id: current },
@@ -770,7 +757,7 @@ pub(crate) fn prepare_operations(
                         schema_id: schema.schema_id,
                     },
                 )?;
-                let old = image::read_schema(connection, current)?;
+                let old = image::read_schema_with(connection, current)?;
                 let new_ids = additive_schema(&old, schema)?;
                 let mut candidates = request.requirements.iter().filter_map(|r| match r {
                     Requirement::FieldIdsAbsent { field_ids } => Some(field_ids.clone()),
@@ -797,7 +784,7 @@ pub(crate) fn prepare_operations(
                 }
                 let current =
                     connection
-                        .query_row("SELECT current_schema_id FROM otmp_meta", [], |r| r.get(0))?;
+                        .query_row("SELECT current_schema_id FROM otmp_meta", &[], |r| r.get(0))?;
                 required(
                     request,
                     &Requirement::CurrentSchemaIs { schema_id: current },

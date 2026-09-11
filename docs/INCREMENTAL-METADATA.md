@@ -106,8 +106,11 @@ cargo test -p otmp --lib small_candidate_borrows_parent -- --nocapture
 cargo test -p otmp --test incremental small_transaction -- --nocapture
 ```
 
-Those are copy-discovery and publication improvements. Existing materialized
-pins and writer-parent validation still read and check complete images.
+Those are copy-discovery and publication improvements. Public pins and exhaustive
+verification still read and check complete images. Ordinary append and metadata
+publication use an authenticated write pin, fetch parent SQLite pages on demand,
+validate the complete affected relational projection, and materialize the
+candidate only when the existing reachable-byte rule selects a checkpoint.
 Historical semantic replay retains its full-image cost. The separate
 [authenticated reader](DATAFUSION-READER.md) opens indexed generations through
 verified page ranges and retains its own local measurement evidence; these COW

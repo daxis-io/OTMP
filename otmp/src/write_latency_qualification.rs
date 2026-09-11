@@ -8,7 +8,7 @@ use otmp_protocol::{RelativeUri, Sha256};
 use serde::Serialize;
 use tokio::io::AsyncRead;
 
-use crate::storage::{CreatedObject, ObjectVersion, StoredObject};
+use crate::storage::{CreatedObject, ObjectMetadata, ObjectVersion, StoredObject, StoredRange};
 use crate::{ConditionalWriteOutcome, ObjectStore, StorageError};
 
 pub mod worker;
@@ -286,6 +286,29 @@ impl<S: ObjectStore> ObjectStore for QualificationStore<S> {
             result
                 .as_ref()
                 .map_or(0, |object| object.bytes.len() as u64),
+            0,
+        );
+        result
+    }
+
+    async fn stat(&self, key: &RelativeUri) -> Result<ObjectMetadata, StorageError> {
+        let result = self.0.stat(key).await;
+        record_io(category(key), 0, 0);
+        result
+    }
+
+    async fn read_range(
+        &self,
+        key: &RelativeUri,
+        range: std::ops::Range<u64>,
+        expected: &ObjectMetadata,
+    ) -> Result<StoredRange, StorageError> {
+        let result = self.0.read_range(key, range, expected).await;
+        record_io(
+            category(key),
+            result
+                .as_ref()
+                .map_or(0, |stored| stored.bytes.len() as u64),
             0,
         );
         result

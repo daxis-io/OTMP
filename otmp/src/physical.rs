@@ -52,6 +52,38 @@ fn object(reference: &PageObjectReference, media_type: &str) -> ObjectReference 
 }
 
 impl<S: ObjectStore> Table<S> {
+    pub(crate) async fn load_page_tree(
+        &self,
+        generation: &Generation,
+    ) -> Result<Option<Arc<Tree>>, RuntimeError> {
+        let image = &generation.metadata_image;
+        if image_root_hash(
+            generation.table_id,
+            generation.table_version.0,
+            image.page_size,
+            image.page_count.0,
+            image.checkpoint.sha256,
+            image.page_map.as_ref().map(|root| root.sha256),
+        ) != image.image_root_sha256
+        {
+            return Err(corrupt("metadata image root mismatch"));
+        }
+        Ok(if let Some(root) = &image.page_map {
+            Some(
+                self.load_tree(
+                    root.reference(),
+                    root.height,
+                    0,
+                    image.page_count.0,
+                    &mut BTreeSet::new(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        })
+    }
+
     async fn verify_checkpoint_index_node(
         &self,
         reference: PageObjectReference,

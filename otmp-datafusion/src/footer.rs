@@ -8,6 +8,7 @@ use datafusion::datasource::physical_plan::parquet::{
 use datafusion::parquet::arrow::{arrow_reader::ArrowReaderOptions, async_reader::AsyncFileReader};
 use datafusion::parquet::errors::{ParquetError, Result as ParquetResult};
 use datafusion::parquet::file::metadata::ParquetMetaData;
+use datafusion::physical_expr_adapter::PhysicalExprAdapter;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use futures_util::{
     FutureExt,
@@ -87,9 +88,34 @@ pub struct FooterEntry {
     tail: bytes::Bytes,
     _reservation: Reservation,
 }
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct ValidatedFileKey {
+    pub file_id: otmp_protocol::Id,
+    pub uri: String,
+    pub sha256: Option<otmp_protocol::Sha256>,
+    pub length: u64,
+    pub schema_id: u32,
+}
+
+pub(crate) struct ValidatedFileEntry {
+    pub object: crate::store::ImmutableObject,
+    pub footer: Arc<FooterEntry>,
+    pub physical: datafusion::arrow::datatypes::SchemaRef,
+    pub binding: Arc<dyn PhysicalExprAdapter>,
+    _reservation: Reservation,
+}
+
+#[derive(Clone)]
+enum CacheKey {
+    Footer(FooterIdentity),
+    Validated(ValidatedFileKey),
+}
+
 struct Entries {
     values: BTreeMap<FooterIdentity, Arc<FooterEntry>>,
-    order: VecDeque<FooterIdentity>,
+    validated: BTreeMap<ValidatedFileKey, Arc<ValidatedFileEntry>>,
+    order: VecDeque<CacheKey>,
     identities: BTreeMap<String, FooterIdentity>,
 }
 
@@ -97,8 +123,10 @@ pub struct FooterCache {
     budget: Arc<Budget>,
     entries: Mutex<Entries>,
     hits: std::sync::atomic::AtomicU64,
+    validated_hits: std::sync::atomic::AtomicU64,
     admission: tokio::sync::Mutex<()>,
     loads: FooterLoads,
+    validated_loads: ValidatedLoads,
     registration: Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)]
     before_decode: Mutex<Option<[Arc<tokio::sync::Notify>; 2]>>,
@@ -107,6 +135,7 @@ pub struct FooterCache {
 }
 type FooterFuture = Shared<BoxFuture<'static, Result<Arc<FooterEntry>, Arc<ParquetError>>>>;
 type FooterLoads = Arc<Mutex<BTreeMap<FooterIdentity, Weak<FooterLoad>>>>;
+type ValidatedLoads = Arc<Mutex<BTreeMap<ValidatedFileKey, Weak<ValidatedLoad>>>>;
 struct FooterLoad {
     future: FooterFuture,
     id: u64,
@@ -115,8 +144,26 @@ struct FooterLoad {
     _reservation: Reservation,
     _registration: Registration,
 }
+struct ValidatedLoad {
+    result: tokio::sync::OnceCell<
+        Result<Arc<ValidatedFileEntry>, Arc<datafusion::error::DataFusionError>>,
+    >,
+    key: ValidatedFileKey,
+    registry: ValidatedLoads,
+}
 type Registration = Arc<Mutex<Option<tokio::sync::OwnedMutexGuard<()>>>>;
 impl Drop for FooterLoad {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = self.registry.lock()
+            && registry
+                .get(&self.key)
+                .is_some_and(|weak| std::ptr::eq(weak.as_ptr(), self))
+        {
+            registry.remove(&self.key);
+        }
+    }
+}
+impl Drop for ValidatedLoad {
     fn drop(&mut self) {
         if let Ok(mut registry) = self.registry.lock()
             && registry
@@ -135,6 +182,18 @@ impl fmt::Display for SharedFooterError {
     }
 }
 impl std::error::Error for SharedFooterError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+#[derive(Debug)]
+struct SharedValidationError(Arc<datafusion::error::DataFusionError>);
+impl fmt::Display for SharedValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for SharedValidationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(self.0.as_ref())
     }
@@ -170,12 +229,15 @@ impl FooterCache {
             }),
             entries: Mutex::new(Entries {
                 values: BTreeMap::new(),
+                validated: BTreeMap::new(),
                 order: VecDeque::new(),
                 identities: BTreeMap::new(),
             }),
             hits: std::sync::atomic::AtomicU64::new(0),
+            validated_hits: std::sync::atomic::AtomicU64::new(0),
             admission: tokio::sync::Mutex::new(()),
             loads: Arc::default(),
+            validated_loads: Arc::default(),
             registration: Arc::default(),
             #[cfg(test)]
             before_decode: Mutex::default(),
@@ -190,26 +252,18 @@ impl FooterCache {
             self.hits.load(Ordering::Relaxed),
         )
     }
+    pub(crate) fn validated_hits(&self) -> u64 {
+        self.validated_hits.load(Ordering::Relaxed)
+    }
     #[cfg(test)]
     pub(crate) fn assert_idle(&self) {
         assert_eq!(self.budget.keys.load(Ordering::Acquire), 0);
         assert_eq!(self.budget.preflight_hits.load(Ordering::Acquire), 0);
         assert_eq!(self.budget.transient.load(Ordering::Acquire), 0);
         assert!(self.loads.lock().unwrap().is_empty());
+        assert!(self.validated_loads.lock().unwrap().is_empty());
         assert!(self.admission.try_lock().is_ok());
         assert!(self.registration.try_lock().is_ok());
-    }
-    #[cfg(test)]
-    pub(crate) async fn wait_for_pressure(&self) {
-        self.pressure.notified().await;
-    }
-    #[cfg(test)]
-    pub(crate) fn assert_preflight_lease(&self) {
-        assert!(
-            self.budget.keys.load(Ordering::Acquire)
-                + self.budget.preflight_hits.load(Ordering::Acquire)
-                > 0
-        );
     }
     fn check(entries: &Entries, key: &FooterIdentity) -> ParquetResult<()> {
         if entries
@@ -268,9 +322,16 @@ impl FooterCache {
                     Admission::CannotFit
                 });
             };
-            entries.values.remove(&key);
-            if !entries.values.keys().any(|other| other.uri == key.uri) {
-                entries.identities.remove(&key.uri);
+            match key {
+                CacheKey::Footer(key) => {
+                    entries.values.remove(&key);
+                    if !entries.values.keys().any(|other| other.uri == key.uri) {
+                        entries.identities.remove(&key.uri);
+                    }
+                }
+                CacheKey::Validated(key) => {
+                    entries.validated.remove(&key);
+                }
             }
         }
     }
@@ -368,8 +429,109 @@ impl FooterCache {
             _reservation: reservation,
         });
         entries.identities.insert(key.uri.clone(), key.clone());
-        entries.order.push_back(key.clone());
+        entries.order.push_back(CacheKey::Footer(key.clone()));
         entries.values.insert(key, entry.clone());
+        Ok(entry)
+    }
+
+    pub(crate) fn validated(
+        &self,
+        key: &ValidatedFileKey,
+    ) -> datafusion::error::Result<Option<Arc<ValidatedFileEntry>>> {
+        let entries = self.entries.lock().map_err(|_| {
+            datafusion::error::DataFusionError::Execution("footer cache lock poisoned".into())
+        })?;
+        let entry = entries.validated.get(key).cloned();
+        if entry.is_some() {
+            self.validated_hits.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(entry)
+    }
+
+    pub(crate) async fn validated_or_load<F>(
+        self: &Arc<Self>,
+        key: ValidatedFileKey,
+        load: F,
+    ) -> datafusion::error::Result<Arc<ValidatedFileEntry>>
+    where
+        F: std::future::Future<Output = datafusion::error::Result<Arc<ValidatedFileEntry>>>,
+    {
+        if let Some(entry) = self.validated(&key)? {
+            return Ok(entry);
+        }
+        let fill = {
+            let mut loads = self.validated_loads.lock().map_err(|_| {
+                datafusion::error::DataFusionError::Execution(
+                    "validated file load lock poisoned".into(),
+                )
+            })?;
+            if let Some(fill) = loads.get(&key).and_then(Weak::upgrade) {
+                fill
+            } else {
+                let fill = Arc::new(ValidatedLoad {
+                    result: tokio::sync::OnceCell::new(),
+                    key: key.clone(),
+                    registry: self.validated_loads.clone(),
+                });
+                loads.insert(key, Arc::downgrade(&fill));
+                fill
+            }
+        };
+        fill.result
+            .get_or_init(|| async { load.await.map_err(Arc::new) })
+            .await
+            .clone()
+            .map_err(|error| {
+                datafusion::error::DataFusionError::External(Box::new(SharedValidationError(error)))
+            })
+    }
+
+    pub(crate) async fn insert_validated(
+        &self,
+        key: ValidatedFileKey,
+        object: crate::store::ImmutableObject,
+        footer_key: &FooterIdentity,
+        physical: datafusion::arrow::datatypes::SchemaRef,
+        binding: Arc<dyn PhysicalExprAdapter>,
+    ) -> datafusion::error::Result<Arc<ValidatedFileEntry>> {
+        let footer = self
+            .entries
+            .lock()
+            .map_err(|_| {
+                datafusion::error::DataFusionError::Execution("footer cache lock poisoned".into())
+            })?
+            .values
+            .get(footer_key)
+            .cloned()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "validated Parquet footer is absent from its cache".into(),
+                )
+            })?;
+        let amount = 512usize
+            .saturating_add(key.uri.len() * 4)
+            .saturating_add(physical.fields().len() * 256);
+        let reservation = self
+            .admit(amount, None, 0)
+            .await
+            .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+        let mut entries = self.entries.lock().map_err(|_| {
+            datafusion::error::DataFusionError::Execution("footer cache lock poisoned".into())
+        })?;
+        if let Some(entry) = entries.validated.get(&key) {
+            return Ok(entry.clone());
+        }
+        let mut reservation = reservation;
+        reservation.finish_transient();
+        let entry = Arc::new(ValidatedFileEntry {
+            object,
+            footer,
+            physical,
+            binding,
+            _reservation: reservation,
+        });
+        entries.order.push_back(CacheKey::Validated(key.clone()));
+        entries.validated.insert(key, entry.clone());
         Ok(entry)
     }
 }
@@ -379,6 +541,7 @@ pub struct FooterReaderFactory<S> {
     bridge: Arc<ReadOnlyStore<S>>,
     inner: Arc<DefaultParquetFileReaderFactory>,
     cache: Arc<FooterCache>,
+    preloaded: Arc<BTreeMap<FooterIdentity, Arc<FooterEntry>>>,
     preflight: bool,
 }
 impl<S> fmt::Debug for FooterReaderFactory<S> {
@@ -396,8 +559,29 @@ impl<S: otmp::ObjectStore + fmt::Debug> FooterReaderFactory<S> {
             inner: Arc::new(DefaultParquetFileReaderFactory::new(bridge.clone())),
             bridge,
             cache,
+            preloaded: Arc::default(),
             preflight: false,
         }
+    }
+    pub(crate) fn with_validated(
+        mut self,
+        entries: impl IntoIterator<Item = Arc<ValidatedFileEntry>>,
+    ) -> Self {
+        self.preloaded = Arc::new(
+            entries
+                .into_iter()
+                .map(|entry| {
+                    let key = FooterIdentity {
+                        uri: entry.object.uri.to_string(),
+                        sha256: entry.object.sha256,
+                        length: entry.object.length,
+                        version: entry.object.version.as_opaque().to_owned(),
+                    };
+                    (key, entry.footer.clone())
+                })
+                .collect(),
+        );
+        self
     }
 }
 impl<S: otmp::ObjectStore + fmt::Debug> ParquetFileReaderFactory for FooterReaderFactory<S> {
@@ -409,12 +593,13 @@ impl<S: otmp::ObjectStore + fmt::Debug> ParquetFileReaderFactory for FooterReade
         metrics: &ExecutionPlanMetricsSet,
     ) -> datafusion::common::Result<Box<dyn AsyncFileReader + Send>> {
         let key = self.bridge.footer_identity(&file.object_meta.location)?;
+        let lease = self.preloaded.get(&key).cloned();
         Ok(Box::new(CachedReader {
             inner: self.inner.create_reader(p, file, hint, metrics)?,
             factory: self.inner.clone(),
             key,
             cache: self.cache.clone(),
-            lease: None,
+            lease,
             option_lease: None,
             hit_lease: None,
             counters: self.bridge.counters(),

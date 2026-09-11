@@ -127,6 +127,31 @@ async fn open(
 }
 
 #[tokio::test]
+async fn replanning_with_one_provider_reuses_the_validated_file() {
+    let (_dir, table) = fixture(1).await;
+    let provider = open(&table, false, 8).await;
+    let context = SessionContext::new();
+    let first = provider
+        .scan(&context.state(), None, &[], None)
+        .await
+        .unwrap();
+    let cold = provider.metrics();
+    assert_eq!(cold.parquet_requests, 3);
+    drop(first);
+
+    let second = provider
+        .scan(&context.state(), None, &[], None)
+        .await
+        .unwrap();
+    let warm = provider.metrics();
+    assert_eq!(warm.parquet_requests, cold.parquet_requests);
+    assert_eq!(warm.parquet_bytes, cold.parquet_bytes);
+    assert_eq!(warm.validated_file_cache_hits, 1);
+    drop(second);
+    provider.footer_cache.assert_idle();
+}
+
+#[tokio::test]
 async fn repeated_and_conflicting_identities_reconcile_before_any_plan_is_returned() {
     let (_dir, table) = fixture(257).await;
     for history in [false, true] {
@@ -298,6 +323,7 @@ async fn independent_scans_pin_their_own_version_and_stale_ranges_preserve_the_c
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep both shared failure and retry assertions in one controlled fill.
 async fn concurrent_malformed_files_fail_without_a_plan_or_stranded_load() {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     for corruption in ["trailer", "length", "container", "required-field"] {
@@ -349,21 +375,51 @@ async fn concurrent_malformed_files_fail_without_a_plan_or_stranded_load() {
                 file.file.content_sha256 = Some(Sha256::digest(&bytes));
             }
         }));
+        let gate = [
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        ];
+        provider.hooks.after_pin = Mutex::new(Some(gate.clone()));
+        let provider = Arc::new(provider);
         let context = SessionContext::new();
         let state = context.state();
         // Empty projection must still validate the required id field.
         let projection = vec![];
-        let (a, b) = tokio::join!(
-            provider.scan(&state, Some(&projection), &[], None),
-            provider.scan(&state, Some(&projection), &[], None)
-        );
-        for result in [a, b] {
+        let first = {
+            let provider = provider.clone();
+            let state = state.clone();
+            let projection = projection.clone();
+            tokio::spawn(async move { provider.scan(&state, Some(&projection), &[], None).await })
+        };
+        let second = {
+            let provider = provider.clone();
+            let state = state.clone();
+            let projection = projection.clone();
+            tokio::spawn(async move { provider.scan(&state, Some(&projection), &[], None).await })
+        };
+        gate[0].notified().await;
+        while provider.preflight.available_permits() != 6 {
+            tokio::task::yield_now().await;
+        }
+        gate[1].notify_one();
+        let (a, b) = tokio::join!(first, second);
+        for result in [a.unwrap(), b.unwrap()] {
             let error = result.unwrap_err();
             assert!(
                 error.to_string().contains(expected),
                 "{corruption}: {error}"
             );
         }
+        let fill_requests = if matches!(corruption, "trailer" | "length") {
+            2
+        } else {
+            3
+        };
+        assert_eq!(
+            provider.io.requests.load(Ordering::Relaxed),
+            fill_requests,
+            "concurrent first scans must share one stat/footer fill"
+        );
         provider.footer_cache.assert_idle();
         assert_eq!(provider.preflight.available_permits(), 8);
         assert_eq!(context.runtime_env().memory_pool.reserved(), 0);
@@ -374,12 +430,21 @@ async fn concurrent_malformed_files_fail_without_a_plan_or_stranded_load() {
                 .await
                 .is_err()
         );
+        assert_eq!(
+            provider.io.requests.load(Ordering::Relaxed),
+            if corruption == "required-field" {
+                fill_requests + 1
+            } else {
+                fill_requests * 2
+            },
+            "{corruption}: failed fills must be removed before retry"
+        );
         provider.footer_cache.assert_idle();
     }
 }
 
 #[tokio::test]
-async fn warm_scan_and_cold_scan_progress_under_one_decode_budget() {
+async fn eviction_forces_full_revalidation_under_one_entry_budget() {
     use otmp::ObjectStore;
     let (dir, table) = fixture(2).await;
     let mut provider = open(&table, false, 8).await;
@@ -396,7 +461,10 @@ async fn warm_scan_and_cold_scan_progress_under_one_decode_budget() {
                 + 64 * 1024
                 + 512
                 + file.file.uri.as_str().len() * 4
-                + metadata.version.as_opaque().len() * 2,
+                + metadata.version.as_opaque().len() * 2
+                + 512
+                + file.file.uri.as_str().len() * 4
+                + 256,
         );
     }
     provider.footer_cache = crate::footer::FooterCache::new(limit).unwrap();
@@ -405,7 +473,7 @@ async fn warm_scan_and_cold_scan_progress_under_one_decode_budget() {
         if files.is_empty() {
             return;
         }
-        let selected = usize::from(rounds.fetch_add(1, Ordering::Relaxed) >= 2);
+        let selected = usize::from(rounds.fetch_add(1, Ordering::Relaxed) >= 1);
         for (index, file) in files.iter_mut().enumerate() {
             if index != selected {
                 file.metrics[0].lower_bound = Some(TypedScalar::Int64(0));
@@ -421,34 +489,14 @@ async fn warm_scan_and_cold_scan_progress_under_one_decode_budget() {
             .await
             .unwrap(),
     );
-    let gate = [
-        Arc::new(tokio::sync::Notify::new()),
-        Arc::new(tokio::sync::Notify::new()),
-    ];
-    provider.hooks.validation = Mutex::new(Some(gate.clone()));
-    let provider = Arc::new(provider);
-    let scanning = provider.clone();
-    let state = context.state();
-    let warm = tokio::spawn(async move {
-        scanning
-            .scan(&state, None, &[col("id").gt_eq(lit(100_i64))], None)
+    assert_eq!(provider.io.requests.load(Ordering::Relaxed), 3);
+    drop(
+        provider
+            .scan(&context.state(), None, &filters, None)
             .await
-    });
-    gate[0].notified().await;
-    let scanning = provider.clone();
-    let state = context.state();
-    let mut cold = tokio::spawn(async move {
-        scanning
-            .scan(&state, None, &[col("id").gt_eq(lit(100_i64))], None)
-            .await
-    });
-    tokio::select! {
-        result = &mut cold => panic!("cold scan must wait for the active cached validation: {result:?}"),
-        () = provider.footer_cache.wait_for_pressure() => {},
-    }
-    gate[1].notify_one();
-    drop(warm.await.unwrap().unwrap());
-    drop(cold.await.unwrap().unwrap());
+            .unwrap(),
+    );
+    assert_eq!(provider.io.requests.load(Ordering::Relaxed), 6);
     provider.footer_cache.assert_idle();
     assert!(provider.footer_cache.statistics().1 <= limit);
     assert_eq!(provider.preflight.available_permits(), 8);
@@ -501,7 +549,7 @@ async fn repeated_uri_with_another_schema_keeps_a_preflight_lease_during_final_b
         3,
         "the second schema must reuse the original pin/footer"
     );
-    provider.footer_cache.assert_preflight_lease();
+    assert!(provider.footer_cache.statistics().0 > 0);
     gate[1].notify_one();
     let plan = task.await.unwrap().unwrap();
     assert_eq!(

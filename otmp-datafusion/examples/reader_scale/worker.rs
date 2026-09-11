@@ -618,7 +618,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn simultaneous_scans_share_one_footer_fill_but_pin_independently() {
+    async fn simultaneous_scans_share_one_validated_file_fill() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("table");
         fixture::prepare(
@@ -639,7 +639,7 @@ mod tests {
         let output = run(&root, config).await.unwrap();
         assert_eq!(output["outcome"], "success", "{output}");
         let io = &output["overlapping_rounds"][0]["io"]["by_class"]["data"];
-        assert_eq!(io["stat_requests"], 8);
+        assert_eq!(io["stat_requests"], 1);
         assert_eq!(io["range_requests"], 2);
         assert_eq!(io["active"], 0);
     }
@@ -795,10 +795,14 @@ mod tests {
             let phases = result["phases"].as_array().unwrap();
             let planning: Vec<_> = phases.iter().filter(|p| p["name"] == "planning").collect();
             assert_eq!(planning.len(), 2);
-            assert_eq!(planning[0]["provider"]["files_considered"], 4);
             assert_eq!(
-                planning[0]["provider"]["files_pruned"],
-                if pruning { 2 } else { 0 }
+                planning[0]["provider"]["files_considered"],
+                if pruning { 2 } else { 4 }
+            );
+            assert_eq!(planning[0]["provider"]["files_pruned"], 0);
+            assert_eq!(
+                planning[0]["provider"]["catalog_pruning_scans"],
+                u64::from(pruning)
             );
             assert!(planning[0]["pool_reserved_bytes"].as_u64().unwrap() > 0);
             assert!(phases.iter().all(|p| p["io"]["full_reads"] == 0));
@@ -909,7 +913,7 @@ fn reader_delta(after: ReaderStatistics, before: ReaderStatistics) -> Value {
     json!({"bytes":after.bytes-before.bytes,"requests":after.requests-before.requests,"pages":after.pages-before.pages,"cache_hits":after.cache_hits-before.cache_hits,"cache_bytes":after.cache_bytes,"peak_cache_bytes":after.peak_cache_bytes})
 }
 fn provider_delta(after: ProviderStatistics, before: ProviderStatistics) -> Value {
-    json!({"planning_micros":after.planning_micros-before.planning_micros,"files_considered":after.files_considered-before.files_considered,"files_pruned":after.files_pruned-before.files_pruned,"files_opened":after.files_opened-before.files_opened,"parquet_bytes":after.parquet_bytes-before.parquet_bytes,"parquet_requests":after.parquet_requests-before.parquet_requests,"footer_cache_hits":after.footer_cache_hits-before.footer_cache_hits,"footer_cache_bytes":after.footer_cache_bytes,"peak_footer_cache_bytes":after.peak_footer_cache_bytes})
+    json!({"planning_micros":after.planning_micros-before.planning_micros,"files_considered":after.files_considered-before.files_considered,"files_pruned":after.files_pruned-before.files_pruned,"catalog_pruning_scans":after.catalog_pruning_scans-before.catalog_pruning_scans,"files_opened":after.files_opened-before.files_opened,"parquet_bytes":after.parquet_bytes-before.parquet_bytes,"parquet_requests":after.parquet_requests-before.parquet_requests,"footer_cache_hits":after.footer_cache_hits-before.footer_cache_hits,"validated_file_cache_hits":after.validated_file_cache_hits-before.validated_file_cache_hits,"footer_cache_bytes":after.footer_cache_bytes,"peak_footer_cache_bytes":after.peak_footer_cache_bytes})
 }
 fn error_details(stage: &str, error: &DataFusionError) -> Value {
     let mut current: &(dyn StdError + 'static) = error;

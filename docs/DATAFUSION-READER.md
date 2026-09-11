@@ -63,11 +63,14 @@ caches and engine identities.
 
 ## File planning and schemas
 
-Each `scan()` asks for at most 256 file descriptors and only the metric fields
-referenced by filters. Branches use their live membership projection. Tags and
-historical snapshots follow immutable append-only ancestry. `FileBatch` returns
-an opaque continuation cursor from the raw metadata batch. Always follow that
-cursor, including after an empty batch; cursors cannot cross reader pins.
+Each `scan()` asks for at most 256 post-catalog candidate descriptors and only
+the metric fields referenced by filters. Branches use their live membership
+projection. Tags and historical snapshots follow immutable append-only ancestry.
+Supported top-level Int32, Int64, and Date32 range comparisons run in the SQLite
+membership query before its limit and descriptor projection. `FileBatch` is
+post-catalog but pre-client-pruning and returns an opaque continuation cursor.
+Always follow that cursor, including after an empty historical batch; cursors
+cannot cross reader pins, snapshot modes, or normalized range sets.
 
 CBOR metrics become typed Arrow statistics for DataFusion's pruning machinery.
 Unknown, missing, reversed, incompatible, and NaN-affected bounds retain files.
@@ -115,7 +118,7 @@ the async reader returns `OTMP_AUTHENTICATED_RANGES_UNAVAILABLE` for them.
 | Concurrent metadata I/O | 8 | Permits and pending reservations release on cancellation |
 | SQLite record payload | 1 MiB | Configurable `maximum_record_bytes`, checked before overflow-record allocation |
 | Retained scan descriptors | 64 MiB per scan | Also reserved through the session's DataFusion memory pool and held for the physical plan's lifetime |
-| Shared Parquet footer cache | 64 MiB per provider | Admission before decode; active leases stay charged after eviction |
+| Shared validated-file/footer cache | 64 MiB per provider | Exact object versions, decoded footers, physical schemas, and completed bindings; active leases stay charged after eviction |
 | Admitted file preflights | 8 per provider | `ProviderOptions::preflight_concurrency` accepts 1–32; 1 retains sequential admission |
 
 Turso page reads preserve the logical bytes and reject writes, truncation and
@@ -134,8 +137,10 @@ Non-default `ArrowReaderOptions` perform their own decode and index checks.
 Their admission must cover the conservative decode reservation plus any default
 footer still leased by a reader. A budget that fits only a cold default decode
 need not fit both. An impossible allocation returns resource exhaustion promptly.
-Cached preflight leases participate in admission progress until schema validation
-releases them; long-lived execution leases continue to count against capacity.
+Cached validated-file leases participate in admission progress; long-lived
+execution leases continue to count against capacity. Replanning through the same
+provider reuses the exact object version, footer, physical schema, and completed
+binding without another stat or footer read. A new provider or eviction is cold.
 
 Cancellation drops queued and asynchronous work. Footer decoding and schema
 binding are bounded synchronous calls: cancellation takes effect when control

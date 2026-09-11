@@ -96,6 +96,42 @@ impl PhysicalExprAdapterFactory for OtmpAdapterFactory {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct ValidatedAdapterFactory {
+    bindings: Vec<(SchemaRef, Arc<dyn PhysicalExprAdapter>)>,
+}
+
+impl ValidatedAdapterFactory {
+    pub(crate) fn new(
+        bindings: impl IntoIterator<Item = (SchemaRef, Arc<dyn PhysicalExprAdapter>)>,
+    ) -> Self {
+        let mut unique = Vec::new();
+        for binding in bindings {
+            if !unique
+                .iter()
+                .any(|(physical, _): &(SchemaRef, _)| physical == &binding.0)
+            {
+                unique.push(binding);
+            }
+        }
+        Self { bindings: unique }
+    }
+}
+
+impl PhysicalExprAdapterFactory for ValidatedAdapterFactory {
+    fn create(
+        &self,
+        _logical: SchemaRef,
+        physical: SchemaRef,
+    ) -> Result<Arc<dyn PhysicalExprAdapter>> {
+        self.bindings
+            .iter()
+            .find(|(validated, _)| validated.as_ref() == physical.as_ref())
+            .map(|(_, binding)| binding.clone())
+            .ok_or_else(|| error("Parquet schema differs from validated immutable state"))
+    }
+}
+
 fn physical_id(field: &datafusion::arrow::datatypes::Field) -> Result<Option<u32>> {
     field
         .metadata()

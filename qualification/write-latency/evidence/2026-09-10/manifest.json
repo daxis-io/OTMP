@@ -1,0 +1,874 @@
+{
+  "provenance": {
+    "exact_base": "78c3311a5d883fdda3542ff6e5a918bb24fee3ca",
+    "source_sha": "95914fedf421904ae34a7b060afb83d15e2e31dd",
+    "source_status": "",
+    "source_clean": true,
+    "binary": "/Users/ethanurbanski/OTMP/target/release/examples/write_latency",
+    "binary_sha256": "0a4e088634be4b7008ba96043bceba4b8174f6d53905b2265e0235fbcc1d0d05",
+    "host": "macOS-26.6-arm64-arm-64bit-Mach-O",
+    "python": "3.14.5 (v3.14.5:5607950ef23, May 10 2026, 07:38:09) [Clang 21.0.0 (clang-2100.0.123.102)]",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: aarch64-apple-darwin\nrelease: 1.95.0\nLLVM version: 22.1.2\n",
+    "os_cache_state": "uncontrolled"
+  },
+  "samples_per_case": 20,
+  "fixtures": {
+    "0": {
+      "property_bytes": 0,
+      "table_id": "01a08e23-c78d-7d51-94c9-f7dad92bcd22",
+      "table_version": 2,
+      "generation_id": "01a08e23-c7ed-71a0-b0cb-d4f795868dc2",
+      "head_sha256": "sha256:a842f240416a73b36cd7f1833e18bc78964f414bafa724b84c9839139eeb3107",
+      "head_bytes": 944,
+      "logical_image_bytes": 266240,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 1536,
+      "retained_history_verified": true
+    },
+    "131072": {
+      "property_bytes": 131072,
+      "table_id": "01a08e23-c864-73d2-9f2c-c2ac45d8964d",
+      "table_version": 2,
+      "generation_id": "01a08e23-c8cb-7533-ad7e-851ba6785769",
+      "head_sha256": "sha256:7590dcc032a3f8c6317e664616c31315f3fd625c68af9ef47c5201041344bbee",
+      "head_bytes": 944,
+      "logical_image_bytes": 528384,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 1538,
+      "retained_history_verified": true
+    },
+    "2097152": {
+      "property_bytes": 2097152,
+      "table_id": "01a08e23-c95d-7282-b8fd-d23b40d38c5d",
+      "table_version": 2,
+      "generation_id": "01a08e23-cb06-7e93-9e8e-3f6211d68c91",
+      "head_sha256": "sha256:fe6d4d13d8bb7bee22d2277ce4d4dadf8f386fc7a38f103724f8989bdceb8c1d",
+      "head_bytes": 944,
+      "logical_image_bytes": 4460544,
+      "checkpoint_bytes": 4460544,
+      "commit_bytes": 1539,
+      "retained_history_verified": true
+    },
+    "16777216": {
+      "property_bytes": 16777216,
+      "table_id": "01a08e23-cc57-7b33-96a0-de4f57bffe7f",
+      "table_version": 2,
+      "generation_id": "01a08e23-d4bb-73e3-b705-9deac7506b0c",
+      "head_sha256": "sha256:aed4aa5b7dcaff86fcfb58d0a9f500157d0506b2bf6350f335371a7d88d04149",
+      "head_bytes": 944,
+      "logical_image_bytes": 33853440,
+      "checkpoint_bytes": 33853440,
+      "commit_bytes": 1540,
+      "retained_history_verified": true
+    }
+  },
+  "fixture_tree_sha256": {
+    "0": "33f071097be2c5ddb15fe419e941866d66ec87c8512de875962ac8795e0b54bb",
+    "131072": "a05e2d2aa3552348e17ab35585d2ba7093393f1676d63db01b6552a2d72cf23b",
+    "2097152": "93775f503beecc345b873e94bad949543a012f0b0296d97c6624e594d804fd16",
+    "16777216": "3652d50f7eb0047b87a9b51457bc6875f27414ba2444969d41d767c7e2cd1760"
+  },
+  "matrix_order": [
+    {
+      "sample": 1,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 1,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 1,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 1,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 1,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 1,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 1,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 1,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 2,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 2,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 2,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 2,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 2,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 2,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 2,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 2,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 3,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 3,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 3,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 3,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 3,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 3,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 3,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 3,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 4,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 4,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 4,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 4,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 4,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 4,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 4,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 4,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 5,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 5,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 5,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 5,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 5,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 5,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 5,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 5,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 6,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 6,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 6,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 6,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 6,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 6,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 6,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 6,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 7,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 7,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 7,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 7,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 7,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 7,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 7,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 7,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 8,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 8,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 8,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 8,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 8,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 8,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 8,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 8,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 9,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 9,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 9,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 9,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 9,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 9,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 9,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 9,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 10,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 10,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 10,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 10,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 10,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 10,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 10,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 10,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 11,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 11,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 11,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 11,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 11,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 11,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 11,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 11,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 12,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 12,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 12,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 12,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 12,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 12,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 12,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 12,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 13,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 13,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 13,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 13,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 13,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 13,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 13,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 13,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 14,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 14,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 14,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 14,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 14,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 14,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 14,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 14,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 15,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 15,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 15,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 15,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 15,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 15,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 15,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 15,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 16,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 16,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 16,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 16,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 16,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 16,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 16,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 16,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 17,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 17,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 17,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 17,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 17,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 17,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 17,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 17,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 18,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 18,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 18,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 18,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 18,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 18,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 18,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 18,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 19,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 19,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 19,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 19,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 19,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 19,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 19,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 19,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 20,
+      "property_bytes": 131072,
+      "mode": "fresh"
+    },
+    {
+      "sample": 20,
+      "property_bytes": 0,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 20,
+      "property_bytes": 0,
+      "mode": "fresh"
+    },
+    {
+      "sample": 20,
+      "property_bytes": 16777216,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 20,
+      "property_bytes": 16777216,
+      "mode": "fresh"
+    },
+    {
+      "sample": 20,
+      "property_bytes": 2097152,
+      "mode": "pre_pinned"
+    },
+    {
+      "sample": 20,
+      "property_bytes": 2097152,
+      "mode": "fresh"
+    },
+    {
+      "sample": 20,
+      "property_bytes": 131072,
+      "mode": "pre_pinned"
+    }
+  ],
+  "rss_unavailable": true
+}

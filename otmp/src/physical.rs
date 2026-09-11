@@ -2,9 +2,10 @@
 use crate::storage::StoredObject;
 use crate::{ObjectStore, RuntimeError, Table};
 use otmp_protocol::{
-    Generation, JsonU64, ObjectReference, PAGE_MAP_MEDIA_TYPE, PAGE_PACK_MEDIA_TYPE, PageCodec,
-    PageMapBranch, PageMapEntry, PageMapNode, PageMapRoot, PageObjectReference, RelativeUri,
-    Sha256, decode_pack_index, decode_page_map, encode_page_map, encode_page_pack, image_root_hash,
+    CHECKPOINT_PAGE_INDEX_MEDIA_TYPE, CheckpointIndexNode, Generation, JsonU64, MetadataImage,
+    ObjectReference, PAGE_MAP_MEDIA_TYPE, PAGE_PACK_MEDIA_TYPE, PageCodec, PageMapBranch,
+    PageMapEntry, PageMapNode, PageMapRoot, PageObjectReference, RelativeUri, Sha256,
+    decode_pack_index, decode_page_map, encode_page_map, encode_page_pack, image_root_hash,
     object_hash,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +33,12 @@ pub(crate) struct Artifact {
     pub bytes: Vec<u8>,
 }
 
+struct CheckpointIndexVerification<'a> {
+    page_size: usize,
+    checkpoint: &'a [u8],
+    seen: &'a mut BTreeSet<String>,
+}
+
 fn corrupt(message: &str) -> RuntimeError {
     RuntimeError::Corrupt(message.into())
 }
@@ -45,6 +52,100 @@ fn object(reference: &PageObjectReference, media_type: &str) -> ObjectReference 
 }
 
 impl<S: ObjectStore> Table<S> {
+    async fn verify_checkpoint_index_node(
+        &self,
+        reference: PageObjectReference,
+        level: u32,
+        first_page: u64,
+        page_count: u64,
+        verification: &mut CheckpointIndexVerification<'_>,
+    ) -> Result<(), RuntimeError> {
+        if level > 64
+            || !verification.seen.insert(reference.uri.as_str().to_owned())
+            || reference.length.0 > otmp_protocol::MAX_CHECKPOINT_INDEX_BYTES as u64
+        {
+            return Err(corrupt(
+                "invalid checkpoint-index height, cycle, repeated subtree, or size",
+            ));
+        }
+        let raw = self
+            .read_metadata(&object(&reference, CHECKPOINT_PAGE_INDEX_MEDIA_TYPE))
+            .await?;
+        let node = otmp_protocol::decode_checkpoint_index(&raw.bytes)?;
+        if node.level() != level
+            || node.first_page() != first_page
+            || node.page_count() != page_count
+        {
+            return Err(corrupt(
+                "checkpoint-index node does not match declared interval",
+            ));
+        }
+        match node {
+            CheckpointIndexNode::Leaf { first_page, hashes } => {
+                for (offset, hash) in hashes.iter().enumerate() {
+                    let page = first_page
+                        .checked_add(offset as u64)
+                        .ok_or_else(|| corrupt("checkpoint-index page overflow"))?;
+                    let start = usize::try_from(page - 1)
+                        .ok()
+                        .and_then(|page| page.checked_mul(verification.page_size))
+                        .ok_or_else(|| corrupt("checkpoint-index byte offset overflow"))?;
+                    let end = start
+                        .checked_add(verification.page_size)
+                        .ok_or_else(|| corrupt("checkpoint-index byte range overflow"))?;
+                    if verification
+                        .checkpoint
+                        .get(start..end)
+                        .is_none_or(|bytes| Sha256::digest(bytes) != *hash)
+                    {
+                        return Err(corrupt(
+                            "checkpoint page disagrees with authenticated index",
+                        ));
+                    }
+                }
+            }
+            CheckpointIndexNode::Internal { entries, .. } => {
+                for entry in entries {
+                    Box::pin(self.verify_checkpoint_index_node(
+                        entry.child,
+                        level - 1,
+                        entry.first_page,
+                        entry.page_count,
+                        verification,
+                    ))
+                    .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn verify_checkpoint_index(
+        &self,
+        image: &MetadataImage,
+        checkpoint: &[u8],
+    ) -> Result<(), RuntimeError> {
+        let Some(index) = &image.checkpoint_page_index else {
+            return Ok(());
+        };
+        index.validate(&image.checkpoint, image.page_size)?;
+        let root = index.root.reference();
+        let mut verification = CheckpointIndexVerification {
+            page_size: usize::try_from(image.page_size)
+                .map_err(|_| corrupt("checkpoint page size exceeds platform size"))?,
+            checkpoint,
+            seen: &mut BTreeSet::new(),
+        };
+        self.verify_checkpoint_index_node(
+            root,
+            index.root.height,
+            1,
+            index.page_count.0,
+            &mut verification,
+        )
+        .await
+    }
+
     async fn load_tree(
         &self,
         reference: PageObjectReference,
@@ -132,6 +233,8 @@ impl<S: ObjectStore> Table<S> {
         {
             return Err(corrupt("invalid base checkpoint layout"));
         }
+        self.verify_checkpoint_index(image, &checkpoint.bytes)
+            .await?;
         // The checkpoint has its own identity, independent of the selected image.
         let base = crate::image::materialize(&checkpoint.bytes)?;
         let connection = crate::image::open_readonly(&base.path)?;

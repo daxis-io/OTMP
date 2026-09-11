@@ -1,0 +1,57 @@
+{
+  "artifacts": {
+    "candidate-v8-manifest.json": {
+      "bytes": 31462,
+      "sha256": "3b71c1ec503745413b934d03af74b69bc146fbea73c77efb7e4c16e47241d20e"
+    },
+    "final-verification.json": {
+      "bytes": 4794,
+      "sha256": "716926698a260de15ee6b277ecf29fb214fa9eaa5945199ad2fdc01b9e8b06d5"
+    },
+    "follow-up-review.md": {
+      "bytes": 5635,
+      "sha256": "c2d32871ef2e080e8fa4862aa6033384baa137180303401a35b91208963387e8"
+    },
+    "original-warm-gates-v8.json": {
+      "bytes": 105,
+      "sha256": "232910f1e773e0ba71b68878704119c9609951ad1593c6e6f61c1162f2498e54"
+    },
+    "qualification.json": {
+      "bytes": 2350,
+      "sha256": "e9a00b053fef86020f46b9665b8ff8b7386759041a0894dcd23482e19a60abb2"
+    },
+    "raw-index.json.gz": {
+      "bytes": 176064,
+      "sha256": "7a1a6863dad7995b29a25886aefae8b4402b607e81c32718a2627c3b42867ed2"
+    },
+    "raw-samples.json.gz": {
+      "bytes": 4771459,
+      "sha256": "cbf4815c599514c2e4f08ec5f005b065ba2eaff632e5a7f3775b7f98a7f34307"
+    },
+    "report.md": {
+      "bytes": 11206,
+      "sha256": "601275d48c7997958f52ebc2b35a25b0478fc2d5318004bdd712b2ff406f9947"
+    },
+    "results.json.gz": {
+      "bytes": 64831,
+      "sha256": "e11a82137ae31196e1e6b214b592f176eed147caf455e2cdda39a49adac60e62"
+    },
+    "v7-gates-rechecked.json": {
+      "bytes": 1951,
+      "sha256": "3b5dda6b572c9ccfdea99ea1c9067fce54ed311ef446b62243bbe16b00ead164"
+    },
+    "validation.json": {
+      "bytes": 3395,
+      "sha256": "95b6f5d72fc54fafc8d3ff633bf2da58c58ac73e5fdfda27f476e69063bc9c8f"
+    },
+    "validation.txt": {
+      "bytes": 588644,
+      "sha256": "d2ccbcbf9442d660e3eb430feba53c42091b213f440913b9be78d336e8440a7f"
+    }
+  },
+  "candidate_source_archive": {
+    "path": "/private/tmp/otmp-reader-review-repairs/candidate-source-v8.tar.gz",
+    "sha256": "e121369702459f664a13310d7bbe16fd3e2d6783629e9656c1c5a25924187a64"
+  },
+  "external_root": "/private/tmp/otmp-reader-review-repairs"
+}

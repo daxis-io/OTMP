@@ -1,0 +1,126 @@
+--- a/otmp/src/reader/files.rs
++++ b/otmp/src/reader/files.rs
+@@ -36,16 +36,45 @@
+             "metric field batch limit is 4096".into(),
+         ));
+     }
+-    let reservation = reader.context.reserve_bytes(8 * 1024 * 1024)?;
+     let cursor = match cursor {
+         Some(c) if c.pin == reader.pin_id => Some(c),
+         Some(_) => return Err(corrupt("file cursor belongs to another reader")),
+         None => None,
+     };
+     if reader.branch.is_none() {
+-        return historical(reader, cursor, fields, limit, reservation).await;
+-    }
+-    branch(reader, cursor, fields, limit, reservation).await
++        return historical(reader, cursor, fields, limit).await;
++    }
++    branch(reader, cursor, fields, limit).await
++}
++
++async fn descriptor_rows<S: ObjectStore>(
++    reader: &MetadataReader<S>,
++    sql: &str,
++    params: Vec<turso_core::Value>,
++    limit: usize,
++) -> Result<
++    (
++        Vec<Vec<turso_core::Value>>,
++        crate::reader::cache::Reservation,
++    ),
++    RuntimeError,
++> {
++    let context = reader.context.clone();
++    reader
++        .engine
++        .query_decoded(sql, params, limit, BYTES, BYTES, move |rows| {
++            let bytes = rows
++                .iter()
++                .flatten()
++                .map(|value| {
++                    crate::reader_engine::value_bytes(value)
++                        + std::mem::size_of::<turso_core::Value>()
++                })
++                .sum::<usize>();
++            let reservation = context.reserve_bytes(bytes.saturating_mul(8).max(4096))?;
++            Ok((rows, reservation))
++        })
++        .await
+ }
+ 
+ async fn branch<S: ObjectStore>(
+@@ -53,7 +82,6 @@
+     cursor: Option<FileCursor>,
+     fields: &[u32],
+     limit: usize,
+-    reservation: crate::reader::cache::Reservation,
+ ) -> Result<FileBatch, RuntimeError> {
+     let branch = reader
+         .branch
+@@ -74,7 +102,7 @@
+         None => BRANCH_FIRST_SQL,
+     };
+     params.push(integer(i64::try_from(limit).map_err(|_| corrupt("limit"))?));
+-    let rows = reader.engine.query(sql, params, limit, BYTES).await?;
++    let (rows, reservation) = descriptor_rows(reader, sql, params, limit).await?;
+     let mut files = Vec::with_capacity(rows.len());
+     let mut reservations = vec![reservation];
+     let mut next = None;
+@@ -136,7 +164,6 @@
+     cursor: Option<FileCursor>,
+     fields: &[u32],
+     limit: usize,
+-    reservation: crate::reader::cache::Reservation,
+ ) -> Result<FileBatch, RuntimeError> {
+     let selected = reader
+         .snapshot
+@@ -157,7 +184,7 @@
+     {
+         return Err(corrupt("historical cursor descriptor mismatch"));
+     }
+-    let rows=reader.engine.query("SELECT c.change_kind,f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,f.created_snapshot_id,f.created_version FROM otmp_snapshot_file_changes c LEFT JOIN otmp_files f ON f.file_id=c.file_id WHERE c.snapshot_id=?1 AND (?2 IS NULL OR c.file_id>?2) ORDER BY c.file_id LIMIT ?3",vec![turso_core::Value::Blob(snapshot.as_bytes().to_vec()),file.map_or(turso_core::Value::Null,|v|turso_core::Value::Blob(v.as_bytes().to_vec())),integer(i64::try_from(limit).map_err(|_|corrupt("limit"))?)],limit,BYTES).await?;
++    let (rows, reservation)=descriptor_rows(reader, "SELECT c.change_kind,f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,f.created_snapshot_id,f.created_version FROM otmp_snapshot_file_changes c LEFT JOIN otmp_files f ON f.file_id=c.file_id WHERE c.snapshot_id=?1 AND (?2 IS NULL OR c.file_id>?2) ORDER BY c.file_id LIMIT ?3",vec![turso_core::Value::Blob(snapshot.as_bytes().to_vec()),file.map_or(turso_core::Value::Null,|v|turso_core::Value::Blob(v.as_bytes().to_vec())),integer(i64::try_from(limit).map_err(|_|corrupt("limit"))?)],limit).await?;
+     let mut files = Vec::new();
+     let mut reservations = vec![reservation];
+     let mut last = file;
+--- a/otmp/src/reader_engine.rs
++++ b/otmp/src/reader_engine.rs
+@@ -374,6 +374,19 @@
+         max_bytes: usize,
+         max_row_bytes: usize,
+     ) -> Result<Vec<Vec<turso_core::Value>>, RuntimeError> {
++        self.query_decoded(sql, params, max_rows, max_bytes, max_row_bytes, Ok)
++            .await
++    }
++
++    pub(crate) async fn query_decoded<T: Send + 'static>(
++        &self,
++        sql: &str,
++        params: Vec<turso_core::Value>,
++        max_rows: usize,
++        max_bytes: usize,
++        max_row_bytes: usize,
++        decode: impl FnOnce(Vec<Vec<turso_core::Value>>) -> Result<T, RuntimeError> + Send + 'static,
++    ) -> Result<T, RuntimeError> {
+         if max_rows == 0 || max_bytes == 0 || max_row_bytes == 0 {
+             return Err(RuntimeError::ResourceExhausted(
+                 "query row and byte budgets must be non-zero".into(),
+@@ -463,7 +476,7 @@
+             }
+             statement_result?;
+             cancellation.check()?;
+-            Ok::<_, RuntimeError>(rows)
++            decode(rows)
+         })
+         .await
+         .map_err(|error| RuntimeError::Turso(format!("reader worker failed: {error}")))?;
+@@ -482,7 +495,7 @@
+     )
+ }
+ 
+-fn value_bytes(value: &turso_core::Value) -> usize {
++pub(crate) fn value_bytes(value: &turso_core::Value) -> usize {
+     match value {
+         turso_core::Value::Null => 0,
+         turso_core::Value::Numeric(_) => std::mem::size_of::<i64>(),

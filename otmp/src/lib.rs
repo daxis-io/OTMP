@@ -1,9 +1,13 @@
-//! Catalog-free OTMP runtime with incremental writes and materialized readers.
+//! Catalog-free OTMP runtime with incremental writes and authenticated or materialized readers.
 
+mod checkpoint_index;
 mod cow_writer;
 mod error;
 mod image;
 mod physical;
+pub mod reader;
+mod reader_engine;
+mod reader_engine_pages;
 mod runtime;
 mod sql_writer;
 pub mod storage;
@@ -12,6 +16,9 @@ pub mod storage;
 pub mod write_latency_qualification;
 
 pub use error::RuntimeError;
+pub use reader::{
+    FileBatch, FileCursor, MetadataReader, ReaderFile, ReaderOptions, ReaderStatistics,
+};
 pub use runtime::{
     AppendFile, AppendRequest, AppendResult, CommitMetadata, CommittedFile, FileFormat, FileMetric,
     HistoryEntry, InitializeRequest, LiveFile, PinnedTable, SnapshotMetadata, SourceFingerprint,
@@ -19,7 +26,7 @@ pub use runtime::{
 };
 pub use storage::{
     ConditionalWriteOutcome, InMemoryObjectStore, InjectedConditional, LocalObjectStore,
-    ObjectStore, ObjectVersion, StorageError,
+    ObjectMetadata, ObjectStore, ObjectVersion, StorageError, StoredRange,
 };
 
 pub use runtime::{

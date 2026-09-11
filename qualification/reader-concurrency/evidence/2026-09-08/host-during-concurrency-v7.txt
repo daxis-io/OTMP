@@ -1,0 +1,12 @@
+ 2304  2303  45.1       00:03 /private/tmp/otmp-reader-concurrency-evidence/reader_scale-candidate-v7
+68316     1  29.6 26-17:35:42 /Applications/Warp.app/Contents/MacOS/stable
+  579     1  16.0 39-06:36:19 /usr/libexec/dasd
+ 2362     1  15.6       00:00 /System/Library/Frameworks/Contacts.framework/Support/contactsd
+ 2363     1  15.2       00:00 /System/Library/Frameworks/Contacts.framework/Support/contactsd
+ 2364     1  14.8       00:00 /System/Library/Frameworks/Contacts.framework/Support/contactsd
+ 2365     1  14.7       00:00 /System/Library/Frameworks/Contacts.framework/Support/contactsd
+99991 89376  10.7       01:13 /private/tmp/otmp-warm-index-evidence/stage4/reader_scale-release-39d8da79
+ 2360     1  10.5       00:00 /System/Library/Frameworks/Contacts.framework/Support/contactsd
+  606     1  10.5 39-06:36:19 /usr/libexec/runningboardd
+    1     0   9.9 39-06:37:35 /sbin/launchd
+ 2359     1   9.6       00:00 /System/Library/Frameworks/Contacts.framework/Support/contactsd

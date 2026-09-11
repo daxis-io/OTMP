@@ -1,0 +1,72 @@
+{
+  "metadata_image_bytes": 288935936,
+  "selected_table_version": 3,
+  "registration": {
+    "bytes": 421914,
+    "requests": 130,
+    "pages": 35,
+    "cache_hits": 131,
+    "peak_cache_bytes": 22923438,
+    "latency_ms": 79
+  },
+  "planning": {
+    "metadata_bytes": 24576,
+    "metadata_requests": 18,
+    "metadata_pages": 6,
+    "metadata_cache_hits": 18,
+    "peak_cache_bytes": 22923438,
+    "files_considered": 16,
+    "files_pruned": 14,
+    "parquet_footer_bytes": 1956,
+    "parquet_requests": 10,
+    "reserved_bytes": 3736,
+    "latency_ms": 33
+  },
+  "parquet_execution": {
+    "bytes": 18580,
+    "requests": 2,
+    "files_opened": 2,
+    "footer_cache_hits": 2,
+    "peak_footer_cache_bytes": 129066,
+    "latency_ms": 4,
+    "result_count": 2000,
+    "result_sum": 29999000
+  },
+  "environment": {
+    "os": "macOS 26.6",
+    "architecture": "arm64",
+    "rust": "1.95.0",
+    "reader_cache": "cold",
+    "os_cache": "not flushed",
+    "profile": "dev"
+  },
+  "process": {
+    "peak_rss_bytes": 82067456,
+    "wall_seconds": 21.6,
+    "exit_code": 0,
+    "measurement": "Darwin /usr/bin/time -l"
+  },
+  "budgets": {
+    "metadata_bytes": 67108864,
+    "engine_page_cache_bytes": 4194304,
+    "planning_bytes": 67108864,
+    "footer_cache_bytes": 67108864
+  },
+  "source_commit": "8c708591d419c7fdafe967662be8cc1683fbe854",
+  "base_commit": "78c3311a5d883fdda3542ff6e5a918bb24fee3ca",
+  "local_log_sha256": {
+    "nextest-terminal.log": "0a8da229fffdbdb43a94b74f5de737ae6ba4333dfafe359b9ce99f7313faf022",
+    "clippy-final.log": "bc9d10ab570f7badd63721bde0154f212fa3dd4db60caa7319c55c433803cd95",
+    "doctests-final.log": "f3e806f19a03b6521ab75374033ce5c6772bee5e20601cab9b89d8a8ff2d2cb9",
+    "provider-harness.log": "a27158acb6aaf3c72225b269c4b02181ee3818b9139d66f240f518f5f35763ba",
+    "conformance.log": "8e00a36eb23ea657bb6963020a8b206cc34c235e8a4df141b1909eb93df9f86b",
+    "crash-local.log": "d337eb3c44417f298fa54d2bc8ac841b74fcd3e94093ee562464b05c864e1346",
+    "wasm.log": "fbb656556185d7a6d37a15c59f6ab4b1a1a21476fa49916388af5e87286289a6",
+    "deny-final.log": "e79de987ab0eb0df058ffb109a9a4ad16788b1e004d16faf7b979e61539796eb",
+    "audit.log": "ad01afa3611294a16544e614bc58fbd10d11cf6d4603ad21a17d607e27fe98d7",
+    "parquet-performance-final.json": "97226481261024e0a32f0340cb277cf4d73a4016168f8709d5b06c0a2b87fd70",
+    "parquet-performance-final.stderr": "e7fb9077cd999971d56c0096a181b0d8219a8be4f3d6fe2d2a78f1b6f01c1ee0",
+    "stage1-verification.log": "a2440b16db3b115ae80c7e8b8542e561b68a346a3206aa5d8aca081de88508df",
+    "stage2-verification.log": "3548a3277af963bf98e7d994e960e3f216e707fc70a8cdd16d20fe922233fcbe"
+  }
+}

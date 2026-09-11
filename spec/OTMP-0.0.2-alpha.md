@@ -922,6 +922,41 @@ A checkpoint reference includes:
 
 A checkpoint MAY replace an older physical base without changing semantic state.
 
+### 12.5 Authenticated checkpoint page index
+
+`metadata_image` MAY include `checkpoint_page_index`. When present, it contains
+`checkpoint_sha256`, `checkpoint_length`, `page_size`, `page_count`, and `root`.
+The checkpoint digest and length MUST equal the adjacent checkpoint reference;
+`page_size * page_count` MUST equal that checkpoint length. These coordinates
+describe the base checkpoint, which may have fewer pages than the logical image.
+`root` contains `uri`, `sha256`, `length`, and `height`, using the page-map root
+reference encoding. Root height MUST be at most 64 and leaf height is zero.
+
+The index is an immutable content-addressed tree of deterministic CBOR nodes.
+Its wire encoding uses shortest integer/length forms, definite lengths, sorted
+encoded keys, and raw 32-byte SHA-256 values. Unknown, duplicate, and
+noncanonical fields MUST be rejected. Node shapes in diagnostic notation are:
+
+```text
+{version: 1, node_type: "leaf", first_page: P, hashes: [H1, H2, ...]}
+{version: 1, node_type: "internal", level: N,
+ entries: [{first_page: P, page_count: C,
+            child: {uri: U, length: L, sha256: H}}, ...]}
+```
+
+A leaf contains 1–128 hashes for consecutive pages beginning at `first_page`.
+An internal node contains 1–128 nonempty child intervals, ordered without gaps
+or overlaps; its children have level one less than its own. Each node and each
+declared child length MUST be at most 1 MiB. The root interval MUST cover exactly
+pages 1 through the checkpoint page count. Every visited child's interval,
+level, declared length, and hash MUST agree with its parent reference.
+
+Writers generate this index from validated complete checkpoint bytes, publish
+its nodes before the generation, and MAY reuse it while reusing that checkpoint.
+Materialized readers MAY open index-free generations with whole-object
+verification. An authenticated range reader MUST report such generations as
+unavailable; it MUST NOT substitute unauthenticated checkpoint ranges.
+
 ---
 
 ## 13. Page-pack format
@@ -986,13 +1021,21 @@ Entries MUST be sorted by logical page number and MUST NOT contain duplicates.
 
 Payload bytes MAY be compressed independently per page.
 
-A reader MUST:
+A materialized or exhaustive reader MUST:
 
 1. verify the whole-object hash from the object reference;
 2. parse the header and index;
 3. fetch or decode the selected payload;
 4. verify the page hash; and
 5. return exactly `page_size` uncompressed bytes.
+
+An authenticated range reader MAY defer the whole-pack hash to exhaustive
+verification. It MUST authenticate the page-map path, validate bounded header
+and index reads against the pack's declared full length, and require the index
+entry's page number, offset, codec, stored/raw lengths, and page digest to agree
+with the authenticated leaf. It then verifies the selected uncompressed page
+digest. Range responses MUST preserve exact offsets, length, and one object
+version; unsupported ranges MUST NOT silently become full-object downloads.
 
 ### 13.6 Pack constraints
 
@@ -2261,6 +2304,13 @@ A reader chooses one of two core paths.
 3. fetch ranges from the checkpoint or page packs;
 4. verify and cache immutable bytes; and
 5. return pages to SQLite.
+
+For authenticated range reads, an unmodified checkpoint page MUST be checked
+against the entry reached through `checkpoint_page_index`. Opening a reader
+checks generation/commit linkage, checkpoint and logical-image identity,
+selected schema and references, and every page it consumes. Whole-tree
+coverage, whole checkpoint/pack hashes, global relational invariants, and
+semantic replay remain exhaustive verification operations.
 
 ### 27.5 Resolve current snapshot
 
@@ -3764,6 +3814,8 @@ function read_page(generation, page_number):
     offset = (page_number - 1) * generation.page_size
     bytes = range_read(generation.checkpoint.uri, offset, generation.page_size)
     require len(bytes) == generation.page_size
+    expected = authenticated_checkpoint_index_lookup(generation.checkpoint_page_index, page_number)
+    require sha256(bytes) == expected
     return bytes
 ```
 

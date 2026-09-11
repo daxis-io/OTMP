@@ -1,0 +1,30 @@
+[package]
+name = "otmp-datafusion"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bytes = "1.11.1"
+chrono = "0.4.45"
+datafusion = { version = "=55.0.0", default-features = false, features = ["parquet", "sql"] }
+otmp.workspace = true
+otmp-protocol.workspace = true
+object_store = "=0.13.2"
+futures-util = "0.3.34"
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+loom = "0.7.2"
+tracing-subscriber.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["time", "test-util"] }
+tempfile.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

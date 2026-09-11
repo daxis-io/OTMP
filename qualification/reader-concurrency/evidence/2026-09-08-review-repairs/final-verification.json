@@ -1,0 +1,119 @@
+{
+  "concurrency_gates": {
+    "delayed-broad/baseline/completion": true,
+    "delayed-broad/candidate/completion": true,
+    "delayed-broad/planning-2x": true,
+    "local-broad/baseline/completion": true,
+    "local-broad/candidate/completion": true,
+    "local-broad/warm": true,
+    "local-heterogeneous/baseline/completion": true,
+    "local-heterogeneous/candidate/completion": true,
+    "local-heterogeneous/warm": true,
+    "local-small/baseline/completion": true,
+    "local-small/candidate/completion": true,
+    "local-small/warm": true,
+    "mixed-broad-small/0:1/small": true,
+    "mixed-broad-small/0:2/small": true,
+    "mixed-broad-small/0:3/small": true,
+    "mixed-broad-small/baseline/completion": true,
+    "mixed-broad-small/candidate/completion": true,
+    "mixed-broad-small/throughput": true,
+    "mixed-homogeneous-1/0:0/small": true,
+    "mixed-homogeneous-1/baseline/completion": true,
+    "mixed-homogeneous-1/candidate/completion": true,
+    "mixed-homogeneous-1/throughput": true,
+    "mixed-homogeneous-2/0:0/small": true,
+    "mixed-homogeneous-2/0:1/small": true,
+    "mixed-homogeneous-2/baseline/completion": true,
+    "mixed-homogeneous-2/candidate/completion": true,
+    "mixed-homogeneous-2/throughput": true,
+    "mixed-homogeneous-4/0:0/small": true,
+    "mixed-homogeneous-4/0:1/small": true,
+    "mixed-homogeneous-4/0:2/small": true,
+    "mixed-homogeneous-4/0:3/small": true,
+    "mixed-homogeneous-4/baseline/completion": true,
+    "mixed-homogeneous-4/candidate/completion": true,
+    "mixed-homogeneous-4/throughput": true,
+    "mixed-homogeneous-8/0:0/small": true,
+    "mixed-homogeneous-8/0:1/small": true,
+    "mixed-homogeneous-8/0:2/small": true,
+    "mixed-homogeneous-8/0:3/small": true,
+    "mixed-homogeneous-8/0:4/small": true,
+    "mixed-homogeneous-8/0:5/small": true,
+    "mixed-homogeneous-8/0:6/small": true,
+    "mixed-homogeneous-8/0:7/small": true,
+    "mixed-homogeneous-8/baseline/completion": true,
+    "mixed-homogeneous-8/candidate/completion": true,
+    "mixed-homogeneous-8/throughput": true
+  },
+  "control_binaries": {
+    "eight-query": {
+      "path": "/private/tmp/otmp-reader-concurrency-evidence/reader_scale-reservation-control",
+      "sha256": "bac3a1afc263795fbf85f49b2b4e49abe23aaf479ff3ba5c089452199658d100"
+    },
+    "instrumentation": {
+      "path": "/private/tmp/otmp-reader-concurrency-evidence/reader_scale-instrumentation",
+      "sha256": "3a56a37ac9f1fed1d51722c2a518ca655be091b3115b4b796416d06a30cd8f11"
+    },
+    "original": {
+      "path": "/private/tmp/otmp-reader-planning-evidence/reader_scale-83d3e6a",
+      "sha256": "f6f9dc13e75b1f578f15dc3f66aa76d6facd273fde9e328b0df34544360507cf"
+    }
+  },
+  "iceberg_provenance_unchanged": true,
+  "original_v7_evidence_files_verified": 19,
+  "original_warm_gates": {
+    "local-16384-2": true,
+    "local-16384-all": true,
+    "local-4096-2": true,
+    "local-4096-all": true
+  },
+  "per_round_binary_and_fixture_checks": 560,
+  "source_files_verified": 239,
+  "timed_processes": {
+    "concurrency-v8": 340,
+    "iceberg-v8": 200,
+    "original-paired-v8": 220
+  },
+  "worktrees": {
+    "/Users/ethanurbanski/OTMP": {
+      "head": "78c3311a5d883fdda3542ff6e5a918bb24fee3ca",
+      "status": []
+    },
+    "/private/tmp/otmp-reader-concurrency": {
+      "head": "88cefa7f6cab3bd7670668cb99c43b974f63bd6e",
+      "status": [
+        " M Cargo.lock",
+        " M docs/DATAFUSION-READER.md",
+        " M otmp-datafusion/Cargo.toml",
+        " M otmp-datafusion/examples/reader_scale.rs",
+        " M otmp-datafusion/examples/reader_scale/fixture.rs",
+        " M otmp-datafusion/examples/reader_scale/transport.rs",
+        " M otmp-datafusion/examples/reader_scale/worker.rs",
+        " M otmp-datafusion/src/footer.rs",
+        " M otmp-datafusion/src/provider.rs",
+        " M otmp-datafusion/src/store.rs",
+        " M otmp-datafusion/tests/planning.rs",
+        " M otmp-datafusion/tests/provider.rs",
+        " M otmp/Cargo.toml",
+        " M otmp/src/error.rs",
+        " M otmp/src/reader/files.rs",
+        " M otmp/src/reader/pages.rs",
+        " M otmp/src/reader_engine.rs",
+        " M qualification/reader-comparison/Cargo.lock",
+        " M qualification/reader-scale/run.py",
+        " M qualification/reader-scale/tests/test_run.py",
+        "?? docs/plans/2026-09-08-reader-runtime-isolation-follow-up.md",
+        "?? otmp-datafusion/src/provider_tests.rs",
+        "?? otmp-datafusion/tests/concurrency_model.rs",
+        "?? qualification/reader-concurrency/",
+        "?? qualification/reader-scale/concurrency.py",
+        "?? qualification/reader-scale/tests/test_concurrency.py"
+      ]
+    },
+    "/private/tmp/otmp-reader-planning": {
+      "head": "88cefa7f6cab3bd7670668cb99c43b974f63bd6e",
+      "status": []
+    }
+  }
+}

@@ -1,0 +1,121 @@
+{
+  "fmt-v7": {
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--check"
+    ],
+    "exit_code": 0
+  },
+  "comparator-fmt-v7": {
+    "command": [
+      "cargo",
+      "fmt",
+      "--manifest-path",
+      "qualification/reader-comparison/Cargo.toml",
+      "--check"
+    ],
+    "exit_code": 0
+  },
+  "clippy-all-features-v7": {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--all-features",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0
+  },
+  "doctests-v7": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--workspace",
+      "--doc"
+    ],
+    "exit_code": 0
+  },
+  "provider-harness-v7": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "otmp-s3",
+      "--example",
+      "provider_evidence"
+    ],
+    "exit_code": 0
+  },
+  "python-scale-v7": {
+    "command": [
+      "python3",
+      "-W",
+      "error::ResourceWarning",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "qualification/reader-scale/tests",
+      "-v"
+    ],
+    "exit_code": 0
+  },
+  "python-comparator-v7": {
+    "command": [
+      "python3",
+      "-W",
+      "error::ResourceWarning",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "qualification/reader-comparison/tests",
+      "-v"
+    ],
+    "exit_code": 0
+  },
+  "conformance-v7": {
+    "command": [
+      "python3",
+      "conformance/regenerate.py",
+      "--check"
+    ],
+    "exit_code": 0
+  },
+  "wasm-v7": {
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "-p",
+      "otmp-protocol",
+      "--target",
+      "wasm32-unknown-unknown"
+    ],
+    "exit_code": 0
+  },
+  "crash-v7": {
+    "command": [
+      "bash",
+      "tests/run-subprocess.sh"
+    ],
+    "exit_code": 0
+  },
+  "scale-smoke-v7": {
+    "command": [
+      "python3",
+      "qualification/reader-scale/smoke.py",
+      "--binary",
+      "/private/tmp/otmp-reader-concurrency-evidence/reader_scale-candidate-v7"
+    ],
+    "exit_code": 0
+  }
+}

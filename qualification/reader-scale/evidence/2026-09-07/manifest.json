@@ -1,0 +1,3696 @@
+{
+  "artifacts": {
+    "raw-index.json.gz": {
+      "bytes": 221356,
+      "sha256": "fe13df0a095e359b0eb811a7bb43d75ab9ddd7993c45d6d0b894147fec6d0d2b",
+      "uncompressed_sha256": "5017ed829f4858a7d756ec6ef5d7c31b19e573574876f356fc6b991470898e61"
+    },
+    "results.json.gz": {
+      "bytes": 140733,
+      "sha256": "50f8af28687f7d0483416eff6c5f9da9bf90e24b230385abc3e3c6e108341846",
+      "uncompressed_sha256": "44be0565086a01087f11a4a3fe69287ac412726c82270f78a54738de769757c0"
+    }
+  },
+  "build": {
+    "archived_binary_path": "/private/tmp/otmp-reader-scale-evidence-v2/reader_scale-ad04d67c",
+    "binary": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+    "binary_sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a",
+    "build_command": "CARGO_TARGET_DIR=/private/tmp/otmp-datafusion-target cargo build --offline --locked --release -p otmp-datafusion --example reader_scale",
+    "build_profile": "release",
+    "cpu": "Apple M4 Max",
+    "fixture_source": "/private/tmp/otmp-reader-scale-evidence/fixtures",
+    "flags": {
+      "CARGO_BUILD_JOBS": null,
+      "CARGO_ENCODED_RUSTFLAGS": null,
+      "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": null,
+      "CARGO_PROFILE_RELEASE_LTO": null,
+      "RUSTFLAGS": null
+    },
+    "host": "macOS-26.6-arm64-arm-64bit-Mach-O",
+    "logical_cpus": "16",
+    "memory_bytes": "68719476736",
+    "native_binary_source_commit": "62a8143bc7468b0b50b091d4a26816dec6f45a91",
+    "os_cache": "uncontrolled; fresh reader cache per process; retained-provider passes within process",
+    "preparation": "normal writer and exhaustive verification outside measurement; initial fixtures prepared with development binary; measured binary uses identical fixture schema and geometry",
+    "prior_provisional_evidence": "/private/tmp/otmp-reader-scale-evidence",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: aarch64-apple-darwin\nrelease: 1.95.0\nLLVM version: 22.1.2",
+    "source_commit": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960",
+    "source_status": "",
+    "timer": "blocking process wait on dedicated thread; process exit and capture completion separately recorded"
+  },
+  "cache_experiment": {
+    "archived_binary": "/private/tmp/otmp-reader-scale-cache-evidence/reader_scale-f513ef5c",
+    "manifest": {
+      "binary_after": {
+        "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+        "sha256": "f513ef5cef59045f5fbe1ed31c38edab1e66aca4a2d138782610ce06193a1d4f"
+      },
+      "binary_before": {
+        "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+        "sha256": "f513ef5cef59045f5fbe1ed31c38edab1e66aca4a2d138782610ce06193a1d4f"
+      },
+      "binary_unchanged": true,
+      "configs": {
+        "engine-16m": {
+          "engine_page_cache_bytes": 16777216,
+          "passes": 2,
+          "survivors": 2
+        },
+        "engine-32m": {
+          "engine_page_cache_bytes": 33554432,
+          "passes": 2,
+          "survivors": 2
+        },
+        "engine-4m": {
+          "engine_page_cache_bytes": 4194304,
+          "passes": 2,
+          "survivors": 2
+        }
+      },
+      "failure": null,
+      "fixture_after": {
+        "head_present": true,
+        "head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+        "manifest_head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+        "manifest_matches_head": true,
+        "manifest_present": true,
+        "manifest_sha256": "194aa5f9121a40f3662c04c027b149014a7ac0bd3132447ba1ac3ec014eef195"
+      },
+      "fixture_before": {
+        "head_present": true,
+        "head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+        "manifest_head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+        "manifest_matches_head": true,
+        "manifest_present": true,
+        "manifest_sha256": "194aa5f9121a40f3662c04c027b149014a7ac0bd3132447ba1ac3ec014eef195"
+      },
+      "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16384",
+      "fixture_unchanged": true,
+      "order_file": "order.json",
+      "samples_per_case": 20,
+      "schema_version": 1,
+      "seed": 7,
+      "source": {
+        "available": true,
+        "dirty": false,
+        "root": "/private/tmp/otmp-reader-scale",
+        "sha": "4135b824b5713a81c53b3c78de321cbe084e86a6"
+      },
+      "status": "complete",
+      "timeout_seconds": 300.0
+    },
+    "order": {
+      "order": [
+        {
+          "case": "engine-16m",
+          "position": 1,
+          "round": 1
+        },
+        {
+          "case": "engine-32m",
+          "position": 2,
+          "round": 1
+        },
+        {
+          "case": "engine-4m",
+          "position": 3,
+          "round": 1
+        },
+        {
+          "case": "engine-32m",
+          "position": 1,
+          "round": 2
+        },
+        {
+          "case": "engine-4m",
+          "position": 2,
+          "round": 2
+        },
+        {
+          "case": "engine-16m",
+          "position": 3,
+          "round": 2
+        },
+        {
+          "case": "engine-4m",
+          "position": 1,
+          "round": 3
+        },
+        {
+          "case": "engine-16m",
+          "position": 2,
+          "round": 3
+        },
+        {
+          "case": "engine-32m",
+          "position": 3,
+          "round": 3
+        },
+        {
+          "case": "engine-4m",
+          "position": 1,
+          "round": 4
+        },
+        {
+          "case": "engine-32m",
+          "position": 2,
+          "round": 4
+        },
+        {
+          "case": "engine-16m",
+          "position": 3,
+          "round": 4
+        },
+        {
+          "case": "engine-16m",
+          "position": 1,
+          "round": 5
+        },
+        {
+          "case": "engine-4m",
+          "position": 2,
+          "round": 5
+        },
+        {
+          "case": "engine-32m",
+          "position": 3,
+          "round": 5
+        },
+        {
+          "case": "engine-32m",
+          "position": 1,
+          "round": 6
+        },
+        {
+          "case": "engine-16m",
+          "position": 2,
+          "round": 6
+        },
+        {
+          "case": "engine-4m",
+          "position": 3,
+          "round": 6
+        },
+        {
+          "case": "engine-4m",
+          "position": 1,
+          "round": 7
+        },
+        {
+          "case": "engine-32m",
+          "position": 2,
+          "round": 7
+        },
+        {
+          "case": "engine-16m",
+          "position": 3,
+          "round": 7
+        },
+        {
+          "case": "engine-32m",
+          "position": 1,
+          "round": 8
+        },
+        {
+          "case": "engine-16m",
+          "position": 2,
+          "round": 8
+        },
+        {
+          "case": "engine-4m",
+          "position": 3,
+          "round": 8
+        },
+        {
+          "case": "engine-16m",
+          "position": 1,
+          "round": 9
+        },
+        {
+          "case": "engine-4m",
+          "position": 2,
+          "round": 9
+        },
+        {
+          "case": "engine-32m",
+          "position": 3,
+          "round": 9
+        },
+        {
+          "case": "engine-32m",
+          "position": 1,
+          "round": 10
+        },
+        {
+          "case": "engine-4m",
+          "position": 2,
+          "round": 10
+        },
+        {
+          "case": "engine-16m",
+          "position": 3,
+          "round": 10
+        },
+        {
+          "case": "engine-16m",
+          "position": 1,
+          "round": 11
+        },
+        {
+          "case": "engine-32m",
+          "position": 2,
+          "round": 11
+        },
+        {
+          "case": "engine-4m",
+          "position": 3,
+          "round": 11
+        },
+        {
+          "case": "engine-4m",
+          "position": 1,
+          "round": 12
+        },
+        {
+          "case": "engine-16m",
+          "position": 2,
+          "round": 12
+        },
+        {
+          "case": "engine-32m",
+          "position": 3,
+          "round": 12
+        },
+        {
+          "case": "engine-16m",
+          "position": 1,
+          "round": 13
+        },
+        {
+          "case": "engine-4m",
+          "position": 2,
+          "round": 13
+        },
+        {
+          "case": "engine-32m",
+          "position": 3,
+          "round": 13
+        },
+        {
+          "case": "engine-4m",
+          "position": 1,
+          "round": 14
+        },
+        {
+          "case": "engine-32m",
+          "position": 2,
+          "round": 14
+        },
+        {
+          "case": "engine-16m",
+          "position": 3,
+          "round": 14
+        },
+        {
+          "case": "engine-32m",
+          "position": 1,
+          "round": 15
+        },
+        {
+          "case": "engine-16m",
+          "position": 2,
+          "round": 15
+        },
+        {
+          "case": "engine-4m",
+          "position": 3,
+          "round": 15
+        },
+        {
+          "case": "engine-16m",
+          "position": 1,
+          "round": 16
+        },
+        {
+          "case": "engine-4m",
+          "position": 2,
+          "round": 16
+        },
+        {
+          "case": "engine-32m",
+          "position": 3,
+          "round": 16
+        },
+        {
+          "case": "engine-32m",
+          "position": 1,
+          "round": 17
+        },
+        {
+          "case": "engine-16m",
+          "position": 2,
+          "round": 17
+        },
+        {
+          "case": "engine-4m",
+          "position": 3,
+          "round": 17
+        },
+        {
+          "case": "engine-4m",
+          "position": 1,
+          "round": 18
+        },
+        {
+          "case": "engine-32m",
+          "position": 2,
+          "round": 18
+        },
+        {
+          "case": "engine-16m",
+          "position": 3,
+          "round": 18
+        },
+        {
+          "case": "engine-32m",
+          "position": 1,
+          "round": 19
+        },
+        {
+          "case": "engine-4m",
+          "position": 2,
+          "round": 19
+        },
+        {
+          "case": "engine-16m",
+          "position": 3,
+          "round": 19
+        },
+        {
+          "case": "engine-4m",
+          "position": 1,
+          "round": 20
+        },
+        {
+          "case": "engine-16m",
+          "position": 2,
+          "round": 20
+        },
+        {
+          "case": "engine-32m",
+          "position": 3,
+          "round": 20
+        }
+      ],
+      "samples_per_case": 20,
+      "seed": 7
+    },
+    "raw_root": "/private/tmp/otmp-reader-scale-cache-evidence",
+    "summary_sha256": "49ff94b2ccc5043ad4bdd084a65348dfc6c26125e77857be03ea27d1c42c2ebd"
+  },
+  "cases": {
+    "append-1024": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-append-1024.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:cad9b006975d5f7f154a7d1606d675bef3c23059cd4377b21ed0de39d9e811dc",
+          "manifest_head_sha256": "sha256:cad9b006975d5f7f154a7d1606d675bef3c23059cd4377b21ed0de39d9e811dc",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7e037094c76225d584255de4e632ffe6a877173b26266129b8f86bc8309adb31"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:cad9b006975d5f7f154a7d1606d675bef3c23059cd4377b21ed0de39d9e811dc",
+          "manifest_head_sha256": "sha256:cad9b006975d5f7f154a7d1606d675bef3c23059cd4377b21ed0de39d9e811dc",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7e037094c76225d584255de4e632ffe6a877173b26266129b8f86bc8309adb31"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/append-1024",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "378ed269e8bd41e02aa9f0c31d412287c880d9e57a657dd7ca09f9aeddd31b61"
+    },
+    "append-1024-tail": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-append-1024-tail.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:b8329a655540dd9a9d672754aa03fd82ee0192a9faccca77070d703ca625fbbe",
+          "manifest_head_sha256": "sha256:b8329a655540dd9a9d672754aa03fd82ee0192a9faccca77070d703ca625fbbe",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "3cc6e15ca0e3c91ceefc68588c67f497f3986c059de5bd74ed467ea1b4d2ef74"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:b8329a655540dd9a9d672754aa03fd82ee0192a9faccca77070d703ca625fbbe",
+          "manifest_head_sha256": "sha256:b8329a655540dd9a9d672754aa03fd82ee0192a9faccca77070d703ca625fbbe",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "3cc6e15ca0e3c91ceefc68588c67f497f3986c059de5bd74ed467ea1b4d2ef74"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/append-1024-tail",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "1b152a83318fb698b1da2adf02ea1c26bb4f761d5ebb810f7300ca0afb41e763"
+    },
+    "append-128": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-append-128.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:a6ed47e5b42292c5a730db1a77577d16005c617bf348f1641eb705412ac94d41",
+          "manifest_head_sha256": "sha256:a6ed47e5b42292c5a730db1a77577d16005c617bf348f1641eb705412ac94d41",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "437ed62cb7729a5abf76ff60c6f8c87a3b195595b158d7d555780c151b596837"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:a6ed47e5b42292c5a730db1a77577d16005c617bf348f1641eb705412ac94d41",
+          "manifest_head_sha256": "sha256:a6ed47e5b42292c5a730db1a77577d16005c617bf348f1641eb705412ac94d41",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "437ed62cb7729a5abf76ff60c6f8c87a3b195595b158d7d555780c151b596837"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/append-128",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "f9655382cc3bfe19e236c97355bf606aef7309a513788229ca416ead5d156ab2"
+    },
+    "append-128-tail": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-append-128-tail.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:217f36811f389dbb37348fd475c79d416f19c2f9d98f2dd6d4a0aa5d76438866",
+          "manifest_head_sha256": "sha256:217f36811f389dbb37348fd475c79d416f19c2f9d98f2dd6d4a0aa5d76438866",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "98a9269aa518174803d8a5d9e1441543deb5e328264da2e6838ff0fe95a6c8d9"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:217f36811f389dbb37348fd475c79d416f19c2f9d98f2dd6d4a0aa5d76438866",
+          "manifest_head_sha256": "sha256:217f36811f389dbb37348fd475c79d416f19c2f9d98f2dd6d4a0aa5d76438866",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "98a9269aa518174803d8a5d9e1441543deb5e328264da2e6838ff0fe95a6c8d9"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/append-128-tail",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "b61887e11416e009533cac2c4a8a7d712f514b2f07831c0023aa8a68d09f5e6b"
+    },
+    "append-2048": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-append-2048.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:944495ae0ecc630b68d433b9b7e5e080ae5e925a95b943b288ce49eb74c14bb7",
+          "manifest_head_sha256": "sha256:944495ae0ecc630b68d433b9b7e5e080ae5e925a95b943b288ce49eb74c14bb7",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "a3eea0a21597f57b67e7f2754fd9a7ee38d897685dcf0dd97aad72c747e43bcb"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:944495ae0ecc630b68d433b9b7e5e080ae5e925a95b943b288ce49eb74c14bb7",
+          "manifest_head_sha256": "sha256:944495ae0ecc630b68d433b9b7e5e080ae5e925a95b943b288ce49eb74c14bb7",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "a3eea0a21597f57b67e7f2754fd9a7ee38d897685dcf0dd97aad72c747e43bcb"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/append-2048",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "6d008298bf430e73bfa6ccb3a7122a20a71bf7ebbc7b4add87bed44eb2e48770"
+    },
+    "append-2048-raised": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "metadata_budget": 268435456,
+          "record_budget": 4194304
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-append-2048-raised.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:944495ae0ecc630b68d433b9b7e5e080ae5e925a95b943b288ce49eb74c14bb7",
+          "manifest_head_sha256": "sha256:944495ae0ecc630b68d433b9b7e5e080ae5e925a95b943b288ce49eb74c14bb7",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "a3eea0a21597f57b67e7f2754fd9a7ee38d897685dcf0dd97aad72c747e43bcb"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:944495ae0ecc630b68d433b9b7e5e080ae5e925a95b943b288ce49eb74c14bb7",
+          "manifest_head_sha256": "sha256:944495ae0ecc630b68d433b9b7e5e080ae5e925a95b943b288ce49eb74c14bb7",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "a3eea0a21597f57b67e7f2754fd9a7ee38d897685dcf0dd97aad72c747e43bcb"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/append-2048",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "a60be9167717ecaf8328b1e87cd98dee450aef5398a46080d51548b3acd548f3"
+    },
+    "append-2048-tail": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-append-2048-tail.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:998d1b50cb679d4f31e2df8848dba9b1b422684a0712e510da4a7c6311d21e65",
+          "manifest_head_sha256": "sha256:998d1b50cb679d4f31e2df8848dba9b1b422684a0712e510da4a7c6311d21e65",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "3d6c6b70c39cf77ede9cff5fb4535aaa52cb36e1671e1b084b2fd588a9a34a55"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:998d1b50cb679d4f31e2df8848dba9b1b422684a0712e510da4a7c6311d21e65",
+          "manifest_head_sha256": "sha256:998d1b50cb679d4f31e2df8848dba9b1b422684a0712e510da4a7c6311d21e65",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "3d6c6b70c39cf77ede9cff5fb4535aaa52cb36e1671e1b084b2fd588a9a34a55"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/append-2048-tail",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "4172c8eb9937b86645d45685ca0fbd2597c9e4104cb376ed5c3188c5cb240a29"
+    },
+    "append-512": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-append-512.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:9bae725749f7a40685d4c618274d545482605d63488ddc1e8f607bbbaedb0869",
+          "manifest_head_sha256": "sha256:9bae725749f7a40685d4c618274d545482605d63488ddc1e8f607bbbaedb0869",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "8bc960f533a759fabff486a655ed33c68109d8b9fb4524afcf670a9a0922a6a2"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:9bae725749f7a40685d4c618274d545482605d63488ddc1e8f607bbbaedb0869",
+          "manifest_head_sha256": "sha256:9bae725749f7a40685d4c618274d545482605d63488ddc1e8f607bbbaedb0869",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "8bc960f533a759fabff486a655ed33c68109d8b9fb4524afcf670a9a0922a6a2"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/append-512",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "41c380f90afde83976a9d5998440fddf1a8749bd422ebcad959e9024750cffe6"
+    },
+    "append-512-tail": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-append-512-tail.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:79f4e8ec48c56ac6d4a1cdd0731d253c3b250844e57e465af17ec0dcd611d6f6",
+          "manifest_head_sha256": "sha256:79f4e8ec48c56ac6d4a1cdd0731d253c3b250844e57e465af17ec0dcd611d6f6",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "04452942274b95a1fc31dde8d39e6a0a08d92944f8b59da61098fccc8b50ae4f"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:79f4e8ec48c56ac6d4a1cdd0731d253c3b250844e57e465af17ec0dcd611d6f6",
+          "manifest_head_sha256": "sha256:79f4e8ec48c56ac6d4a1cdd0731d253c3b250844e57e465af17ec0dcd611d6f6",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "04452942274b95a1fc31dde8d39e6a0a08d92944f8b59da61098fccc8b50ae4f"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/append-512-tail",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "1578288653879f9173be72b5eaf8d9201caf8382ab93126e2afb29987114e7db"
+    },
+    "growth-1024-all": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-1024-all.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-1024",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "951fee14719a131b5ad3ec5c99bf44268f41d03201780625a85d644fe99eee30"
+    },
+    "growth-1024-retained": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-1024-retained.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-1024",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "5ab0a67200787ebf028e24101623d1e5c3dd1b1c13a954abcfd40de87d8a33ac"
+    },
+    "growth-1024-selective": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-1024-selective.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-1024",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "863b2cc0223f59d5bd2879fed15d798152d4cd4a9cc2d599b9f249240b5041c0"
+    },
+    "growth-1024-unpruned": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "pruning": false,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-1024-unpruned.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-1024",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "1fcf44bbcd6c6f54c5a272bced30b7f959b05c91ebd2fd9675ae043dfadebccc"
+    },
+    "growth-16-all": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-16-all.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "356deef14ee100235263e316d721418be3940aa1e8c86f4ed264b07a13b5016b"
+    },
+    "growth-16-retained": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-16-retained.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "21f88ea2ca665fc780b5fe303425ff534c1954c0b1c26971b6d5487c1a791cd1"
+    },
+    "growth-16-selective": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-16-selective.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "62fad999fe66cccfafea1c477d3f972007a8f445fe861609261a7cfa8858f374"
+    },
+    "growth-16-unpruned": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "pruning": false,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-16-unpruned.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "f7db6179742be03bde93fb97ca13894c1266735e1eebc477533505e795349210"
+    },
+    "growth-16384-all": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-16384-all.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "194aa5f9121a40f3662c04c027b149014a7ac0bd3132447ba1ac3ec014eef195"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "194aa5f9121a40f3662c04c027b149014a7ac0bd3132447ba1ac3ec014eef195"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16384",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "1296a859ea9eef67ef4939f7a01d95ebcb7473854f218ce5474ddbb2f6c5e0c9"
+    },
+    "growth-16384-planning-only": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "execute": false
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-16384-planning-only.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "194aa5f9121a40f3662c04c027b149014a7ac0bd3132447ba1ac3ec014eef195"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "194aa5f9121a40f3662c04c027b149014a7ac0bd3132447ba1ac3ec014eef195"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16384",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "c9fe17c1907f84c78a3baeeb2d6deb3013f2847c23aa45a6060454e89ce41e8f"
+    },
+    "growth-16384-retained": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-16384-retained.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "194aa5f9121a40f3662c04c027b149014a7ac0bd3132447ba1ac3ec014eef195"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "194aa5f9121a40f3662c04c027b149014a7ac0bd3132447ba1ac3ec014eef195"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16384",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "a1e295a74f8b68f426f1e8e26f83bdca4f70716581b43df7aeaeb385808b9534"
+    },
+    "growth-16384-selective": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-16384-selective.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "194aa5f9121a40f3662c04c027b149014a7ac0bd3132447ba1ac3ec014eef195"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "194aa5f9121a40f3662c04c027b149014a7ac0bd3132447ba1ac3ec014eef195"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16384",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "726cd59db3f576b3887ff4ab3b44e09f08aebe3c7d68999dde9e609757402ef1"
+    },
+    "growth-16384-unpruned": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "pruning": false,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-16384-unpruned.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "194aa5f9121a40f3662c04c027b149014a7ac0bd3132447ba1ac3ec014eef195"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "194aa5f9121a40f3662c04c027b149014a7ac0bd3132447ba1ac3ec014eef195"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16384",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "efc07cff21fc1986849ae0aae5161cbb46217538aad73961f24e56e6ef0ed092"
+    },
+    "growth-256-all": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-256-all.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-256",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "9c40b1ea3a7e0cd6472ab99e7ab1e06fe7f6084068348f719295159bcdc7dce9"
+    },
+    "growth-256-retained": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-256-retained.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-256",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "d9bfbc419425924e74d237af4dcc8113304aa19ba7351f8ae2eeb0e0e09d1219"
+    },
+    "growth-256-selective": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-256-selective.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-256",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "bbc6d38c98a33ac61efdf889324b5b3e8e74a5b7dcf5ed95a8ccc91c3edfca10"
+    },
+    "growth-256-unpruned": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "pruning": false,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-256-unpruned.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-256",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "0b2185e2f2ca12198aedd0fb91854430b5318d6139094de6722d6822dd7db065"
+    },
+    "growth-4096-all": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-4096-all.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-4096",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "c5497c4077937a49ce9c41af12c262f37226ad9f79eeb510af16381bfc6bf14c"
+    },
+    "growth-4096-planning-only": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "execute": false
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-4096-planning-only.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-4096",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "3c8d2eabb70d1e72ccf9bdd41ab83b077079ca5b3473cde2e45aa3f8e9636ed5"
+    },
+    "growth-4096-retained": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-4096-retained.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-4096",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "54ae3749490f18bab2a8011a4b5853688f524bc7ad432b874a7161f8f507a8ee"
+    },
+    "growth-4096-selective": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-4096-selective.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-4096",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "ad2558805cfac005521c61fdab071a7d8d072de589d7b4b51efb66278123ac3a"
+    },
+    "growth-4096-unpruned": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "pruning": false,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-growth-4096-unpruned.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-4096",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "68f11b254d00b09b3f3d4633e7ea13768b95a34c709b086b9fe880af88db1407"
+    },
+    "planning-budget-1048576": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "planning_budget": 1048576
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-planning-budget-1048576.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-4096",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "40890640c08ba55097521e07b9fd6c6eedc2b5e6247d1773a2b0d6586daf7d71"
+    },
+    "planning-budget-262144": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "planning_budget": 262144
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-planning-budget-262144.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-4096",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "72509ea114f3e47dc3a500ad045c8f3bceec1b6fe11c224dfc1f7a15811bf531"
+    },
+    "planning-budget-32768": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "planning_budget": 32768
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-planning-budget-32768.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-4096",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "dccc7d22f37cfe3c59296797d3a134845bd82040489619969cd5c74f49cac717"
+    },
+    "planning-budget-8388608": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "planning_budget": 8388608
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-planning-budget-8388608.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-4096",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "86f057b3d3b4152b3cdb8f79ce27e9f9153f0e68a1d267b0b428177ab6940663"
+    },
+    "pool-budget-1048576": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "df_pool_bytes": 1048576
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-pool-budget-1048576.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "448f0fb62bae13a59090b766de5257c8502993d8bc0c7c14d1b318f4f00cd9d3"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-4096",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "b0f4e90be5ce931bbc9d573f080382eabeb844616e38363806a7c1262ce1b254"
+    },
+    "property-1048576": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-property-1048576.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:a123df7fbf32cf23e05f01d5e9f5ee30fd6f26b3dea2ac252fb56d76381add6a",
+          "manifest_head_sha256": "sha256:a123df7fbf32cf23e05f01d5e9f5ee30fd6f26b3dea2ac252fb56d76381add6a",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "91645962717c947ac6a1364f8dd1de0d776b4c7889339dcf085c16a8db4fe068"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:a123df7fbf32cf23e05f01d5e9f5ee30fd6f26b3dea2ac252fb56d76381add6a",
+          "manifest_head_sha256": "sha256:a123df7fbf32cf23e05f01d5e9f5ee30fd6f26b3dea2ac252fb56d76381add6a",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "91645962717c947ac6a1364f8dd1de0d776b4c7889339dcf085c16a8db4fe068"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/property-1048576",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "f6f8cce295bd6799a8e09e5e27c265a678cd022fe9cc4d90d459c37cc2073ee1"
+    },
+    "property-1048576-raised": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "metadata_budget": 268435456,
+          "record_budget": 4194304
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-property-1048576-raised.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:a123df7fbf32cf23e05f01d5e9f5ee30fd6f26b3dea2ac252fb56d76381add6a",
+          "manifest_head_sha256": "sha256:a123df7fbf32cf23e05f01d5e9f5ee30fd6f26b3dea2ac252fb56d76381add6a",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "91645962717c947ac6a1364f8dd1de0d776b4c7889339dcf085c16a8db4fe068"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:a123df7fbf32cf23e05f01d5e9f5ee30fd6f26b3dea2ac252fb56d76381add6a",
+          "manifest_head_sha256": "sha256:a123df7fbf32cf23e05f01d5e9f5ee30fd6f26b3dea2ac252fb56d76381add6a",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "91645962717c947ac6a1364f8dd1de0d776b4c7889339dcf085c16a8db4fe068"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/property-1048576",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "9b34529cf1a7a5103f8c8e0c75fc2694e7d21d0831f073d7416c916c73fd263f"
+    },
+    "property-1048576-tail": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-property-1048576-tail.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:50389a7b08c023362818b59eff8b40e7aff3c8ed4fd24183a0038b64991b9339",
+          "manifest_head_sha256": "sha256:50389a7b08c023362818b59eff8b40e7aff3c8ed4fd24183a0038b64991b9339",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "db8d2eb63a2a7e35db9c534aa9d64b83f6d0de77b224c93ea99cf9adbd2cae9b"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:50389a7b08c023362818b59eff8b40e7aff3c8ed4fd24183a0038b64991b9339",
+          "manifest_head_sha256": "sha256:50389a7b08c023362818b59eff8b40e7aff3c8ed4fd24183a0038b64991b9339",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "db8d2eb63a2a7e35db9c534aa9d64b83f6d0de77b224c93ea99cf9adbd2cae9b"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/property-1048576-tail",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "0529706cd6145bef35c1cea3f77dc89267210d5f6a65304ecdfd8806d038edb0"
+    },
+    "property-131072": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-property-131072.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:6f90289753036a4f7d334a27593ac7774adc9784ff716de5a640d8b6618d6c84",
+          "manifest_head_sha256": "sha256:6f90289753036a4f7d334a27593ac7774adc9784ff716de5a640d8b6618d6c84",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "eba8cef346422ad4d3b9353fab4352a1481e598d205617ec4afbe48f25d06b7c"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:6f90289753036a4f7d334a27593ac7774adc9784ff716de5a640d8b6618d6c84",
+          "manifest_head_sha256": "sha256:6f90289753036a4f7d334a27593ac7774adc9784ff716de5a640d8b6618d6c84",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "eba8cef346422ad4d3b9353fab4352a1481e598d205617ec4afbe48f25d06b7c"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/property-131072",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "707b3cece649f4d0937df4833506f2d81cd4d875012103e3b0d2a889f784e876"
+    },
+    "property-131072-tail": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-property-131072-tail.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:d4849591f27a4baf4a0da3da1299e17ab8de9738e913611c4a4faae345f1fd20",
+          "manifest_head_sha256": "sha256:d4849591f27a4baf4a0da3da1299e17ab8de9738e913611c4a4faae345f1fd20",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "12e89f5a4fb0fc779529036c8a0b1b81cfb627ca06fd973d145aed2cd428bfa4"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:d4849591f27a4baf4a0da3da1299e17ab8de9738e913611c4a4faae345f1fd20",
+          "manifest_head_sha256": "sha256:d4849591f27a4baf4a0da3da1299e17ab8de9738e913611c4a4faae345f1fd20",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "12e89f5a4fb0fc779529036c8a0b1b81cfb627ca06fd973d145aed2cd428bfa4"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/property-131072-tail",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "0882fcb495717d08c5933435417434370c9196e270c4e3401e7446fdb6206e4a"
+    },
+    "property-16384": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-property-16384.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:fc5eae9e400a65a2c20168fd848d5f26d4a4c35c0aedbe7c9f86fa096d5f9849",
+          "manifest_head_sha256": "sha256:fc5eae9e400a65a2c20168fd848d5f26d4a4c35c0aedbe7c9f86fa096d5f9849",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "d048980f816ed6af05a0d0b364595f0f6f48d4cc9303b365041cc6c6a7399aa5"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:fc5eae9e400a65a2c20168fd848d5f26d4a4c35c0aedbe7c9f86fa096d5f9849",
+          "manifest_head_sha256": "sha256:fc5eae9e400a65a2c20168fd848d5f26d4a4c35c0aedbe7c9f86fa096d5f9849",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "d048980f816ed6af05a0d0b364595f0f6f48d4cc9303b365041cc6c6a7399aa5"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/property-16384",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "ecb3adcf656bdcce23573477a6029eb0f1adda2f510bc49f23c0df73c247c98d"
+    },
+    "property-16384-tail": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-property-16384-tail.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:b3658104268932812be5110bbc4112c2032fa84ec1f4bf5dcda9dabf3d5211de",
+          "manifest_head_sha256": "sha256:b3658104268932812be5110bbc4112c2032fa84ec1f4bf5dcda9dabf3d5211de",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "9266c098c0afbb20cee5778d92e57056320519573af5489a8c2a4746a142ff32"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:b3658104268932812be5110bbc4112c2032fa84ec1f4bf5dcda9dabf3d5211de",
+          "manifest_head_sha256": "sha256:b3658104268932812be5110bbc4112c2032fa84ec1f4bf5dcda9dabf3d5211de",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "9266c098c0afbb20cee5778d92e57056320519573af5489a8c2a4746a142ff32"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/property-16384-tail",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "a77cc3344b8629620ae98fcabac7edd2e1ef924c36e8e294a60a2e1a9c31f01d"
+    },
+    "property-2097152": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-property-2097152.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:d2de7966fdbcc3c19af1928f1b5ec9d639d87dd039aabcf319b65453ab5c3278",
+          "manifest_head_sha256": "sha256:d2de7966fdbcc3c19af1928f1b5ec9d639d87dd039aabcf319b65453ab5c3278",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "1ebd747c21aae738356172c761c32964e24b943fa77cc2432bc2c1fad159825d"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:d2de7966fdbcc3c19af1928f1b5ec9d639d87dd039aabcf319b65453ab5c3278",
+          "manifest_head_sha256": "sha256:d2de7966fdbcc3c19af1928f1b5ec9d639d87dd039aabcf319b65453ab5c3278",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "1ebd747c21aae738356172c761c32964e24b943fa77cc2432bc2c1fad159825d"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/property-2097152",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "eb0016ce70d64fe5926174f80fdc7a5bbe43d6434c544cb36fd45ae1b8071933"
+    },
+    "property-2097152-raised": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "metadata_budget": 268435456,
+          "record_budget": 4194304
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-property-2097152-raised.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:d2de7966fdbcc3c19af1928f1b5ec9d639d87dd039aabcf319b65453ab5c3278",
+          "manifest_head_sha256": "sha256:d2de7966fdbcc3c19af1928f1b5ec9d639d87dd039aabcf319b65453ab5c3278",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "1ebd747c21aae738356172c761c32964e24b943fa77cc2432bc2c1fad159825d"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:d2de7966fdbcc3c19af1928f1b5ec9d639d87dd039aabcf319b65453ab5c3278",
+          "manifest_head_sha256": "sha256:d2de7966fdbcc3c19af1928f1b5ec9d639d87dd039aabcf319b65453ab5c3278",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "1ebd747c21aae738356172c761c32964e24b943fa77cc2432bc2c1fad159825d"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/property-2097152",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "e38f2e15b649fa52a43f341c78197faa6ac7061a6f48021b53483e6434e9437b"
+    },
+    "property-2097152-tail": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-property-2097152-tail.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:d9dd6267293459c4c4aad9646a8bd957395932fc14a78c4e00330fd1111fb4bf",
+          "manifest_head_sha256": "sha256:d9dd6267293459c4c4aad9646a8bd957395932fc14a78c4e00330fd1111fb4bf",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "48839f5023cd52f72e7c4048e03b44cd32e9ae97d6967a58370d62770ef96bd7"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:d9dd6267293459c4c4aad9646a8bd957395932fc14a78c4e00330fd1111fb4bf",
+          "manifest_head_sha256": "sha256:d9dd6267293459c4c4aad9646a8bd957395932fc14a78c4e00330fd1111fb4bf",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "48839f5023cd52f72e7c4048e03b44cd32e9ae97d6967a58370d62770ef96bd7"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/property-2097152-tail",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "193c7999ba571ccd46af0c7ee94b48fb33562fbaee840d7653919098ab50ada1"
+    },
+    "property-524288": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-property-524288.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:dc1e061667da7060ec3b40cc5f88063adeadc09f0e98d3bcd0e8a7b5f2fad067",
+          "manifest_head_sha256": "sha256:dc1e061667da7060ec3b40cc5f88063adeadc09f0e98d3bcd0e8a7b5f2fad067",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "0c62f2ce17d63cd752f5caab424de49f632d32527840ed8a7bb40b1dae5a9be6"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:dc1e061667da7060ec3b40cc5f88063adeadc09f0e98d3bcd0e8a7b5f2fad067",
+          "manifest_head_sha256": "sha256:dc1e061667da7060ec3b40cc5f88063adeadc09f0e98d3bcd0e8a7b5f2fad067",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "0c62f2ce17d63cd752f5caab424de49f632d32527840ed8a7bb40b1dae5a9be6"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/property-524288",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "e28b20fa7d851b5639c619c429b63c050be6a18252d161b924c3e5629e22ebc2"
+    },
+    "property-524288-tail": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {},
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-property-524288-tail.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:5a97006978060fd15b86a9b4b0e8f65d41c31b441327ec9ceeff9093a25a8cb1",
+          "manifest_head_sha256": "sha256:5a97006978060fd15b86a9b4b0e8f65d41c31b441327ec9ceeff9093a25a8cb1",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "c7122a8c060fc3f5730a0c8b8a6c6df4d9623e4d8129c75c67d1f2439ab23b06"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:5a97006978060fd15b86a9b4b0e8f65d41c31b441327ec9ceeff9093a25a8cb1",
+          "manifest_head_sha256": "sha256:5a97006978060fd15b86a9b4b0e8f65d41c31b441327ec9ceeff9093a25a8cb1",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "c7122a8c060fc3f5730a0c8b8a6c6df4d9623e4d8129c75c67d1f2439ab23b06"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/property-524288-tail",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 20,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "7bc600aa7859741efd0a148339ec65fe6f8b080850866df63949460ce44cac1e"
+    },
+    "remote-1024-10ms-cap1": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 10,
+          "metadata_inflight": 1,
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-1024-10ms-cap1.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-1024",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "9d1791f009708de30d5d002197388c4c124b709a0cbaf463674a95ca9162f7e7"
+    },
+    "remote-1024-10ms-cap8": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 10,
+          "metadata_inflight": 8,
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-1024-10ms-cap8.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-1024",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "f8450171d1b453a9dbca9f3d4293fa5845673d4796c207da30e964f7f6606cd0"
+    },
+    "remote-1024-1ms-cap1": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 1,
+          "metadata_inflight": 1,
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-1024-1ms-cap1.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-1024",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "498034089e810b9e79818613c1ab03753c4d3aca8917c8d3c892237abf903426"
+    },
+    "remote-1024-1ms-cap8": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 1,
+          "metadata_inflight": 8,
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-1024-1ms-cap8.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "13bcb2b0d1259d2f22da430daadec53c5c5c00406a574c1df2255f6d00767824"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-1024",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "df63bd241d219dcf1a6e9ad274ea8797ec4b7977a37845845078ea8faa949135"
+    },
+    "remote-16-10ms-cap1": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 10,
+          "metadata_inflight": 1,
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-16-10ms-cap1.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "ea70b1c6de094da883af9c01999480182500851e523a7f85963e6e7cd4f340ff"
+    },
+    "remote-16-10ms-cap8": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 10,
+          "metadata_inflight": 8,
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-16-10ms-cap8.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "7d41cad48e9c2b0ed48a5e9204019326088343a3870a16615772d59fd63f0521"
+    },
+    "remote-16-1ms-cap1": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 1,
+          "metadata_inflight": 1,
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-16-1ms-cap1.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "1dec211b434d32eefec974e65ee8ded2bc49b6b1147f155ce546602f6513db34"
+    },
+    "remote-16-1ms-cap8": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 1,
+          "metadata_inflight": 8,
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-16-1ms-cap8.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "7983c5b300f837e19e5b1a8b2505824d1b9560652b35bb4773a0fe97de71b3c0"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-16",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "ddadf0eead1ba30f583784b141ba83bf83408263f569a2cfbac49d6b1b3e0cd9"
+    },
+    "remote-256-10ms-cap1": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 10,
+          "metadata_inflight": 1,
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-256-10ms-cap1.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-256",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "d8169052b4a4df984f4bf041d3fc7c3ad45e5c88f96dd8c2270df7663a47b911"
+    },
+    "remote-256-10ms-cap8": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 10,
+          "metadata_inflight": 8,
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-256-10ms-cap8.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-256",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "3bc327886ac17012c3d7fb731c1ef45eb1d5c5557848144c2c44a52dd51432bc"
+    },
+    "remote-256-1ms-cap1": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 1,
+          "metadata_inflight": 1,
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-256-1ms-cap1.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-256",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "b8cbc32feea733ea978de466d0fd654c590554c96bb31243893c21db4f84a813"
+    },
+    "remote-256-1ms-cap8": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 1,
+          "metadata_inflight": 8,
+          "passes": 2,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-256-1ms-cap8.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-256",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "ebafb07b1613489c7cb50b241aa2dd0030b83c7aca3338e23067a5e5c2883426"
+    },
+    "remote-256-all-10ms": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 10
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-256-all-10ms.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-256",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "f68010e5dfcf39dc9e165af82222dbe08d802a7fad3f6cc6d9df37071182cd6a"
+    },
+    "remote-256-unpruned-10ms": {
+      "manifest": {
+        "binary": {
+          "path": "/private/tmp/otmp-datafusion-target/release/examples/reader_scale",
+          "sha256": "ad04d67c8a3f0c8a9cb90a6ac29510cea1cdf0ff1fdc7dfd73cb521849cb729a"
+        },
+        "config": {
+          "delay_ms": 10,
+          "pruning": false,
+          "survivors": 2
+        },
+        "config_path": "/private/tmp/otmp-reader-scale-evidence-v2/configs/run-remote-256-unpruned-10ms.json",
+        "fixture_after": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_before": {
+          "head_present": true,
+          "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+          "manifest_matches_head": true,
+          "manifest_present": true,
+          "manifest_sha256": "ee8c84844169fc0fa0d1087e8ea4a2c05f0c4940db41c17f7b8a139d62e25add"
+        },
+        "fixture_head_unchanged": true,
+        "fixture_manifest_unchanged": true,
+        "fixture_root": "/private/tmp/otmp-reader-scale-evidence/fixtures/growth-256",
+        "host": {
+          "platform": "macOS-26.6-arm64-arm-64bit-Mach-O",
+          "python": "3.14.5"
+        },
+        "os_cache": "uncontrolled",
+        "runner_git": {
+          "available": true,
+          "dirty": false,
+          "root": "/private/tmp/otmp-reader-scale",
+          "sha": "44e2a602247d9e8ae1ab9ae0be13c07ffc939960"
+        },
+        "samples": 10,
+        "schema_version": 1,
+        "timeout_seconds": 300.0
+      },
+      "summary_sha256": "c82b54cfbe7e54d87445f86b39546021d68654bcca2a697d8dbf14fbaa64cbf0"
+    }
+  },
+  "fixtures": {
+    "append-1024": {
+      "batch_size": 1024,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 755910,
+      "data_bytes": 1745920,
+      "files": 1024,
+      "generation_sha256": "sha256:006dcb8b02391ec42da303a90f46c7258833be976dc52f8e7d8f9bc6add92ca6",
+      "head_sha256": "sha256:cad9b006975d5f7f154a7d1606d675bef3c23059cd4377b21ed0de39d9e811dc",
+      "metadata_image_bytes": 1765376,
+      "page_map_height": 1,
+      "property_bytes": 0,
+      "rows_per_file": 128,
+      "small_tail": false,
+      "table_version": 1,
+      "verified": true
+    },
+    "append-1024-tail": {
+      "batch_size": 1024,
+      "checkpoint_bytes": 1765376,
+      "commit_bytes": 1506,
+      "data_bytes": 1745920,
+      "files": 1024,
+      "generation_sha256": "sha256:a4c046f4dbf7a110178a27c537668c4f4331958698959585c8d4b9daf066f6c2",
+      "head_sha256": "sha256:b8329a655540dd9a9d672754aa03fd82ee0192a9faccca77070d703ca625fbbe",
+      "metadata_image_bytes": 1765376,
+      "page_map_height": null,
+      "property_bytes": 0,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 2,
+      "verified": true
+    },
+    "append-128": {
+      "batch_size": 128,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 95966,
+      "data_bytes": 218240,
+      "files": 128,
+      "generation_sha256": "sha256:54e4d7fc88d71e192c7b15347d8fea1cc325ec7b95d9be84ff4395e15994fb5a",
+      "head_sha256": "sha256:a6ed47e5b42292c5a730db1a77577d16005c617bf348f1641eb705412ac94d41",
+      "metadata_image_bytes": 450560,
+      "page_map_height": 0,
+      "property_bytes": 0,
+      "rows_per_file": 128,
+      "small_tail": false,
+      "table_version": 1,
+      "verified": true
+    },
+    "append-128-tail": {
+      "batch_size": 128,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 1505,
+      "data_bytes": 218240,
+      "files": 128,
+      "generation_sha256": "sha256:f47cf67a6b384a5d507c5d94626a3fffa87afbab15527eb3d711950445f3df2b",
+      "head_sha256": "sha256:217f36811f389dbb37348fd475c79d416f19c2f9d98f2dd6d4a0aa5d76438866",
+      "metadata_image_bytes": 450560,
+      "page_map_height": 0,
+      "property_bytes": 0,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 2,
+      "verified": true
+    },
+    "append-2048": {
+      "batch_size": 2048,
+      "checkpoint_bytes": 3264512,
+      "commit_bytes": 1511622,
+      "data_bytes": 3491840,
+      "files": 2048,
+      "generation_sha256": "sha256:ac4f5d9cee70e1da822f33771688fa402da3f620ba3ce833d1c9faa4bd9dde2a",
+      "head_sha256": "sha256:944495ae0ecc630b68d433b9b7e5e080ae5e925a95b943b288ce49eb74c14bb7",
+      "metadata_image_bytes": 3264512,
+      "page_map_height": null,
+      "property_bytes": 0,
+      "rows_per_file": 128,
+      "small_tail": false,
+      "table_version": 1,
+      "verified": true
+    },
+    "append-2048-tail": {
+      "batch_size": 2048,
+      "checkpoint_bytes": 3264512,
+      "commit_bytes": 1507,
+      "data_bytes": 3491840,
+      "files": 2048,
+      "generation_sha256": "sha256:8a2fb6f85d38bac78a5c150a500cf657e71793fcff672adb4c2305f39f890b74",
+      "head_sha256": "sha256:998d1b50cb679d4f31e2df8848dba9b1b422684a0712e510da4a7c6311d21e65",
+      "metadata_image_bytes": 3264512,
+      "page_map_height": 0,
+      "property_bytes": 0,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 2,
+      "verified": true
+    },
+    "append-512": {
+      "batch_size": 512,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 378590,
+      "data_bytes": 872960,
+      "files": 512,
+      "generation_sha256": "sha256:9036899bbef0dbb0967bb8f4a47e945ddaccd88b23c6c5bb9a3348fb829f7b93",
+      "head_sha256": "sha256:9bae725749f7a40685d4c618274d545482605d63488ddc1e8f607bbbaedb0869",
+      "metadata_image_bytes": 1007616,
+      "page_map_height": 1,
+      "property_bytes": 0,
+      "rows_per_file": 128,
+      "small_tail": false,
+      "table_version": 1,
+      "verified": true
+    },
+    "append-512-tail": {
+      "batch_size": 512,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 1506,
+      "data_bytes": 872960,
+      "files": 512,
+      "generation_sha256": "sha256:5bede95fa90e783f65ed19d11932cbca1b16bb4b3543c19b2dd3f9664b2fa229",
+      "head_sha256": "sha256:79f4e8ec48c56ac6d4a1cdd0731d253c3b250844e57e465af17ec0dcd611d6f6",
+      "metadata_image_bytes": 1007616,
+      "page_map_height": 1,
+      "property_bytes": 0,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 2,
+      "verified": true
+    },
+    "growth-1024": {
+      "batch_size": 128,
+      "checkpoint_bytes": 1216512,
+      "commit_bytes": 1505,
+      "data_bytes": 1745920,
+      "files": 1024,
+      "generation_sha256": "sha256:479463b6bff6aeec4965111abd36607d5a5dbfea8c69d45d06ebf30eec2dcda8",
+      "head_sha256": "sha256:6aecf2bc105632a34c610db6994f35b1ae2eb8e515cc1ed39be33af5829a6ec3",
+      "metadata_image_bytes": 1794048,
+      "page_map_height": 1,
+      "property_bytes": 0,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 9,
+      "verified": true
+    },
+    "growth-16": {
+      "batch_size": 128,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 1505,
+      "data_bytes": 27280,
+      "files": 16,
+      "generation_sha256": "sha256:2c2cd21ccb7f5addb1f4edd07c69b17f71fc28398e54eba9bed55ef234a98ebd",
+      "head_sha256": "sha256:f446ce2a936cf5fbe5273e9539751b85ee974c0c9f9f2844874ed08c9cdd25cb",
+      "metadata_image_bytes": 278528,
+      "page_map_height": 0,
+      "property_bytes": 0,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 2,
+      "verified": true
+    },
+    "growth-16384": {
+      "batch_size": 128,
+      "checkpoint_bytes": 21594112,
+      "commit_bytes": 1513,
+      "data_bytes": 27934720,
+      "files": 16384,
+      "generation_sha256": "sha256:47593fd444a08a4020b5ca831b08bfeb6f10ca86ef00a552c4f403203a7930a4",
+      "head_sha256": "sha256:56593a3f4f0d067aa9f277522567ec2aa4ce67a4c3d435ce5543426ad1617f1e",
+      "metadata_image_bytes": 24653824,
+      "page_map_height": 1,
+      "property_bytes": 0,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 129,
+      "verified": true
+    },
+    "growth-256": {
+      "batch_size": 128,
+      "checkpoint_bytes": 634880,
+      "commit_bytes": 1505,
+      "data_bytes": 436480,
+      "files": 256,
+      "generation_sha256": "sha256:a4f2440961855ba3fc0cdf290efba4481222a0c83c7f8609a1e3794c162dbfe4",
+      "head_sha256": "sha256:4c098e81a3f6ca3694446bb5d0a4a7095f6e830a4a7c9b74db3cc39494f65e32",
+      "metadata_image_bytes": 643072,
+      "page_map_height": 0,
+      "property_bytes": 0,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 3,
+      "verified": true
+    },
+    "growth-4096": {
+      "batch_size": 128,
+      "checkpoint_bytes": 3862528,
+      "commit_bytes": 1509,
+      "data_bytes": 6983680,
+      "files": 4096,
+      "generation_sha256": "sha256:b2187c570563092b56b6ee47b87402a513f6a06267d23bac030b05d8d97cfbc3",
+      "head_sha256": "sha256:daeaf74f245813863c5900c316eb5ca4243d577ffa54f95f1614bd61fa49a79f",
+      "metadata_image_bytes": 6340608,
+      "page_map_height": 1,
+      "property_bytes": 0,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 33,
+      "verified": true
+    },
+    "property-1048576": {
+      "batch_size": 128,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 1050082,
+      "data_bytes": 0,
+      "files": 0,
+      "generation_sha256": "sha256:17e396361329af2a3b0d2a45fe198494baf02c62f01ebe8666faed55d05d433c",
+      "head_sha256": "sha256:a123df7fbf32cf23e05f01d5e9f5ee30fd6f26b3dea2ac252fb56d76381add6a",
+      "metadata_image_bytes": 2363392,
+      "page_map_height": 1,
+      "property_bytes": 1048576,
+      "rows_per_file": 128,
+      "small_tail": false,
+      "table_version": 1,
+      "verified": true
+    },
+    "property-1048576-tail": {
+      "batch_size": 128,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 1507,
+      "data_bytes": 0,
+      "files": 0,
+      "generation_sha256": "sha256:0effb72bc9f76883d31834acd7a9b8bd26e123a5be2d5dab60bb98afd651e23e",
+      "head_sha256": "sha256:50389a7b08c023362818b59eff8b40e7aff3c8ed4fd24183a0038b64991b9339",
+      "metadata_image_bytes": 2363392,
+      "page_map_height": 1,
+      "property_bytes": 1048576,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 2,
+      "verified": true
+    },
+    "property-131072": {
+      "batch_size": 128,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 132578,
+      "data_bytes": 0,
+      "files": 0,
+      "generation_sha256": "sha256:5899768f2bdbea712110f18fc4745b407085eacb6bd6b3be04b0741447e1f83e",
+      "head_sha256": "sha256:6f90289753036a4f7d334a27593ac7774adc9784ff716de5a640d8b6618d6c84",
+      "metadata_image_bytes": 528384,
+      "page_map_height": 0,
+      "property_bytes": 131072,
+      "rows_per_file": 128,
+      "small_tail": false,
+      "table_version": 1,
+      "verified": true
+    },
+    "property-131072-tail": {
+      "batch_size": 128,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 1506,
+      "data_bytes": 0,
+      "files": 0,
+      "generation_sha256": "sha256:ff8c25e50ecbc43744fa62889ed1b273d8e9e99c4cd5eed281e07c5152061f78",
+      "head_sha256": "sha256:d4849591f27a4baf4a0da3da1299e17ab8de9738e913611c4a4faae345f1fd20",
+      "metadata_image_bytes": 528384,
+      "page_map_height": 0,
+      "property_bytes": 131072,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 2,
+      "verified": true
+    },
+    "property-16384": {
+      "batch_size": 128,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 17890,
+      "data_bytes": 0,
+      "files": 0,
+      "generation_sha256": "sha256:f0c61388591319490e2fb340c9f2cc8d4a9aeeb2302c6d121025c6954d60841f",
+      "head_sha256": "sha256:fc5eae9e400a65a2c20168fd848d5f26d4a4c35c0aedbe7c9f86fa096d5f9849",
+      "metadata_image_bytes": 299008,
+      "page_map_height": 0,
+      "property_bytes": 16384,
+      "rows_per_file": 128,
+      "small_tail": false,
+      "table_version": 1,
+      "verified": true
+    },
+    "property-16384-tail": {
+      "batch_size": 128,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 1505,
+      "data_bytes": 0,
+      "files": 0,
+      "generation_sha256": "sha256:4a3949208429852c3f9a01a527b2c078d4edd5fc94999f83e9a7e72b9857561e",
+      "head_sha256": "sha256:b3658104268932812be5110bbc4112c2032fa84ec1f4bf5dcda9dabf3d5211de",
+      "metadata_image_bytes": 299008,
+      "page_map_height": 0,
+      "property_bytes": 16384,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 2,
+      "verified": true
+    },
+    "property-2097152": {
+      "batch_size": 128,
+      "checkpoint_bytes": 4460544,
+      "commit_bytes": 2098658,
+      "data_bytes": 0,
+      "files": 0,
+      "generation_sha256": "sha256:10567055f9c52e06d9d3bfddc94784b2fbc5e5d2b0cd7580919a1c349413a158",
+      "head_sha256": "sha256:d2de7966fdbcc3c19af1928f1b5ec9d639d87dd039aabcf319b65453ab5c3278",
+      "metadata_image_bytes": 4460544,
+      "page_map_height": null,
+      "property_bytes": 2097152,
+      "rows_per_file": 128,
+      "small_tail": false,
+      "table_version": 1,
+      "verified": true
+    },
+    "property-2097152-tail": {
+      "batch_size": 128,
+      "checkpoint_bytes": 4460544,
+      "commit_bytes": 1507,
+      "data_bytes": 0,
+      "files": 0,
+      "generation_sha256": "sha256:4a4d9a6db58344459622e11929dac2d9b203b5e2ba6db64a7e765c74ff00ab47",
+      "head_sha256": "sha256:d9dd6267293459c4c4aad9646a8bd957395932fc14a78c4e00330fd1111fb4bf",
+      "metadata_image_bytes": 4460544,
+      "page_map_height": 0,
+      "property_bytes": 2097152,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 2,
+      "verified": true
+    },
+    "property-524288": {
+      "batch_size": 128,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 525794,
+      "data_bytes": 0,
+      "files": 0,
+      "generation_sha256": "sha256:a4a4f428d7de5073504b47aae97a83119cea86873ddb16b07a13a5623031240f",
+      "head_sha256": "sha256:dc1e061667da7060ec3b40cc5f88063adeadc09f0e98d3bcd0e8a7b5f2fad067",
+      "metadata_image_bytes": 1314816,
+      "page_map_height": 1,
+      "property_bytes": 524288,
+      "rows_per_file": 128,
+      "small_tail": false,
+      "table_version": 1,
+      "verified": true
+    },
+    "property-524288-tail": {
+      "batch_size": 128,
+      "checkpoint_bytes": 266240,
+      "commit_bytes": 1506,
+      "data_bytes": 0,
+      "files": 0,
+      "generation_sha256": "sha256:db71ffc779595457404f8d4abb429ad68f858b693eb41171d18d3ad99c75debe",
+      "head_sha256": "sha256:5a97006978060fd15b86a9b4b0e8f65d41c31b441327ec9ceeff9093a25a8cb1",
+      "metadata_image_bytes": 1314816,
+      "page_map_height": 1,
+      "property_bytes": 524288,
+      "rows_per_file": 128,
+      "small_tail": true,
+      "table_version": 2,
+      "verified": true
+    }
+  },
+  "raw_files_indexed": 5974,
+  "raw_root": "/private/tmp/otmp-reader-scale-evidence-v2",
+  "summary_sha256": "c0e1ff33687b97da5efc8f5c8ad82501b3268b37779569750d45cc931ee92a8d",
+  "validation": {
+    "cache_samples": {
+      "failed": 0,
+      "successful": 60,
+      "total": 60
+    },
+    "cases": 62,
+    "combined_configurations": 65,
+    "combined_samples": {
+      "failed": 170,
+      "successful": 960,
+      "total": 1130
+    },
+    "exit_code": 0,
+    "failure_groups": [
+      {
+        "code": "OTMP_RESOURCE_EXHAUSTED",
+        "count": 90,
+        "kind": "observed_reader_error",
+        "stage": "registration"
+      },
+      {
+        "code": "DATAFUSION_RESOURCES_EXHAUSTED",
+        "count": 80,
+        "kind": "observed_reader_error",
+        "stage": "planning"
+      }
+    ],
+    "fixture_mutations": 0,
+    "full_read_attempts": 0,
+    "invariant_violations": 0,
+    "samples": {
+      "failed": 170,
+      "successful": 900,
+      "total": 1070
+    }
+  }
+}

@@ -1,10 +1,10 @@
 {
   "source_base": "9a4e09baecf7c536618dd716b12377b7e0cda10f",
-  "source_head": "fbfaa23b66f9543f883fef06d6a48560b07afddb",
+  "source_head": "363c57ad21619d88d8cc4fe971a01f71bd324dcc",
   "source_status": "committed, locally reconciled final source",
-  "source_diff_sha256": "24756b15a2a53be0ee42c8aad0fa761b1a9f9f3a09581eec41c2a9eb75c8628e",
-  "evidence_root": "/private/tmp/otmp-native-writer-fbf.ixK8kz",
-  "writer_binary_sha256": "dfa74e2f46d315d737396591f1fd0f954ed5c9a8ea80d15ad30eb930c1f709f0",
+  "source_diff_sha256": "c929a5df5a4576d86df8e061ab5291539e749196d6c988ea358362f2f0722bcd",
+  "evidence_root": "/private/tmp/otmp-native-writer-363.84iyfX",
+  "writer_binary_sha256": "7e514124d383235662222f1466f84a68bc9864cdbc899bed45bd8067671c2119",
   "observed_origin_main": "9a4e09baecf7c536618dd716b12377b7e0cda10f",
   "append": {
     "bytes": 1705,
@@ -28,7 +28,7 @@
       "parent_sqlite_cache_hits": 470,
       "page_map_read_bytes": 33765,
       "page_map_read_requests": 1,
-      "elapsed_ns": 123194625,
+      "elapsed_ns": 130687000,
       "verified": true
     },
     {
@@ -46,7 +46,7 @@
       "parent_sqlite_cache_hits": 520,
       "page_map_read_bytes": 43412,
       "page_map_read_requests": 3,
-      "elapsed_ns": 116547917,
+      "elapsed_ns": 108158625,
       "verified": true
     },
     {
@@ -64,7 +64,7 @@
       "parent_sqlite_cache_hits": 4785,
       "page_map_read_bytes": 1162101,
       "page_map_read_requests": 70,
-      "elapsed_ns": 326973375,
+      "elapsed_ns": 357826375,
       "verified": true
     }
   ],

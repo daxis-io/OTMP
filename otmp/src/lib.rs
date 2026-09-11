@@ -17,7 +17,8 @@ pub mod write_latency_qualification;
 
 pub use error::RuntimeError;
 pub use reader::{
-    FileBatch, FileCursor, MetadataReader, ReaderFile, ReaderOptions, ReaderStatistics,
+    FileBatch, FileCursor, FileMetricRange, MetadataReader, ReaderFile, ReaderOptions,
+    ReaderStatistics,
 };
 pub use runtime::{
     AppendFile, AppendRequest, AppendResult, CommitMetadata, CommittedFile, FileFormat, FileMetric,

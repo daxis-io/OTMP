@@ -791,7 +791,7 @@ The logical image MUST:
 - begin with the standard `SQLite format 3\0` header;
 - use the normative relational schema in Appendix A;
 - have `PRAGMA application_id = 0x4F544D50`;
-- have `PRAGMA user_version = 2`;
+- have `PRAGMA user_version = 3`;
 - contain no committed state that exists only in a WAL, rollback journal, shared-memory file, Turso MVCC log, or other sidecar;
 - be readable by a conforming SQLite 3 reader;
 - pass `PRAGMA integrity_check`;
@@ -1596,6 +1596,15 @@ Per-field metrics MAY include:
 
 Bounds use typed deterministic CBOR.
 
+`otmp_file_metrics` also stores a normative ordered projection for catalog pruning:
+
+- `ordered_bound_type` is `int32`, `int64`, `date`, or `NULL`;
+- `ordered_lower_i64` and `ordered_upper_i64` losslessly widen Int32 and Date values and preserve Int64 values;
+- unsupported types and metrics without a usable supported bound use `NULL` for all three columns; and
+- a missing bound remains `NULL` while the available supported bound is projected.
+
+Writers and validators MUST derive this projection from the field type and canonical CBOR bounds. Int32 and Date values MUST remain in signed 32-bit range, and a present lower projection MUST NOT exceed a present upper projection.
+
 Metrics MUST NOT be used when their field type or encoding is unknown to the reader.
 
 ### 20.6 Relative paths
@@ -2338,7 +2347,7 @@ WHERE f.ref_name = ?
   AND f.partition_hash = ?;
 ```
 
-It MAY join `otmp_file_metrics` for pruning.
+It MAY join `otmp_file_metrics` for pruning. A file may be rejected only when a compatible ordered bound proves a query range disjoint; missing rows, missing bounds, type mismatches, and unsupported projections retain the file.
 
 ### 27.7 Broad scan planning
 
@@ -3707,7 +3716,7 @@ The following remain experimental or incomplete:
 
 # Appendix A — Normative SQLite schema summary
 
-The companion SQL file is normative for `PRAGMA user_version = 2`.
+The companion SQL file is normative for `PRAGMA user_version = 3`.
 
 | Table | Purpose |
 |---|---|

@@ -1,9 +1,11 @@
 use otmp::{
-    CommitMetadata, InMemoryObjectStore, InitializeRequest, MetadataSelection, OperationRequest,
-    ReaderOptions, Requirement, RuntimeError, SnapshotSelection, Table, TransactionRequest,
+    CommitMetadata, FileMetricRange, InMemoryObjectStore, InitializeRequest, MetadataSelection,
+    OperationRequest, ReaderOptions, Requirement, RuntimeError, SnapshotSelection, Table,
+    TransactionRequest,
 };
 use otmp_protocol::{Field, LogicalType, Schema};
 use std::collections::BTreeMap;
+use std::ops::Bound;
 
 fn schema() -> Schema {
     serde_json::from_slice(include_bytes!("../../conformance/sources/schema.json")).unwrap()
@@ -118,6 +120,123 @@ async fn tiny_resource_budget_fails_explicitly() {
         )
         .await;
     assert!(matches!(result, Err(RuntimeError::ResourceExhausted(_))));
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One fixture covers range binding, contradiction, and conservative fallback.
+async fn metric_ranges_filter_before_descriptors_and_metric_reads() {
+    let table = Table::new(InMemoryObjectStore::default());
+    table
+        .initialize(InitializeRequest::new(schema()))
+        .await
+        .unwrap();
+    let source = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(source.path(), b"metric-range-fixture").unwrap();
+    let files = [(0, 9), (100, 109)]
+        .into_iter()
+        .map(|(lower, upper)| otmp::AppendFile {
+            source_path: source.path().into(),
+            fingerprint: otmp::SourceFingerprint {
+                sha256: otmp_protocol::Sha256::digest(b"metric-range-fixture"),
+                length: 20,
+            },
+            format: otmp::FileFormat::Parquet,
+            record_count: 10,
+            schema_id: 1,
+            partition_spec_id: 0,
+            sort_order_id: 0,
+            partition_values: BTreeMap::new(),
+            metrics: vec![otmp::FileMetric {
+                field_id: 1,
+                column_size_bytes: None,
+                value_count: Some(10),
+                null_count: Some(0),
+                nan_count: None,
+                distinct_count: None,
+                lower_bound: Some(otmp_protocol::TypedScalar::Int64(lower)),
+                upper_bound: Some(otmp_protocol::TypedScalar::Int64(upper)),
+                metadata: BTreeMap::new(),
+            }],
+            metadata: BTreeMap::from([(
+                "lower".into(),
+                otmp_protocol::CanonicalValue::Integer(i128::from(lower)),
+            )]),
+        })
+        .collect();
+    table
+        .append_files(&otmp::AppendRequest::new("ranges", files))
+        .await
+        .unwrap();
+    let reader = table
+        .open_metadata_reader(
+            MetadataSelection::Current,
+            SnapshotSelection::Ref("main".into()),
+            ReaderOptions::default(),
+        )
+        .await
+        .unwrap();
+    let batch = reader
+        .files_matching(
+            None,
+            &[1],
+            &[FileMetricRange::Int64 {
+                field_id: 1,
+                lower: Bound::Excluded(50),
+                upper: Bound::Unbounded,
+            }],
+            256,
+        )
+        .await
+        .unwrap();
+    assert_eq!(batch.files.len(), 1);
+    assert_eq!(
+        batch.files[0].metrics[0].lower_bound,
+        Some(otmp_protocol::TypedScalar::Int64(100))
+    );
+
+    let mismatched = reader
+        .files_matching(
+            None,
+            &[],
+            &[FileMetricRange::Int32 {
+                field_id: 1,
+                lower: Bound::Included(50),
+                upper: Bound::Unbounded,
+            }],
+            256,
+        )
+        .await
+        .unwrap();
+    assert_eq!(mismatched.files.len(), 2, "type mismatch must retain files");
+
+    let impossible = reader
+        .files_matching(
+            None,
+            &[],
+            &[
+                FileMetricRange::Int64 {
+                    field_id: 1,
+                    lower: Bound::Included(100),
+                    upper: Bound::Unbounded,
+                },
+                FileMetricRange::Int64 {
+                    field_id: 1,
+                    lower: Bound::Unbounded,
+                    upper: Bound::Excluded(100),
+                },
+            ],
+            256,
+        )
+        .await
+        .unwrap();
+    assert!(impossible.files.is_empty());
+    assert!(impossible.next_cursor.is_none());
+
+    let cursor = batch.next_cursor.unwrap();
+    let Err(changed_range) = reader.files(Some(cursor), &[], 256).await else {
+        panic!("cursor accepted a changed range set");
+    };
+    assert!(changed_range.to_string().contains("range set changed"));
 }
 
 async fn append_many(table: &Table<InMemoryObjectStore>, count: usize, key: &str, branch: &str) {

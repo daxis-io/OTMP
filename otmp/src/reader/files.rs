@@ -1,8 +1,10 @@
 use crate::reader::metadata::{
-    CursorState, FileBatch, FileCursor, MetadataReader, ReaderFile, corrupt, id, integer, text,
-    uint,
+    CanonicalRange, CursorState, FileBatch, FileCursor, FileMetricRange, MetadataReader, RangeType,
+    ReaderFile, corrupt, id, integer, text, uint,
 };
 use crate::{LiveFile, ObjectStore, RuntimeError};
+use std::collections::BTreeMap;
+use std::ops::Bound;
 
 // The draft schema fixes this primary-key index. Turso 0.7.2 otherwise chooses
 // the sequence index and scans/sorts the branch again for every batch. The file
@@ -11,12 +13,15 @@ const BRANCH_FILES_SQL: &str = "SELECT f.file_id,f.uri,f.file_format,f.file_size
 
 const BRANCH_FIRST_SQL: &str = "SELECT f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,rf.added_snapshot_id,rf.file_sequence_number,f.created_snapshot_id,f.created_version,s.sequence_number,s.committed_table_version FROM otmp_ref_live_files rf INDEXED BY sqlite_autoindex_otmp_ref_live_files_1 LEFT JOIN otmp_files f ON f.file_id=rf.file_id LEFT JOIN otmp_snapshots s ON s.snapshot_id=f.created_snapshot_id WHERE rf.ref_name=?1 ORDER BY rf.file_id LIMIT ?2";
 
+const RANGE_REJECTION_SQL: &str = "NOT EXISTS (SELECT 1 FROM ranges q CROSS JOIN otmp_file_metrics m INDEXED BY sqlite_autoindex_otmp_file_metrics_1 WHERE m.file_id=f.file_id AND m.field_id=q.field_id AND m.ordered_bound_type=q.bound_type AND ((q.lower_value IS NOT NULL AND m.ordered_upper_i64 IS NOT NULL AND (m.ordered_upper_i64<q.lower_value OR (m.ordered_upper_i64=q.lower_value AND q.lower_inclusive=0))) OR (q.upper_value IS NOT NULL AND m.ordered_lower_i64 IS NOT NULL AND (m.ordered_lower_i64>q.upper_value OR (m.ordered_lower_i64=q.upper_value AND q.upper_inclusive=0)))))";
+
 const BYTES: usize = 1024 * 1024;
 
 pub(crate) async fn enumerate<S: ObjectStore>(
     reader: &MetadataReader<S>,
     cursor: Option<FileCursor>,
     fields: &[u32],
+    ranges: &[FileMetricRange],
     limit: usize,
 ) -> Result<FileBatch, RuntimeError> {
     if limit == 0 || limit > 256 {
@@ -36,15 +41,220 @@ pub(crate) async fn enumerate<S: ObjectStore>(
             "metric field batch limit is 4096".into(),
         ));
     }
+    let canonical = canonicalize_ranges(reader, ranges)?;
     let cursor = match cursor {
-        Some(c) if c.pin == reader.pin_id => Some(c),
-        Some(_) => return Err(corrupt("file cursor belongs to another reader")),
+        Some(c) if c.pin != reader.pin_id => {
+            return Err(corrupt("file cursor belongs to another reader"));
+        }
+        Some(c) if c.ranges != canonical.ranges => {
+            return Err(corrupt("file cursor range set changed"));
+        }
+        Some(c) => Some(c),
         None => None,
     };
-    if reader.branch.is_none() {
-        return historical(reader, cursor, fields, limit).await;
+    if cursor.as_ref().is_some_and(|cursor| {
+        matches!(cursor.state, CursorState::Branch { .. }) != reader.branch.is_some()
+    }) {
+        return Err(corrupt("cursor mode differs from selected ref"));
     }
-    branch(reader, cursor, fields, limit).await
+    if canonical.impossible {
+        return Ok(FileBatch {
+            files: Vec::new(),
+            next_cursor: None,
+            _reservations: Vec::new(),
+        });
+    }
+    if reader.branch.is_none() {
+        return historical(reader, cursor, fields, &canonical.ranges, limit).await;
+    }
+    branch(reader, cursor, fields, &canonical.ranges, limit).await
+}
+
+struct CanonicalizedRanges {
+    ranges: Vec<CanonicalRange>,
+    impossible: bool,
+}
+
+fn canonicalize_ranges<S: ObjectStore>(
+    reader: &MetadataReader<S>,
+    ranges: &[FileMetricRange],
+) -> Result<CanonicalizedRanges, RuntimeError> {
+    if ranges.len() > 4096 {
+        return Err(RuntimeError::ResourceExhausted(
+            "file metric range limit is 4096".into(),
+        ));
+    }
+    let mut merged = BTreeMap::new();
+    for range in ranges {
+        let (field_id, range_type, lower, upper) = match range {
+            FileMetricRange::Int32 {
+                field_id,
+                lower,
+                upper,
+            } => (*field_id, RangeType::Int32, widen(*lower), widen(*upper)),
+            FileMetricRange::Int64 {
+                field_id,
+                lower,
+                upper,
+            } => (*field_id, RangeType::Int64, *lower, *upper),
+            FileMetricRange::Date {
+                field_id,
+                lower,
+                upper,
+            } => (*field_id, RangeType::Date, widen(*lower), widen(*upper)),
+        };
+        let compatible = reader
+            .schema()
+            .fields
+            .iter()
+            .find(|field| field.field_id == field_id)
+            .is_some_and(|field| {
+                matches!(
+                    (&field.field_type, range_type),
+                    (otmp_protocol::LogicalType::Int32, RangeType::Int32)
+                        | (otmp_protocol::LogicalType::Int64, RangeType::Int64)
+                        | (otmp_protocol::LogicalType::Date, RangeType::Date)
+                )
+            });
+        if !compatible {
+            continue;
+        }
+        let entry = merged
+            .entry((field_id, range_type))
+            .or_insert((Bound::Unbounded, Bound::Unbounded));
+        entry.0 = strongest_lower(entry.0, lower);
+        entry.1 = strongest_upper(entry.1, upper);
+    }
+    let ranges = merged
+        .into_iter()
+        .map(|((field_id, range_type), (lower, upper))| CanonicalRange {
+            field_id,
+            range_type,
+            lower,
+            upper,
+        })
+        .collect::<Vec<_>>();
+    let impossible = ranges
+        .iter()
+        .any(|range| bounds_are_impossible(&range.lower, &range.upper));
+    Ok(CanonicalizedRanges { ranges, impossible })
+}
+
+fn widen(bound: Bound<i32>) -> Bound<i64> {
+    match bound {
+        Bound::Included(value) => Bound::Included(i64::from(value)),
+        Bound::Excluded(value) => Bound::Excluded(i64::from(value)),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+fn strongest_lower(current: Bound<i64>, candidate: Bound<i64>) -> Bound<i64> {
+    match (current, candidate) {
+        (Bound::Unbounded, value) | (value, Bound::Unbounded) => value,
+        (Bound::Included(a), Bound::Included(b)) => Bound::Included(a.max(b)),
+        (Bound::Excluded(a), Bound::Excluded(b)) => Bound::Excluded(a.max(b)),
+        (Bound::Included(a), Bound::Excluded(b)) | (Bound::Excluded(b), Bound::Included(a)) => {
+            if a > b {
+                Bound::Included(a)
+            } else {
+                Bound::Excluded(b)
+            }
+        }
+    }
+}
+
+fn strongest_upper(current: Bound<i64>, candidate: Bound<i64>) -> Bound<i64> {
+    match (current, candidate) {
+        (Bound::Unbounded, value) | (value, Bound::Unbounded) => value,
+        (Bound::Included(a), Bound::Included(b)) => Bound::Included(a.min(b)),
+        (Bound::Excluded(a), Bound::Excluded(b)) => Bound::Excluded(a.min(b)),
+        (Bound::Included(a), Bound::Excluded(b)) | (Bound::Excluded(b), Bound::Included(a)) => {
+            if a < b {
+                Bound::Included(a)
+            } else {
+                Bound::Excluded(b)
+            }
+        }
+    }
+}
+
+fn bounds_are_impossible(lower: &Bound<i64>, upper: &Bound<i64>) -> bool {
+    match (lower, upper) {
+        (Bound::Included(lower), Bound::Included(upper)) => lower > upper,
+        (
+            Bound::Included(lower) | Bound::Excluded(lower),
+            Bound::Included(upper) | Bound::Excluded(upper),
+        ) => lower >= upper,
+        _ => false,
+    }
+}
+
+fn range_cte(count: usize) -> String {
+    let values = (0..count)
+        .map(|row| {
+            let first = row * 6 + 1;
+            format!(
+                "(?{first},?{},?{},?{},?{},?{})",
+                first + 1,
+                first + 2,
+                first + 3,
+                first + 4,
+                first + 5
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "WITH ranges(field_id,bound_type,lower_value,lower_inclusive,upper_value,upper_inclusive) AS (VALUES {values})"
+    )
+}
+
+fn range_params(ranges: &[CanonicalRange]) -> Vec<turso_core::Value> {
+    let mut params = Vec::with_capacity(ranges.len() * 6);
+    for range in ranges {
+        params.push(integer(i64::from(range.field_id)));
+        params.push(turso_core::Value::build_text(range.range_type.as_str()));
+        let (lower, lower_inclusive) = sql_bound(&range.lower);
+        let (upper, upper_inclusive) = sql_bound(&range.upper);
+        params.extend([
+            lower,
+            integer(lower_inclusive),
+            upper,
+            integer(upper_inclusive),
+        ]);
+    }
+    params
+}
+
+fn sql_bound(bound: &Bound<i64>) -> (turso_core::Value, i64) {
+    match bound {
+        Bound::Included(value) => (integer(*value), 1),
+        Bound::Excluded(value) => (integer(*value), 0),
+        Bound::Unbounded => (turso_core::Value::Null, 1),
+    }
+}
+
+fn ranged_branch_sql(range_count: usize, after: bool) -> String {
+    let branch = range_count * 6 + 1;
+    let (seek, limit) = if after {
+        (format!(" AND rf.file_id>?{}", branch + 1), branch + 2)
+    } else {
+        (String::new(), branch + 1)
+    };
+    format!(
+        "{} SELECT f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,rf.added_snapshot_id,rf.file_sequence_number,f.created_snapshot_id,f.created_version,s.sequence_number,s.committed_table_version FROM otmp_ref_live_files rf INDEXED BY sqlite_autoindex_otmp_ref_live_files_1 LEFT JOIN otmp_files f ON f.file_id=rf.file_id LEFT JOIN otmp_snapshots s ON s.snapshot_id=f.created_snapshot_id WHERE rf.ref_name=?{branch}{seek} AND {RANGE_REJECTION_SQL} ORDER BY rf.file_id LIMIT ?{limit}",
+        range_cte(range_count)
+    )
+}
+
+fn ranged_historical_sql(range_count: usize) -> String {
+    let snapshot = range_count * 6 + 1;
+    let cursor = snapshot + 1;
+    let limit = snapshot + 2;
+    format!(
+        "{} SELECT c.change_kind,f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,f.created_snapshot_id,f.created_version FROM otmp_snapshot_file_changes c LEFT JOIN otmp_files f ON f.file_id=c.file_id WHERE c.snapshot_id=?{snapshot} AND (?{cursor} IS NULL OR c.file_id>?{cursor}) AND {RANGE_REJECTION_SQL} ORDER BY c.file_id LIMIT ?{limit}",
+        range_cte(range_count)
+    )
 }
 
 async fn descriptor_rows<S: ObjectStore>(
@@ -95,6 +305,7 @@ async fn branch<S: ObjectStore>(
     reader: &MetadataReader<S>,
     cursor: Option<FileCursor>,
     fields: &[u32],
+    ranges: &[CanonicalRange],
     limit: usize,
 ) -> Result<FileBatch, RuntimeError> {
     let branch = reader
@@ -106,17 +317,23 @@ async fn branch<S: ObjectStore>(
         None => None,
         _ => return Err(corrupt("cursor mode differs from selected ref")),
     };
-    let mut params = vec![turso_core::Value::build_text(branch.clone())];
-    let sql = match file {
-        Some(file) => {
+    let mut params = range_params(ranges);
+    params.push(turso_core::Value::build_text(branch.clone()));
+    let sql = match (ranges.is_empty(), file) {
+        (true, Some(file)) => {
             params.push(turso_core::Value::Blob(file.as_bytes().to_vec()));
-            BRANCH_FILES_SQL
+            BRANCH_FILES_SQL.to_owned()
         }
         // No artificial lower bound: malformed IDs must reach validation too.
-        None => BRANCH_FIRST_SQL,
+        (true, None) => BRANCH_FIRST_SQL.to_owned(),
+        (false, Some(file)) => {
+            params.push(turso_core::Value::Blob(file.as_bytes().to_vec()));
+            ranged_branch_sql(ranges.len(), true)
+        }
+        (false, None) => ranged_branch_sql(ranges.len(), false),
     };
     params.push(integer(i64::try_from(limit).map_err(|_| corrupt("limit"))?));
-    let (rows, reservation) = descriptor_rows(reader, sql, params, limit).await?;
+    let (rows, reservation) = descriptor_rows(reader, &sql, params, limit).await?;
     let mut files = Vec::with_capacity(rows.len());
     let mut reservations = vec![reservation];
     let mut next = None;
@@ -144,6 +361,7 @@ async fn branch<S: ObjectStore>(
         }
         next = Some(FileCursor {
             pin: reader.pin_id,
+            ranges: ranges.to_vec(),
             state: CursorState::Branch { file: file_id },
         });
         let live = LiveFile {
@@ -173,10 +391,12 @@ async fn branch<S: ObjectStore>(
     })
 }
 
+#[allow(clippy::too_many_lines)] // Historical traversal and its cursor transition are one invariant.
 async fn historical<S: ObjectStore>(
     reader: &MetadataReader<S>,
     cursor: Option<FileCursor>,
     fields: &[u32],
+    ranges: &[CanonicalRange],
     limit: usize,
 ) -> Result<FileBatch, RuntimeError> {
     let selected = reader
@@ -198,7 +418,20 @@ async fn historical<S: ObjectStore>(
     {
         return Err(corrupt("historical cursor descriptor mismatch"));
     }
-    let (rows, reservation)=descriptor_rows(reader, "SELECT c.change_kind,f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,f.created_snapshot_id,f.created_version FROM otmp_snapshot_file_changes c LEFT JOIN otmp_files f ON f.file_id=c.file_id WHERE c.snapshot_id=?1 AND (?2 IS NULL OR c.file_id>?2) ORDER BY c.file_id LIMIT ?3",vec![turso_core::Value::Blob(snapshot.as_bytes().to_vec()),file.map_or(turso_core::Value::Null,|v|turso_core::Value::Blob(v.as_bytes().to_vec())),integer(i64::try_from(limit).map_err(|_|corrupt("limit"))?)],limit).await?;
+    let mut params = range_params(ranges);
+    params.extend([
+        turso_core::Value::Blob(snapshot.as_bytes().to_vec()),
+        file.map_or(turso_core::Value::Null, |value| {
+            turso_core::Value::Blob(value.as_bytes().to_vec())
+        }),
+        integer(i64::try_from(limit).map_err(|_| corrupt("limit"))?),
+    ]);
+    let sql = if ranges.is_empty() {
+        "SELECT c.change_kind,f.file_id,f.uri,f.file_format,f.file_size_bytes,f.record_count,f.content_sha256,f.file_sequence_number,f.schema_id,f.file_kind,f.object_identity,f.partition_spec_id,f.sort_order_id,f.encryption_metadata,f.created_snapshot_id,f.created_version FROM otmp_snapshot_file_changes c LEFT JOIN otmp_files f ON f.file_id=c.file_id WHERE c.snapshot_id=?1 AND (?2 IS NULL OR c.file_id>?2) ORDER BY c.file_id LIMIT ?3".to_owned()
+    } else {
+        ranged_historical_sql(ranges.len())
+    };
+    let (rows, reservation) = descriptor_rows(reader, &sql, params, limit).await?;
     let mut files = Vec::new();
     let mut reservations = vec![reservation];
     let mut last = file;
@@ -246,6 +479,7 @@ async fn historical<S: ObjectStore>(
     let next = if files.len() == limit {
         last.map(|file| FileCursor {
             pin: reader.pin_id,
+            ranges: ranges.to_vec(),
             state: CursorState::Snapshot {
                 snapshot,
                 before_sequence: before,
@@ -261,6 +495,7 @@ async fn historical<S: ObjectStore>(
         }
         Some(FileCursor {
             pin: reader.pin_id,
+            ranges: ranges.to_vec(),
             state: CursorState::Snapshot {
                 snapshot: parent.snapshot_id,
                 before_sequence: parent.sequence_number,
@@ -436,6 +671,28 @@ fn opt(v: &turso_core::Value) -> Result<Option<u64>, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Bound;
+
+    #[test]
+    fn conjunctions_keep_the_strongest_bounds_and_detect_contradictions() {
+        assert_eq!(
+            super::strongest_lower(Bound::Included(4), Bound::Excluded(4)),
+            Bound::Excluded(4)
+        );
+        assert_eq!(
+            super::strongest_upper(Bound::Included(9), Bound::Excluded(9)),
+            Bound::Excluded(9)
+        );
+        assert!(!super::bounds_are_impossible(
+            &Bound::Included(i64::MIN),
+            &Bound::Included(i64::MIN)
+        ));
+        assert!(super::bounds_are_impossible(
+            &Bound::Included(i64::MAX),
+            &Bound::Excluded(i64::MAX)
+        ));
+    }
+
     #[test]
     fn metric_accounting_preserves_the_canonical_charge_without_reencoding() {
         use otmp_protocol::{CanonicalValue, TypedScalar};
@@ -614,8 +871,7 @@ mod tests {
                 )]),
             })
             .collect();
-        let result = table
-            .append_files(&crate::AppendRequest::new("metrics", files))
+        let result = Box::pin(table.append_files(&crate::AppendRequest::new("metrics", files)))
             .await
             .unwrap();
         let expected: BTreeMap<_, _> = result

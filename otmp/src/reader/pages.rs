@@ -1320,7 +1320,7 @@ mod tests {
                 .bytes,
         )
         .unwrap();
-        let generation: Generation = otmp_protocol::canonical_json::from_slice_canonical(
+        let mut generation: Generation = otmp_protocol::canonical_json::from_slice_canonical(
             &store
                 .read(&head.metadata_generation.uri)
                 .await
@@ -1328,6 +1328,7 @@ mod tests {
                 .bytes,
         )
         .unwrap();
+        generation.metadata_image.checkpoint_page_index = None;
         let context = ReadContext::new(store, ReaderOptions::default()).unwrap();
         assert!(matches!(
             context.image(&generation).await,

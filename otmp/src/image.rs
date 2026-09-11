@@ -16,7 +16,7 @@ use crate::{FileFormat, RuntimeError};
 const SCHEMA_SQL: &str = include_str!("../../spec/OTMP-0.0.2-alpha-table-schema.sql");
 pub(crate) const PAGE_SIZE: u32 = 4096;
 pub(crate) const APPLICATION_ID: i64 = 0x4f54_4d50;
-pub(crate) const USER_VERSION: i64 = 2;
+pub(crate) const USER_VERSION: i64 = 3;
 
 pub(crate) struct CheckpointImage {
     _directory: tempfile::TempDir,
@@ -129,6 +129,39 @@ pub(crate) struct ImageMetric {
     pub lower_bound_cbor: Option<Vec<u8>>,
     pub upper_bound_cbor: Option<Vec<u8>>,
     pub metadata_json: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OrderedProjection {
+    bound_type: Option<&'static str>,
+    lower: Option<i64>,
+    upper: Option<i64>,
+}
+
+fn ordered_projection(
+    lower: Option<&[u8]>,
+    upper: Option<&[u8]>,
+) -> Result<OrderedProjection, RuntimeError> {
+    fn value(bytes: Option<&[u8]>) -> Result<Option<(&'static str, i64)>, RuntimeError> {
+        Ok(match bytes.map(decode_typed_scalar).transpose()? {
+            Some(TypedScalar::Int32(value)) => Some(("int32", i64::from(value))),
+            Some(TypedScalar::Int64(value)) => Some(("int64", value)),
+            Some(TypedScalar::Date(value)) => Some(("date", i64::from(value))),
+            _ => None,
+        })
+    }
+    let lower = value(lower)?;
+    let upper = value(upper)?;
+    let bound_type = match (lower, upper) {
+        (Some((lower, _)), Some((upper, _))) if lower == upper => Some(lower),
+        (Some((bound_type, _)), None) | (None, Some((bound_type, _))) => Some(bound_type),
+        _ => None,
+    };
+    Ok(OrderedProjection {
+        bound_type,
+        lower: bound_type.and_then(|_| lower.map(|(_, value)| value)),
+        upper: bound_type.and_then(|_| upper.map(|(_, value)| value)),
+    })
 }
 
 #[derive(Clone)]
@@ -328,8 +361,12 @@ fn mutate_append(transaction: &Writer<'_>, input: &AppendImage<'_>) -> Result<()
             ],
         )?;
         for metric in &file.metrics {
+            let ordered = ordered_projection(
+                metric.lower_bound_cbor.as_deref(),
+                metric.upper_bound_cbor.as_deref(),
+            )?;
             transaction.execute(
-                "INSERT INTO otmp_file_metrics(file_id, field_id, column_size_bytes, value_count, null_count, nan_count, distinct_count, lower_bound_cbor, upper_bound_cbor, metadata_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO otmp_file_metrics(file_id, field_id, column_size_bytes, value_count, null_count, nan_count, distinct_count, lower_bound_cbor, upper_bound_cbor, ordered_bound_type, ordered_lower_i64, ordered_upper_i64, metadata_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     file.file_id.as_bytes().as_slice(),
                     i64::from(metric.field_id),
@@ -340,6 +377,9 @@ fn mutate_append(transaction: &Writer<'_>, input: &AppendImage<'_>) -> Result<()
                     optional_sqlite_i64(metric.distinct_count, "distinct count")?,
                     metric.lower_bound_cbor,
                     metric.upper_bound_cbor,
+                    ordered.bound_type,
+                    ordered.lower,
+                    ordered.upper,
                     metric.metadata_json,
                 ],
             )?;
@@ -698,6 +738,7 @@ fn validate_relational_history(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Descriptor and metric invariants are one exhaustive validation pass.
 fn validate_file_descriptors(connection: &Connection) -> Result<(), RuntimeError> {
     let files = {
         let mut statement = connection.prepare(
@@ -731,7 +772,7 @@ fn validate_file_descriptors(connection: &Connection) -> Result<(), RuntimeError
 
     let metrics = {
         let mut statement = connection.prepare(
-            "SELECT m.value_count, m.null_count, m.nan_count, m.lower_bound_cbor, m.upper_bound_cbor, fld.type_json FROM otmp_file_metrics m JOIN otmp_files f ON f.file_id=m.file_id LEFT JOIN otmp_fields fld ON fld.schema_id=f.schema_id AND fld.field_id=m.field_id ORDER BY m.file_id, m.field_id",
+            "SELECT m.value_count, m.null_count, m.nan_count, m.lower_bound_cbor, m.upper_bound_cbor, fld.type_json, m.ordered_bound_type, m.ordered_lower_i64, m.ordered_upper_i64 FROM otmp_file_metrics m JOIN otmp_files f ON f.file_id=m.file_id LEFT JOIN otmp_fields fld ON fld.schema_id=f.schema_id AND fld.field_id=m.field_id ORDER BY m.file_id, m.field_id",
         )?;
         statement
             .query_map([], |row| {
@@ -742,11 +783,25 @@ fn validate_file_descriptors(connection: &Connection) -> Result<(), RuntimeError
                     row.get::<_, Option<Vec<u8>>>(3)?,
                     row.get::<_, Option<Vec<u8>>>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
     };
-    for (value_count, null_count, nan_count, lower, upper, field_type) in metrics {
+    for (
+        value_count,
+        null_count,
+        nan_count,
+        lower,
+        upper,
+        field_type,
+        ordered_type,
+        ordered_lower,
+        ordered_upper,
+    ) in metrics
+    {
         let Some(field_type) = field_type else {
             return Err(RuntimeError::Corrupt(
                 "metric field does not belong to the file schema".into(),
@@ -783,6 +838,18 @@ fn validate_file_descriptors(connection: &Connection) -> Result<(), RuntimeError
         {
             return Err(RuntimeError::Corrupt(
                 "relational metric bounds are reversed".into(),
+            ));
+        }
+        let projection = ordered_projection(
+            lower.as_ref().map(encode_typed_scalar).as_deref(),
+            upper.as_ref().map(encode_typed_scalar).as_deref(),
+        )?;
+        if ordered_type.as_deref() != projection.bound_type
+            || ordered_lower != projection.lower
+            || ordered_upper != projection.upper
+        {
+            return Err(RuntimeError::Corrupt(
+                "ordered metric projection differs from canonical bounds".into(),
             ));
         }
     }
@@ -2562,29 +2629,34 @@ fn validate_metadata_projection(
 #[cfg(test)]
 mod regeneration {
     use super::*;
-    use otmp_protocol::{Generation, Head, object_hash};
+    use otmp_protocol::{
+        GENERATION_MEDIA_TYPE, Generation, Head, ObjectReference, image_root_hash, object_hash,
+    };
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Regeneration keeps the complete retained-package comparison together.
     fn canonical_packages_regenerate_from_retained_commits() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../conformance/tables");
+        let regenerate = std::env::var_os("OTMP_REGENERATE_CONFORMANCE").is_some();
         for package in ["genesis", "append", "transactions"] {
             let package = root.join(package);
-            let head: Head = canonical_json::from_slice_canonical(
+            let mut head: Head = canonical_json::from_slice_canonical(
                 &fs::read(package.join("_otmp/HEAD")).unwrap(),
             )
             .unwrap();
-            let mut reference = Some(head.metadata_generation);
+            let mut reference = Some(head.metadata_generation.clone());
             let mut generations = Vec::new();
             while let Some(r) = reference {
                 let bytes = fs::read(package.join(r.uri.as_str())).unwrap();
                 let generation: Generation = canonical_json::from_slice_canonical(&bytes).unwrap();
                 assert_eq!(canonical_json::to_vec(&generation).unwrap(), bytes);
                 reference = generation.physical_parent.clone();
-                generations.push(generation);
+                generations.push((r.uri, generation));
             }
             generations.reverse();
             let mut previous: Option<Vec<u8>> = None;
-            for generation in generations {
+            let mut physical_parent = None;
+            for (generation_uri, mut generation) in generations {
                 let bytes =
                     fs::read(package.join(generation.semantic_commit.uri.as_str())).unwrap();
                 let commit: SemanticCommit = canonical_json::from_slice_canonical(&bytes).unwrap();
@@ -2647,17 +2719,81 @@ mod regeneration {
                     })
                     .unwrap()
                 };
-                let stored =
-                    fs::read(package.join(generation.metadata_image.checkpoint.uri.as_str()))
-                        .unwrap();
-                assert_eq!(
-                    object_hash(&checkpoint.bytes),
-                    object_hash(&stored),
-                    "checkpoint regeneration at version {}",
-                    commit.table_version.0
-                );
-                assert_eq!(checkpoint.bytes, stored);
+                let checkpoint_path =
+                    package.join(generation.metadata_image.checkpoint.uri.as_str());
+                if regenerate {
+                    fs::write(&checkpoint_path, &checkpoint.bytes).unwrap();
+                    generation.metadata_image.checkpoint.sha256 = object_hash(&checkpoint.bytes);
+                    generation.metadata_image.checkpoint.length =
+                        otmp_protocol::JsonU64(checkpoint.bytes.len() as u64);
+                    generation.metadata_image.page_count = otmp_protocol::JsonU64(
+                        u64::try_from(checkpoint.bytes.len() / PAGE_SIZE as usize).unwrap(),
+                    );
+                    generation.metadata_image.image_root_sha256 = image_root_hash(
+                        generation.table_id,
+                        generation.table_version.0,
+                        PAGE_SIZE,
+                        generation.metadata_image.page_count.0,
+                        generation.metadata_image.checkpoint.sha256,
+                        generation
+                            .metadata_image
+                            .page_map
+                            .as_ref()
+                            .map(|root| root.sha256),
+                    );
+                    let (index, artifacts) = crate::checkpoint_index::build(
+                        &generation.metadata_image.checkpoint,
+                        PAGE_SIZE,
+                        &checkpoint.bytes,
+                    )
+                    .unwrap();
+                    generation.metadata_image.checkpoint_page_index = Some(index);
+                    for artifact in artifacts {
+                        let path = package.join(artifact.uri.as_str());
+                        fs::create_dir_all(path.parent().unwrap()).unwrap();
+                        fs::write(path, artifact.bytes).unwrap();
+                    }
+                    generation.physical_parent = physical_parent;
+                    let generation_bytes = canonical_json::to_vec(&generation).unwrap();
+                    fs::write(package.join(generation_uri.as_str()), &generation_bytes).unwrap();
+                    physical_parent = Some(ObjectReference {
+                        uri: generation_uri,
+                        sha256: object_hash(&generation_bytes),
+                        length: Some(otmp_protocol::JsonU64(generation_bytes.len() as u64)),
+                        media_type: Some(GENERATION_MEDIA_TYPE.into()),
+                    });
+                } else {
+                    let stored = fs::read(checkpoint_path).unwrap();
+                    assert_eq!(
+                        object_hash(&checkpoint.bytes),
+                        object_hash(&stored),
+                        "checkpoint regeneration at version {}",
+                        commit.table_version.0
+                    );
+                    assert_eq!(checkpoint.bytes, stored);
+                    let (index, artifacts) = crate::checkpoint_index::build(
+                        &generation.metadata_image.checkpoint,
+                        PAGE_SIZE,
+                        &checkpoint.bytes,
+                    )
+                    .unwrap();
+                    assert_eq!(generation.metadata_image.checkpoint_page_index, Some(index));
+                    for artifact in artifacts {
+                        assert_eq!(
+                            fs::read(package.join(artifact.uri.as_str())).unwrap(),
+                            artifact.bytes
+                        );
+                    }
+                }
                 previous = Some(checkpoint.bytes);
+            }
+            if regenerate {
+                head.metadata_generation = physical_parent.unwrap();
+                fs::write(
+                    package.join("_otmp/HEAD"),
+                    canonical_json::to_vec(&head).unwrap(),
+                )
+                .unwrap();
             }
         }
     }

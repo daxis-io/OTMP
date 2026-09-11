@@ -1,5 +1,6 @@
 //! Conservative OTMP metric pruning boundary.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::ops::Bound;
 use std::sync::Arc;
 
 use datafusion::arrow::array::ArrayRef;
@@ -10,7 +11,99 @@ use datafusion::error::Result;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_optimizer::pruning::PruningPredicateBuilder;
 use datafusion::scalar::ScalarValue;
-use std::collections::HashSet;
+
+pub(crate) fn lower_ranges(
+    filters: &[datafusion::logical_expr::Expr],
+    schema: &otmp_protocol::Schema,
+) -> Vec<otmp::FileMetricRange> {
+    fn visit(
+        expression: &datafusion::logical_expr::Expr,
+        schema: &otmp_protocol::Schema,
+        ranges: &mut Vec<otmp::FileMetricRange>,
+    ) {
+        use datafusion::logical_expr::{Expr, Operator};
+        let Expr::BinaryExpr(binary) = expression else {
+            return;
+        };
+        if binary.op == Operator::And {
+            visit(&binary.left, schema, ranges);
+            visit(&binary.right, schema, ranges);
+            return;
+        }
+        if !matches!(
+            binary.op,
+            Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
+        ) {
+            return;
+        }
+        let (column, literal, operator) = match (&*binary.left, &*binary.right) {
+            (Expr::Column(column), Expr::Literal(value, _)) => (column, value, binary.op),
+            (Expr::Literal(value, _), Expr::Column(column)) => (
+                column,
+                value,
+                match binary.op {
+                    Operator::Lt => Operator::Gt,
+                    Operator::LtEq => Operator::GtEq,
+                    Operator::Gt => Operator::Lt,
+                    Operator::GtEq => Operator::LtEq,
+                    _ => unreachable!(),
+                },
+            ),
+            _ => return,
+        };
+        let Some(field) = schema.fields.iter().find(|field| field.name == column.name) else {
+            return;
+        };
+        let range = match (&field.field_type, literal) {
+            (otmp_protocol::LogicalType::Int32, ScalarValue::Int32(Some(value))) => {
+                let (lower, upper) = comparison_bounds(operator, *value);
+                otmp::FileMetricRange::Int32 {
+                    field_id: field.field_id,
+                    lower,
+                    upper,
+                }
+            }
+            (otmp_protocol::LogicalType::Int64, ScalarValue::Int64(Some(value))) => {
+                let (lower, upper) = comparison_bounds(operator, *value);
+                otmp::FileMetricRange::Int64 {
+                    field_id: field.field_id,
+                    lower,
+                    upper,
+                }
+            }
+            (otmp_protocol::LogicalType::Date, ScalarValue::Date32(Some(value))) => {
+                let (lower, upper) = comparison_bounds(operator, *value);
+                otmp::FileMetricRange::Date {
+                    field_id: field.field_id,
+                    lower,
+                    upper,
+                }
+            }
+            _ => return,
+        };
+        ranges.push(range);
+    }
+
+    let mut ranges = Vec::new();
+    for filter in filters {
+        visit(filter, schema, &mut ranges);
+    }
+    ranges
+}
+
+fn comparison_bounds<T>(
+    operator: datafusion::logical_expr::Operator,
+    value: T,
+) -> (Bound<T>, Bound<T>) {
+    use datafusion::logical_expr::Operator;
+    match operator {
+        Operator::Lt => (Bound::Unbounded, Bound::Excluded(value)),
+        Operator::LtEq => (Bound::Unbounded, Bound::Included(value)),
+        Operator::Gt => (Bound::Excluded(value), Bound::Unbounded),
+        Operator::GtEq => (Bound::Included(value), Bound::Unbounded),
+        _ => unreachable!(),
+    }
+}
 
 /// Returns `true` for every file when statistics cannot safely prove pruning.
 /// The provider retains its residual predicate, so this is always Inexact.
@@ -289,6 +382,75 @@ mod tests {
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{BinaryExpr, Column, IsNullExpr, Literal};
     use std::collections::BTreeMap;
+    use std::ops::Bound;
+
+    #[test]
+    fn lowers_only_exact_top_level_inequalities_and_flattens_and() {
+        use datafusion::prelude::{col, lit};
+        let schema = otmp_protocol::Schema {
+            schema_id: 1,
+            parent_schema_id: None,
+            fields: vec![
+                otmp_protocol::Field {
+                    field_id: 1,
+                    name: "i32".into(),
+                    required: false,
+                    field_type: otmp_protocol::LogicalType::Int32,
+                    doc: None,
+                    initial_default: None,
+                    write_default: None,
+                },
+                otmp_protocol::Field {
+                    field_id: 2,
+                    name: "i64".into(),
+                    required: false,
+                    field_type: otmp_protocol::LogicalType::Int64,
+                    doc: None,
+                    initial_default: None,
+                    write_default: None,
+                },
+                otmp_protocol::Field {
+                    field_id: 3,
+                    name: "day".into(),
+                    required: false,
+                    field_type: otmp_protocol::LogicalType::Date,
+                    doc: None,
+                    initial_default: None,
+                    write_default: None,
+                },
+            ],
+            identifier_field_ids: vec![],
+            doc: None,
+        };
+        let filters = vec![
+            col("i32").lt(lit(7_i32)).and(lit(9_i64).lt_eq(col("i64"))),
+            col("day").gt_eq(lit(datafusion::scalar::ScalarValue::Date32(Some(-2)))),
+            col("i64").eq(lit(10_i64)),
+            col("i64").lt(lit(10_i32)),
+            col("i64").lt(lit(20_i64)).or(col("i64").gt(lit(30_i64))),
+            col("i64").not_eq(lit(11_i64)),
+        ];
+        assert_eq!(
+            lower_ranges(&filters, &schema),
+            vec![
+                otmp::FileMetricRange::Int32 {
+                    field_id: 1,
+                    lower: Bound::Unbounded,
+                    upper: Bound::Excluded(7),
+                },
+                otmp::FileMetricRange::Int64 {
+                    field_id: 2,
+                    lower: Bound::Included(9),
+                    upper: Bound::Unbounded,
+                },
+                otmp::FileMetricRange::Date {
+                    field_id: 3,
+                    lower: Bound::Included(-2),
+                    upper: Bound::Unbounded,
+                },
+            ]
+        );
+    }
     #[test]
     fn scalar_preserves_exact_view_fixed_uuid_and_decimal_types() {
         assert!(matches!(

@@ -1,5 +1,5 @@
 PRAGMA application_id = 1330924880; -- 0x4F544D50 ("OTMP")
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 PRAGMA foreign_keys = ON;
 
 -- One checkpoint describes exactly one self-contained OTMP table.
@@ -253,6 +253,12 @@ ON otmp_files(partition_spec_id, partition_hash);
 CREATE INDEX otmp_idx_files_sequence
 ON otmp_files(file_sequence_number);
 
+CREATE INDEX otmp_idx_files_created_snapshot
+ON otmp_files(created_snapshot_id, file_id);
+
+CREATE INDEX otmp_idx_files_created_version
+ON otmp_files(created_version, file_id);
+
 CREATE TABLE otmp_delete_file_details (
     file_id BLOB PRIMARY KEY REFERENCES otmp_files(file_id),
     delete_type TEXT NOT NULL CHECK (delete_type IN ('position', 'equality')),
@@ -275,6 +281,9 @@ CREATE TABLE otmp_file_metrics (
     distinct_count INTEGER CHECK (distinct_count IS NULL OR distinct_count >= 0),
     lower_bound_cbor BLOB,
     upper_bound_cbor BLOB,
+    ordered_bound_type TEXT,
+    ordered_lower_i64 INTEGER,
+    ordered_upper_i64 INTEGER,
     bloom_filter_uri TEXT,
     bloom_filter_sha256 BLOB CHECK (
         bloom_filter_sha256 IS NULL OR length(bloom_filter_sha256) = 32
@@ -285,6 +294,23 @@ CREATE TABLE otmp_file_metrics (
         (bloom_filter_uri IS NULL AND bloom_filter_sha256 IS NULL)
         OR
         (bloom_filter_uri IS NOT NULL AND bloom_filter_sha256 IS NOT NULL)
+    ),
+    CHECK (
+        (ordered_bound_type IS NULL AND ordered_lower_i64 IS NULL AND ordered_upper_i64 IS NULL)
+        OR
+        (ordered_bound_type IN ('int32', 'int64', 'date')
+            AND (ordered_lower_i64 IS NOT NULL OR ordered_upper_i64 IS NOT NULL))
+    ),
+    CHECK (
+        ordered_bound_type = 'int64'
+        OR ordered_bound_type IS NULL
+        OR (ordered_lower_i64 IS NULL OR ordered_lower_i64 BETWEEN -2147483648 AND 2147483647)
+            AND (ordered_upper_i64 IS NULL OR ordered_upper_i64 BETWEEN -2147483648 AND 2147483647)
+    ),
+    CHECK (
+        ordered_lower_i64 IS NULL
+        OR ordered_upper_i64 IS NULL
+        OR ordered_lower_i64 <= ordered_upper_i64
     )
 ) STRICT;
 

@@ -135,9 +135,8 @@ async fn metric_pruning_keeps_projected_away_filter_correct_across_a_full_raw_ba
         .await
         .unwrap();
 
-    // One append creates a 256-file raw metadata page. All those files are
-    // pruned, so the reader must use the unfiltered continuation to reach the
-    // high file in the next snapshot.
+    // One append creates 256 catalog-rejected files; historical traversal still
+    // advances to the matching file in the next snapshot.
     let low_files = (0..256)
         .map(|ordinal| append_file(&low_path, &low_bytes, 1, 3, ordinal))
         .collect();
@@ -209,8 +208,9 @@ async fn metric_pruning_keeps_projected_away_filter_correct_across_a_full_raw_ba
             .value(0),
         2
     );
-    assert_eq!(optimized.metrics().files_considered, 257);
-    assert_eq!(optimized.metrics().files_pruned, 256);
+    assert_eq!(optimized.metrics().files_considered, 1);
+    assert_eq!(optimized.metrics().files_pruned, 0);
+    assert_eq!(optimized.metrics().catalog_pruning_scans, 1);
     let repeated = context
         .sql("SELECT count(*) AS rows FROM t WHERE id >= 100")
         .await
@@ -240,8 +240,7 @@ async fn metric_pruning_keeps_projected_away_filter_correct_across_a_full_raw_ba
         )
         .await
         .unwrap();
-        // Historical traversal starts with the newest snapshot, then follows
-        // all 256 pruned older descriptors under their immutable schema.
+        // Historical traversal follows ancestry without returning rejected descriptors.
         assert_eq!(count(historical).await, 2);
     }
 }

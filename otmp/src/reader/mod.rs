@@ -7,7 +7,7 @@ mod pages;
 mod schema;
 mod selection;
 mod snapshot;
-pub use metadata::{FileBatch, FileCursor, MetadataReader, ReaderFile};
+pub use metadata::{FileBatch, FileCursor, FileMetricRange, MetadataReader, ReaderFile};
 pub(crate) use pages::{AuthenticatedImage, ReadContext, WeakReadContext};
 
 /// Budgets shared by readers opened through a cloned table instance.

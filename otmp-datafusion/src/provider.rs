@@ -452,25 +452,31 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
         };
         let validation_started = std::time::Instant::now();
         let load_key = key.clone();
+        let reader = self.reader.clone();
+        let footer_cache = self.footer_cache.clone();
+        let io = self.io.clone();
+        let table_schema = self.schema.clone();
+        #[cfg(test)]
+        let after_pin = self.hooks.after_pin.clone();
+        #[cfg(test)]
+        let validation = self.hooks.validation.clone();
         let entry = self
             .footer_cache
-            .validated_or_load(key, async {
+            .validated_or_load(key, async move {
                 let bridge = Arc::new(
                     crate::store::ReadOnlyStore::with_counters(
-                        self.reader.store().clone(),
+                        reader.store().clone(),
                         [(uri.clone(), hash, length)],
-                        self.io.clone(),
+                        io,
                     )
                     .await
                     .map_err(external)?,
                 );
                 #[cfg(test)]
-                tests::pause(&self.hooks.after_pin).await;
-                let factory = crate::footer::FooterReaderFactory::new(
-                    bridge.clone(),
-                    self.footer_cache.clone(),
-                )
-                .for_preflight();
+                tests::pause(&after_pin).await;
+                let factory =
+                    crate::footer::FooterReaderFactory::new(bridge.clone(), footer_cache.clone())
+                        .for_preflight();
                 let mut reader = factory.create_reader(
                     0,
                     datafusion::datasource::listing::PartitionedFile::new(uri.as_str(), length),
@@ -481,14 +487,14 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
                     datafusion::error::DataFusionError::External(Box::new(error))
                 })?;
                 #[cfg(test)]
-                tests::pause(&self.hooks.validation).await;
+                tests::pause(&validation).await;
                 let physical = Arc::new(datafusion::parquet::arrow::parquet_to_arrow_schema(
                     metadata.file_metadata().schema_descr(),
                     metadata.file_metadata().key_value_metadata(),
                 )?);
                 let binding_charge = crate::schemaadapter::binding_charge(&query)?;
                 let binding = crate::schemaadapter::OtmpAdapterFactory::new(query, schema)
-                    .create(self.schema.clone(), physical.clone())?;
+                    .create(table_schema, physical.clone())?;
                 let object = bridge
                     .pinned_objects()
                     .next()
@@ -496,7 +502,7 @@ impl<S: otmp::ObjectStore + std::fmt::Debug> OtmpTableProvider<S> {
                     .clone();
                 let footer_key =
                     bridge.footer_identity(&object_store::path::Path::from(uri.as_str()))?;
-                self.footer_cache
+                footer_cache
                     .insert_validated(
                         load_key,
                         object,

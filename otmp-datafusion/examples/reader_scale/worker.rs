@@ -452,8 +452,8 @@ mod tests {
         )
         .await
         .unwrap();
-        let store = MeasuredStore::new(LocalObjectStore::new(&root).unwrap(), Duration::ZERO)
-            .with_data_controls([("stat".into(), 100), ("trailer".into(), 100)].into(), None);
+        let store = MeasuredStore::new(LocalObjectStore::new(&root).unwrap(), Duration::ZERO);
+        let [entered, release] = store.pause_next_trailer();
         let table = Table::new(store.clone());
         let provider = OtmpTableProvider::open(
             &table,
@@ -478,21 +478,16 @@ mod tests {
         };
         let first = query(context.clone());
         let second = query(context);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let io = store.snapshot();
-                if io.by_class.get("data").is_some_and(|data| {
-                    data.stat_requests == 2 && data.range_requests == 1 && data.active == 1
-                }) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        let data = &store.snapshot().by_class["data"];
+        assert_eq!(data.stat_requests, 1);
+        assert_eq!(data.range_requests, 1);
+        assert_eq!(data.active, 1);
         first.abort();
         assert!(first.await.unwrap_err().is_cancelled());
+        release.notify_one();
         drop(second.await.unwrap().unwrap());
         let io = store.snapshot();
         assert_eq!(io.by_class["data"].range_requests, 2);
@@ -501,7 +496,6 @@ mod tests {
     }
     #[tokio::test]
     async fn concurrent_preflight_makes_progress_at_the_sequential_minimum_footer_budget() {
-        use otmp::ObjectStore;
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("table");
         fixture::prepare(
@@ -515,27 +509,21 @@ mod tests {
         )
         .await
         .unwrap();
-        let store = LocalObjectStore::new(&root).unwrap();
-        let mut budget = 0;
-        for entry in std::fs::read_dir(root.join("data")).unwrap() {
-            let path = entry.unwrap().path();
-            let bytes = std::fs::read(&path).unwrap();
-            let footer =
-                u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap())
-                    as usize;
-            let uri: otmp_protocol::RelativeUri =
-                format!("data/{}", path.file_name().unwrap().to_str().unwrap())
-                    .parse()
-                    .unwrap();
-            let metadata = store.stat(&uri).await.unwrap();
-            budget = budget.max(
-                footer * 128
-                    + 65536
-                    + 512
-                    + uri.as_str().len() * 4
-                    + metadata.version.as_opaque().len() * 2,
-            );
-        }
+        let calibration = run(
+            &root,
+            serde_json::from_value(json!({"preflight_concurrency":1,"execute":false})).unwrap(),
+        )
+        .await
+        .unwrap();
+        let budget = calibration["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|phase| phase["name"] == "planning")
+            .unwrap()["provider"]["peak_footer_cache_bytes"]
+            .as_u64()
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .unwrap();
         for concurrency in [1, 8] {
             let config: RunConfig = serde_json::from_value(json!({
                 "preflight_concurrency":concurrency,"footer_budget":budget,"execute":false,
@@ -548,7 +536,7 @@ mod tests {
                 "concurrency {concurrency}, budget {budget}: {output}"
             );
         }
-        let store = MeasuredStore::new(store, Duration::ZERO);
+        let store = MeasuredStore::new(LocalObjectStore::new(&root).unwrap(), Duration::ZERO);
         let [entered, release] = store.pause_next_trailer();
         let table = Table::new(store.clone());
         let provider = OtmpTableProvider::open(
@@ -726,9 +714,16 @@ mod tests {
                         >= query["planning_to_first_result_ms"].as_f64().unwrap()
                 );
             }
-            assert!(round["io"]["stat_requests"].as_u64().unwrap() > 0);
             assert_eq!(round["io"]["active"], 0);
         }
+        assert!(rounds[0]["io"]["stat_requests"].as_u64().unwrap() > 0);
+        assert_eq!(rounds[1]["io"]["stat_requests"], 0);
+        assert!(
+            rounds[1]["provider"]["validated_file_cache_hits"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
         assert_eq!(output["violations"], json!([]));
     }
     #[tokio::test]

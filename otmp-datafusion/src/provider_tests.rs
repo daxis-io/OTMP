@@ -19,14 +19,14 @@ use std::{
 };
 
 type BatchEdit = Arc<dyn Fn(&mut [otmp::ReaderFile]) + Send + Sync>;
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Hooks {
     pub batch: Option<BatchEdit>,
     pub validation: Gate,
     pub after_pin: Gate,
     pub binding: Gate,
 }
-type Gate = Mutex<Option<[Arc<tokio::sync::Notify>; 2]>>;
+type Gate = Arc<Mutex<Option<[Arc<tokio::sync::Notify>; 2]>>>;
 pub(super) async fn pause(hook: &Gate) {
     let gate = hook.lock().unwrap().take();
     if let Some(gate) = gate {
@@ -163,7 +163,7 @@ async fn concurrent_first_scans_share_a_fill_and_warm_deletion_fails_exact_reads
         Arc::new(tokio::sync::Notify::new()),
         Arc::new(tokio::sync::Notify::new()),
     ];
-    provider.hooks.after_pin = Mutex::new(Some(gate.clone()));
+    provider.hooks.after_pin = Arc::new(Mutex::new(Some(gate.clone())));
     let provider = Arc::new(provider);
     let context = SessionContext::new();
     let state = context.state();
@@ -287,7 +287,7 @@ async fn cancelling_at_schema_validation_releases_scan_ownership() {
         Arc::new(tokio::sync::Notify::new()),
         Arc::new(tokio::sync::Notify::new()),
     ];
-    provider.hooks.validation = Mutex::new(Some(gate.clone()));
+    provider.hooks.validation = Arc::new(Mutex::new(Some(gate.clone())));
     let provider = Arc::new(provider);
     let context = SessionContext::new();
     let scanning = provider.clone();
@@ -317,7 +317,7 @@ async fn independent_scans_pin_their_own_version_and_stale_ranges_preserve_the_c
         Arc::new(tokio::sync::Notify::new()),
         Arc::new(tokio::sync::Notify::new()),
     ];
-    old.hooks.after_pin = Mutex::new(Some(gate.clone()));
+    old.hooks.after_pin = Arc::new(Mutex::new(Some(gate.clone())));
     let old = Arc::new(old);
     let context = SessionContext::new();
     let scanning = old.clone();
@@ -425,7 +425,7 @@ async fn concurrent_malformed_files_fail_without_a_plan_or_stranded_load() {
             Arc::new(tokio::sync::Notify::new()),
             Arc::new(tokio::sync::Notify::new()),
         ];
-        provider.hooks.after_pin = Mutex::new(Some(gate.clone()));
+        provider.hooks.after_pin = Arc::new(Mutex::new(Some(gate.clone())));
         let provider = Arc::new(provider);
         let context = SessionContext::new();
         let state = context.state();
@@ -583,7 +583,7 @@ async fn repeated_uri_with_another_schema_keeps_a_preflight_lease_during_final_b
         Arc::new(tokio::sync::Notify::new()),
         Arc::new(tokio::sync::Notify::new()),
     ];
-    provider.hooks.binding = Mutex::new(Some(gate.clone()));
+    provider.hooks.binding = Arc::new(Mutex::new(Some(gate.clone())));
     let provider = Arc::new(provider);
     let context = SessionContext::new();
     let scanning = provider.clone();

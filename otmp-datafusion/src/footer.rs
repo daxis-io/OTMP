@@ -186,8 +186,11 @@ struct FooterLoad {
     _registration: Registration,
 }
 struct ValidatedLoad {
-    result: tokio::sync::OnceCell<
-        Result<Arc<ValidatedFileEntry>, Arc<datafusion::error::DataFusionError>>,
+    future: Shared<
+        BoxFuture<
+            'static,
+            Result<Arc<ValidatedFileEntry>, Arc<datafusion::error::DataFusionError>>,
+        >,
     >,
     key: ValidatedFileKey,
     registry: ValidatedLoads,
@@ -495,7 +498,9 @@ impl FooterCache {
         load: F,
     ) -> datafusion::error::Result<Arc<ValidatedFileEntry>>
     where
-        F: std::future::Future<Output = datafusion::error::Result<Arc<ValidatedFileEntry>>>,
+        F: std::future::Future<Output = datafusion::error::Result<Arc<ValidatedFileEntry>>>
+            + Send
+            + 'static,
     {
         if let Some(entry) = self.validated(&key)? {
             return Ok(entry);
@@ -509,8 +514,9 @@ impl FooterCache {
             if let Some(fill) = loads.get(&key).and_then(Weak::upgrade) {
                 fill
             } else {
+                let future = async move { load.await.map_err(Arc::new) }.boxed().shared();
                 let fill = Arc::new(ValidatedLoad {
-                    result: tokio::sync::OnceCell::new(),
+                    future,
                     key: key.clone(),
                     registry: self.validated_loads.clone(),
                 });
@@ -518,13 +524,9 @@ impl FooterCache {
                 fill
             }
         };
-        fill.result
-            .get_or_init(|| async { load.await.map_err(Arc::new) })
-            .await
-            .clone()
-            .map_err(|error| {
-                datafusion::error::DataFusionError::External(Box::new(SharedValidationError(error)))
-            })
+        fill.future.clone().await.clone().map_err(|error| {
+            datafusion::error::DataFusionError::External(Box::new(SharedValidationError(error)))
+        })
     }
 
     pub(crate) async fn insert_validated(

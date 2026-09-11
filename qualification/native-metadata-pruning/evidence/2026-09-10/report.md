@@ -1,24 +1,25 @@
 # Native metadata pruning and writer qualification
 
-Status: local, credential-free qualification on an uncommitted review-repair candidate. This is not a frozen source tree, remote CI, live-provider qualification, deployment, or production evidence.
+Status: local qualification on the committed source reconciled with `origin/main`. Local PostgreSQL and S3-compatible services were used only by the DuckLake comparison harness. This is not remote CI, live-provider qualification, deployment, or production evidence.
 
 ## Provenance
 
-- Base: `10ceea0d3543c2c288df09d6887f83820143e413`
-- Slice 1: `8882984` (`Add v3 ordered metric range queries`)
-- Slice 2: `1a85852` (`Prune catalog candidates and reuse validated scans`)
-- Slice 3: `6c33b49d98c668d23e77ffb70575995c3b26f893` (`Write metadata through authenticated page overlays`)
-- Review-repair source diff SHA-256 (`git diff --binary -- otmp otmp-datafusion`): `1b60e5384633e7a7c4cd4d1baf2b531aa6d74e1ea6005fc71d62eac8edc319b9`
-- Observed `origin/main`: `9a4e09baecf7c536618dd716b12377b7e0cda10f`; this candidate has not been rebased onto it.
+- Base and observed `origin/main`: `9a4e09baecf7c536618dd716b12377b7e0cda10f`
+- Slice 1: `5b3f4ce` (`Add v3 ordered metric range queries`)
+- Slice 2: `6af4c4d` (`Prune catalog candidates and reuse validated scans`)
+- Slice 3: `3b9df6d` (`Write metadata through authenticated page overlays`)
+- Review repair: `7213d70` (`Address native metadata pruning audit findings`)
+- Reconciliation repairs: `b7e0980` (`Bound reconciled writer qualification futures`), `5c689fd` (`Keep shared validation fills alive for peer scans`), `f6c0081` (`Preserve ambiguous appends and deep snapshot histories`), `6beca77` (`Make shared validation cache assertion deterministic`), and `fbfaa23` (`Remove racy duplicate cancellation test`)
+- Final source: `fbfaa23b66f9543f883fef06d6a48560b07afddb`
+- Final source diff SHA-256 (`git diff --binary origin/main...HEAD -- otmp otmp-datafusion`): `24756b15a2a53be0ee42c8aad0fa761b1a9f9f3a09581eec41c2a9eb75c8628e`
 - Host: Apple arm64, Darwin 25.6.0
 - Rust: `rustc 1.95.0 (59807616e 2026-04-14)`
 - Cargo: `cargo 1.95.0 (f2d3ce0bd 2026-03-21)`
-- Writer qualifier binary SHA-256: `02471c03c7aa35a604736f108d889d1f042fde2b1ece7be8d377d51392973874`
+- Writer qualifier binary SHA-256: `dfa74e2f46d315d737396591f1fd0f954ed5c9a8ea80d15ad30eb930c1f709f0`
 - Frozen Parquet append: 1,705 bytes, SHA-256 `427cc3a1b8834cdfa1da1779a74885f40e3cc6f121f5827e5bf3a1ef4efda42c`
-- Fixture configuration SHA-256 values: 256 `351368bab9e464bc0ccc12fbff52661ec78701497f8edf7cdb109f158c43d3ef`; 4,096 `8cb8aff550828d6da0204591ae6543500c118c282b42d137a2144fd980930309`; 16,384 `202ed595b0d5fdb0ea08f7803b4adbc01a31e77d74b522e4fe4e905e73663c49`
-- Prepared fixture manifest SHA-256 values: 256 `b7cb9723a66eb3578cb7f0a28f6f14790f0a5b76a2a37085ee9606ff8f861e5f`; 4,096 `5866d612419a3184533ef2f02402e95bdc51a12010abb972be15afb7711ebe76`; 16,384 `ca2fcb61220acafbdc7169fc597e48b1db4b40d196cada4997fd0c81a79cf49e`
+- Fixture manifest SHA-256 values: 256 `747c71cce04408a2b4c1a542b68bbf4c0e487792942339e5a192f28fc26c50a1`; 4,096 `ef659184fc1fbed6d0da9a1ed1812648cca005ad9e608225d5625c193fd5ec54`; 16,384 `b21cd4937129cc1ff5d72f4259f276f5d4db7398a76458ccdbe5013c0743f358`
 
-The fresh one-shot fixtures are retained under `/private/tmp/otmp-native-writer-final.GFZJte`; the earlier diagnostic samples remain under `/private/tmp/otmp-native-writer-qual`. The structured counts are in `writer-matrix.json` beside this report. Every reported fixture was prepared from scratch and mutated once by its measured append.
+The final-source one-shot fixtures are retained under `/private/tmp/otmp-native-writer-fbf.ixK8kz`; earlier diagnostic samples remain retained separately. The structured counts are in `writer-matrix.json` beside this report. Every reported fixture was copied from a frozen source into a fresh owned root and mutated once by its measured append.
 
 ## Writer structural gates
 
@@ -26,28 +27,41 @@ The fresh one-shot fixtures are retained under `/private/tmp/otmp-native-writer-
 | ---: | ---: | ---: | ---: | ---: | ---: | :---: | ---: | :---: |
 | 256 | 405,504 / 99 | 33,765 / 1 | informational | 1 | 671,744 | yes | 33 | yes |
 | 4,096 | 490,291 / 130 | 43,412 / 3 | informational | 0 | 0 | no | 35 | yes |
-| 16,384 | 1,647,803 / 437 | 1,434,448 / 82 | 7,382,742 | 0 | 0 | no | 32 | yes |
+| 16,384 | 5,236,415 / 1,318 | 1,162,101 / 70 | 7,382,742 | 0 | 0 | no | 30 | yes |
 
-The ordinary 16,384-file write consumed 2.23% of the frozen 73,827,422-byte parent-SQLite baseline and passed every structural release gate. Page-map traversal is reported separately instead of being hidden inside the SQLite-page count. The 256-file case selected the existing reachable-byte checkpoint fallback; that fallback is outside the ordinary 16,384-file zero-fallback gate.
+The ordinary 16,384-file write consumed 7.09% of the frozen 73,827,422-byte parent-SQLite baseline and passed every structural release gate. Page-map traversal is reported separately instead of being hidden inside the SQLite-page count. The 256-file case selected the existing reachable-byte checkpoint fallback; that fallback is outside the ordinary 16,384-file zero-fallback gate.
 
-Two failed 16,384-file samples are retained, not discarded: 11,609,815 bytes before creation-identity indexes, and 8,344,754 bytes with those indexes but the reader-oriented 64 KiB page window. The review-repair candidate keeps the 4 KiB writer window and reads 1,647,803 parent SQLite bytes.
+Two earlier failed 16,384-file samples are retained, not discarded: 11,609,815 bytes before creation-identity indexes, and 8,344,754 bytes with those indexes but the reader-oriented 64 KiB page window. The final source keeps the 4 KiB writer window and reads 5,236,415 parent SQLite bytes on the fresh final fixture.
+
+## OTMP-versus-DuckLake matrix
+
+The final matrix is retained under `/private/tmp/otmp-ducklake-reconciled-evidence.2dLJux/final-matrix-fbf`. It used the final OTMP source and a worker with SHA-256 `5378766dbca2109b42dbd8856c212675a12f206a91fa370ac7c552db9ae1ed0e`. The 180 bindings had SHA-256 `edcb57cc7c4a21e56ec7c48bb01d461d4bcb286cefc8b9e1bca6db9df038e300`; there were no missing or extra groups.
+
+- Untimed smoke: 172 of 180 groups passed. Results SHA-256: `dcb4ef808ab6148a2afef66b9c469d760d082fdf0fd0d04d3d6d8f6f485e3a70`.
+- Timed matrix: 2,990 of 3,150 declared samples passed; all 3,150 were recorded. Manifest SHA-256: `91afa19940154f1dc72280684bfd4bac3332e8222fcbd47f79a5a04f2bcbda98`; outcomes SHA-256: `6d69271bb4b87e03440875264eefc7aa198109848341a7122e25814d50281eea`; detailed report SHA-256: `f8cf7cb4ddd3fb73c87ee621de73c779e8a820f0f551e7218cb23d7c47e24540`.
+- All before/after artifact and fixture guards passed. Every successful sample matched its frozen row hash and logical types.
+- The 160 failures were retained: 120 samples in six OTMP 16,384-file broad/evolved/history groups exhausted the default 64 MiB validated-footer cache, and 40 samples in the two OTMP 256-file evolved/history groups exhausted DataFusion's fixed 256 MiB external-sort pool. No comparator lane failed.
+- For the 16,384-file two-row local scan, OTMP planning p50/p95 was 237.062/242.039 ms cold and 37.974/38.545 ms retained; complete-query p50/p95 was 237.651/242.657 ms cold and 38.373/38.971 ms retained. The complete-query DuckLake SQLite comparator was 17.786/18.192 ms cold and 16.024/16.402 ms retained.
+
+The matrix is therefore complete but not qualified. Latency values are observations, not release gates; structural work counts and result parity remain the gates for this change.
 
 ## Verification
 
-The exact uncommitted review-repair source passed:
+The exact committed, reconciled source passed:
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
-- `cargo test --workspace --all-features --locked`
+- `cargo test --workspace --all-targets --all-features --locked`
+- `cargo test --workspace --doc --all-features --locked`
 - `python3 conformance/regenerate.py --check`
 - `python3 conformance/cow.py --check`
 - `bash tests/run-subprocess.sh`
 - `cargo check -p otmp-protocol --target wasm32-unknown-unknown --locked`
 - `cargo deny check`
-- `cargo audit --no-fetch`
+- `cargo audit`
 
 The subprocess suite covers nine append failpoints plus six metadata crash cases. The workspace suite covers targeted consumed-page and affected-projection corruption, exhaustive detection of unrelated corruption, cache fill sharing and eviction, exact object-version behavior, pruning fallbacks, historical selection, and pagination.
 
 ## Open qualification boundaries
 
-The frozen OTMP-versus-DuckLake matrix was not rerun. Its retained worktree is dirty and bound to v2 fixtures; the v3 hard cut requires fresh isolated bindings and service fixtures. No live cloud qualification was attempted. An independent fresh-context review was not performed in this run. The review repair is uncommitted, and reconciliation with the advanced `origin/main` remains a separate authorization boundary.
+An independent fresh-context correctness review follows this final-source evidence commit. No live cloud qualification was attempted. Push, remote CI, merge, deployment, and production qualification remain separate boundaries.

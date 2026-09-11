@@ -1,16 +1,44 @@
 #![cfg(feature = "write-latency-qualification")]
 
 use std::fs;
+use std::sync::OnceLock;
 
 use otmp::write_latency_qualification::{self as qualification, worker};
+
+fn probe_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 #[test]
 fn write_latency_phase_guard_stays_compact_for_async_callers() {
     assert!(std::mem::size_of::<qualification::PhaseGuard>() <= 2 * std::mem::size_of::<usize>());
 }
 
-#[test]
-fn write_latency_probe_rejects_overlap_and_unfinished_phases() {
+#[tokio::test]
+async fn write_latency_top_level_phases_cover_session_boundaries() {
+    let _exclusive = probe_lock().lock().await;
+    let session = qualification::start().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    drop(qualification::phase("first"));
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    drop(qualification::phase("second"));
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    let report = session.finish().unwrap();
+    assert_eq!(
+        report.acknowledged_latency_ns,
+        report
+            .phases
+            .iter()
+            .filter(|phase| phase.depth == 0)
+            .map(|phase| phase.duration_ns)
+            .sum::<u64>()
+    );
+}
+
+#[tokio::test]
+async fn write_latency_probe_rejects_overlap_and_unfinished_phases() {
+    let _exclusive = probe_lock().lock().await;
     let session = qualification::start().unwrap();
     assert!(qualification::start().is_err());
     qualification::add_bytes("temporary_file_bytes", 7);
@@ -35,6 +63,7 @@ fn write_latency_probe_rejects_overlap_and_unfinished_phases() {
 
 #[tokio::test]
 async fn write_latency_worker_prepares_runs_and_verifies_both_modes() {
+    let _exclusive = probe_lock().lock().await;
     let directory = tempfile::tempdir().unwrap();
     let prepare_config = directory.path().join("prepare.json");
     fs::write(&prepare_config, r#"{"property_bytes":32}"#).unwrap();

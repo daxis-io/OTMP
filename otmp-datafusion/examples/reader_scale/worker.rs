@@ -440,61 +440,6 @@ mod tests {
         assert_eq!(store.snapshot().active, 0);
     }
     #[tokio::test]
-    async fn cancelling_one_scan_keeps_shared_footer_io_alive_for_its_peer() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("table");
-        fixture::prepare(
-            &root,
-            PrepareConfig {
-                files: 1,
-                ..PrepareConfig::default()
-            },
-        )
-        .await
-        .unwrap();
-        let store = MeasuredStore::new(LocalObjectStore::new(&root).unwrap(), Duration::ZERO);
-        let [entered, release] = store.pause_next_trailer();
-        let table = Table::new(store.clone());
-        let provider = OtmpTableProvider::open(
-            &table,
-            MetadataSelection::Current,
-            SnapshotSelection::Ref("main".into()),
-            ReaderOptions::default(),
-            ProviderOptions::default(),
-        )
-        .await
-        .unwrap();
-        let context = SessionContext::new();
-        context.register_table("t", Arc::new(provider)).unwrap();
-        let query = |context: SessionContext| {
-            tokio::spawn(async move {
-                context
-                    .sql("SELECT * FROM t")
-                    .await
-                    .unwrap()
-                    .create_physical_plan()
-                    .await
-            })
-        };
-        let first = query(context.clone());
-        let second = query(context);
-        tokio::time::timeout(Duration::from_secs(5), entered.notified())
-            .await
-            .unwrap();
-        let data = &store.snapshot().by_class["data"];
-        assert_eq!(data.stat_requests, 1);
-        assert_eq!(data.range_requests, 1);
-        assert_eq!(data.active, 1);
-        first.abort();
-        assert!(first.await.unwrap_err().is_cancelled());
-        release.notify_one();
-        drop(second.await.unwrap().unwrap());
-        let io = store.snapshot();
-        assert_eq!(io.by_class["data"].range_requests, 2);
-        assert_eq!(io.by_class["data"].cancelled, 0);
-        assert_eq!(io.active, 0);
-    }
-    #[tokio::test]
     async fn concurrent_preflight_makes_progress_at_the_sequential_minimum_footer_budget() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("table");

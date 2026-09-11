@@ -927,40 +927,24 @@ impl<S: ObjectStore> Table<S> {
         staged: &[VerifiedStagedFile],
         build: impl Fn(&PinnedTable) -> Result<Candidate<R>, RuntimeError>,
     ) -> Result<(R, Sha256), RuntimeError> {
-        self.publish_transaction_from(None, key, logical_hash, staged, build)
+        #[cfg(feature = "write-latency-qualification")]
+        let parent_pin_phase = crate::write_latency_qualification::phase("parent_pin");
+        let parent = self.pin().await?;
+        #[cfg(feature = "write-latency-qualification")]
+        drop(parent_pin_phase);
+        self.publish_transaction_from_parent(parent, key, logical_hash, staged, build)
             .await
     }
 
     #[allow(clippy::too_many_lines)] // Keep conditional outcomes and probe boundaries together.
-    async fn publish_transaction_from<R: serde::de::DeserializeOwned>(
+    async fn publish_transaction_from_parent<R: serde::de::DeserializeOwned>(
         &self,
-        initial_parent: Option<PinnedTable>,
+        mut parent: PinnedTable,
         key: &str,
         logical_hash: Sha256,
         staged: &[VerifiedStagedFile],
         build: impl Fn(&PinnedTable) -> Result<Candidate<R>, RuntimeError>,
     ) -> Result<(R, Sha256), RuntimeError> {
-        let mut parent = if let Some(parent) = initial_parent {
-            #[cfg(feature = "write-latency-qualification")]
-            {
-                crate::write_latency_qualification::skipped_phase("parent_pin", 0);
-                crate::write_latency_qualification::skipped_phase("parent_validation", 1);
-                crate::write_latency_qualification::skipped_phase("generation_resolution", 2);
-                crate::write_latency_qualification::skipped_phase(
-                    "logical_image_materialization",
-                    2,
-                );
-                crate::write_latency_qualification::add_bytes(
-                    "parent_logical_bytes",
-                    parent.resolved.len() as u64,
-                );
-            }
-            parent
-        } else {
-            #[cfg(feature = "write-latency-qualification")]
-            let _phase = crate::write_latency_qualification::phase("parent_pin");
-            self.pin().await?
-        };
         let table_id = parent.head.table_id;
 
         let mut rebases = 0;

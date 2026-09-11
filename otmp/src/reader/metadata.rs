@@ -191,17 +191,16 @@ impl<S: ObjectStore> MetadataReader<S> {
             .collect()
     }
 
-    pub(crate) async fn snapshot_ancestry(
+    pub(crate) async fn snapshot_descends_from(
         &self,
         mut tip: Option<Id>,
-    ) -> Result<Vec<Id>, RuntimeError> {
-        let mut chain = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
+        ancestor: Id,
+    ) -> Result<bool, RuntimeError> {
+        if tip == Some(ancestor) {
+            return Ok(true);
+        }
         let mut last_sequence = u64::MAX;
         while let Some(snapshot_id) = tip {
-            if !seen.insert(snapshot_id) || chain.len() == 4096 {
-                return Err(corrupt("snapshot ancestry cycle or bound exceeded"));
-            }
             let rows = self
                 .engine
                 .query(
@@ -219,14 +218,16 @@ impl<S: ObjectStore> MetadataReader<S> {
                 return Err(corrupt("nondecreasing snapshot ancestry"));
             }
             last_sequence = sequence;
-            chain.push(snapshot_id);
+            if snapshot_id == ancestor {
+                return Ok(true);
+            }
             tip = if matches!(row[0], Value::Null) {
                 None
             } else {
                 Some(id(&row[0])?)
             };
         }
-        Ok(chain)
+        Ok(false)
     }
 
     pub(crate) async fn open(
@@ -510,4 +511,36 @@ async fn validate_commit_row<S: ObjectStore>(
     // and previous state. Historical selection checks those explicit links.
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{InMemoryObjectStore, InitializeRequest, ReaderOptions, Table};
+    use std::str::FromStr;
+
+    #[tokio::test]
+    async fn matching_tip_does_not_walk_snapshot_history() {
+        let store = InMemoryObjectStore::default();
+        let table = Table::new(store.clone());
+        let schema =
+            serde_json::from_slice(include_bytes!("../../../conformance/sources/schema.json"))
+                .unwrap();
+        table
+            .initialize(InitializeRequest::new(schema))
+            .await
+            .unwrap();
+        let reader = MetadataReader::open(
+            ReadContext::new(store, ReaderOptions::default()).unwrap(),
+            MetadataSelection::Current,
+            SnapshotSelection::Ref("main".into()),
+        )
+        .await
+        .unwrap();
+        let tip = Id::from_str("018f31f4-2bbd-7e47-a8bd-e5c9b36d8b0c").unwrap();
+        let queries = reader.engine.query_count();
+
+        assert!(reader.snapshot_descends_from(Some(tip), tip).await.unwrap());
+        assert_eq!(reader.engine.query_count(), queries);
+    }
 }

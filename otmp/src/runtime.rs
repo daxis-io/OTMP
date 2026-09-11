@@ -837,6 +837,7 @@ impl<S: ObjectStore> Table<S> {
                 }
             }
         }
+        let mut publication_may_have_applied = false;
         let result = Box::pin(self.publish_append_transaction(
             request,
             &staged,
@@ -844,9 +845,10 @@ impl<S: ObjectStore> Table<S> {
             table_id,
             base_tip,
             base_version,
+            &mut publication_may_have_applied,
         ))
         .await;
-        if result.is_err() {
+        if result.is_err() && !publication_may_have_applied {
             cleanup(&self.store, &staged).await;
         }
         result
@@ -871,6 +873,7 @@ impl<S: ObjectStore> Table<S> {
         validate_staged(request, staged, table_id)?;
         validate_request_for_write(request, &base).await?;
         let base_tip = base.reader.ref_row(&request.target_ref).await?;
+        let mut publication_may_have_applied = false;
         Box::pin(self.publish_append_transaction(
             request,
             staged,
@@ -878,6 +881,7 @@ impl<S: ObjectStore> Table<S> {
             table_id,
             base_tip,
             base.reader.head.table_version.0,
+            &mut publication_may_have_applied,
         ))
         .await
     }
@@ -927,6 +931,7 @@ impl<S: ObjectStore> Table<S> {
         table_id: Id,
         base_tip: Option<(RefType, Option<Id>)>,
         base_version: u64,
+        publication_may_have_applied: &mut bool,
     ) -> Result<AppendResult, RuntimeError> {
         let mut parent = self.write_pin(&request.target_ref).await?;
         let mut rebases = 0;
@@ -997,6 +1002,7 @@ impl<S: ObjectStore> Table<S> {
                     ConditionalWriteOutcome::Applied { .. } => return Ok(candidate.result),
                     ConditionalWriteOutcome::Conflict { .. } => break,
                     ConditionalWriteOutcome::Indeterminate { source } => {
+                        *publication_may_have_applied = true;
                         indeterminate += 1;
                         match self.write_pin(&request.target_ref).await {
                             Ok(current) => {
@@ -2080,8 +2086,10 @@ async fn validate_append_rebase_write<S: ObjectStore>(
             "append target removed".into(),
         ));
     };
-    let chain = pinned.reader.snapshot_ancestry(current).await?;
-    if old.is_some_and(|id| !chain.contains(&id)) {
+    if let Some(old) = old
+        && current != Some(old)
+        && !pinned.reader.snapshot_descends_from(current, old).await?
+    {
         return Err(RuntimeError::SemanticConflict(
             "target is not an append descendant".into(),
         ));

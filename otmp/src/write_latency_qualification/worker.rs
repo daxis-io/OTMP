@@ -217,7 +217,7 @@ pub async fn run(root: &Path, config: &Path) -> Result<RunOutput, WorkerError> {
     );
     let session = super::start()?;
     let transaction = match pinned {
-        Some(pinned) => table.transact_pre_pinned(&request, pinned).await,
+        Some(pinned) => Box::pin(table.transact_pre_pinned(&request, pinned)).await,
         None => table.transact(&request).await,
     };
     let probe = session.finish()?;

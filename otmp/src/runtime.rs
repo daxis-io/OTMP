@@ -837,16 +837,15 @@ impl<S: ObjectStore> Table<S> {
                 }
             }
         }
-        let result = self
-            .publish_append_transaction(
-                request,
-                &staged,
-                logical_hash,
-                table_id,
-                base_tip,
-                base_version,
-            )
-            .await;
+        let result = Box::pin(self.publish_append_transaction(
+            request,
+            &staged,
+            logical_hash,
+            table_id,
+            base_tip,
+            base_version,
+        ))
+        .await;
         if result.is_err() {
             cleanup(&self.store, &staged).await;
         }
@@ -872,14 +871,14 @@ impl<S: ObjectStore> Table<S> {
         validate_staged(request, staged, table_id)?;
         validate_request_for_write(request, &base).await?;
         let base_tip = base.reader.ref_row(&request.target_ref).await?;
-        self.publish_append_transaction(
+        Box::pin(self.publish_append_transaction(
             request,
             staged,
             logical_hash,
             table_id,
             base_tip,
             base.reader.head.table_version.0,
-        )
+        ))
         .await
     }
 
